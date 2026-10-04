@@ -1,6 +1,8 @@
 """ECR collector: when images were pushed, whether a tag exists, and scan findings."""
 from __future__ import annotations
 
+from typing import Any
+
 from triage.collectors import Collector
 from triage.collectors.common import in_window, parse_iso, was_not_found
 from triage.context import CollectContext
@@ -100,7 +102,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     images.sort(key=lambda image: parse_iso(image.get("imagePushedAt")) or epoch, reverse=True)
     for image in images[: 1 if image_id else MAX_RECENT_IMAGES]:
         _add_image(ctx, repository, image)
-    if not image_id and len(images) >= int(MAX_ITEMS):
+    if not image_id and (reply or {}).get("NextToken"):
         ctx.evidence.add(
             kind=DERIVED, resource=resource,
             summary=(

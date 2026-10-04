@@ -165,11 +165,22 @@ def test_newest_of_many_images_is_found_even_when_listed_last(config_data, tmp_p
     assert not with_text(ctx, "more images")
 
 
-def test_a_full_page_of_images_is_reported_as_possibly_incomplete(config_data, tmp_path):
+def test_a_truncated_page_of_images_is_reported_as_possibly_incomplete(config_data, tmp_path):
     images = [image(tags=(f"t{n}",), pushed="2026-09-01T08:00:00+00:00") for n in range(1000)]
-    ctx, _, _ = run(config_data, tmp_path, {"ecr describe-images": {"imageDetails": images}})
+    ctx, _, _ = run(config_data, tmp_path, {"ecr describe-images": {"imageDetails": images, "NextToken": "abc"}})
     derived = [f for f in ctx.evidence.facts if f.kind == "derived"]
     assert len(derived) == 1 and "more images" in derived[0].summary and "1000" in derived[0].summary
+
+
+def test_exactly_a_thousand_images_without_a_next_token_is_complete(config_data, tmp_path):
+    images = [image(tags=(f"t{n}",), pushed="2026-09-01T08:00:00+00:00") for n in range(1000)]
+    ctx, _, _ = run(config_data, tmp_path, {"ecr describe-images": {"imageDetails": images}})
+    assert not with_text(ctx, "more images")
+
+
+def test_a_next_token_alone_marks_the_list_as_incomplete(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, {"ecr describe-images": {"imageDetails": [image()], "NextToken": "abc"}})
+    assert len(with_text(ctx, "more images")) == 1
 
 
 def test_not_found_names_the_region(config_data, tmp_path):
