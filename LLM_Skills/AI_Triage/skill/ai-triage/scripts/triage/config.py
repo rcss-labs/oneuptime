@@ -15,6 +15,7 @@ REGION_RE = re.compile(r"[a-z]{2}(-[a-z]+)+-\d")
 SIMPLE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 # One index name or one trailing-star pattern: no commas, no remote clusters, no bare stars.
 # An EKS cluster name is the real AWS name, which may hold upper-case letters and underscores.
+MAX_EKS_CLUSTER_NAME_LENGTH = 100
 EKS_CLUSTER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 INDEX_PATTERN_RE = re.compile(r"[a-z0-9][a-z0-9._-]{2,}\*?")
 PROFILE_PREFIX = "triage-"
@@ -158,12 +159,19 @@ def _check_triage_name(value: str, where: str, errors: list[str]) -> None:
         errors.append(f"{where}: must start with '{PROFILE_PREFIX}' and use only lower-case letters, digits, and dashes")
 
 
+def _string_names_only(section: str, raw: dict[Any, Any], errors: list[str]) -> dict[str, Any]:
+    """Drop entries whose key YAML read as a boolean, null, or number, and report them once."""
+    if any(not isinstance(key, str) for key in raw):
+        errors.append(f"{section}: every name must be a string; quote it")
+    return {key: body for key, body in raw.items() if isinstance(key, str)}
+
+
 def _parse_accounts(raw: dict[str, Any], errors: list[str]) -> dict[str, Account]:
     accounts: dict[str, Account] = {}
     if not raw:
         errors.append("accounts: at least one account is required")
     seen_profiles: set[str] = set()
-    for alias, body in raw.items():
+    for alias, body in _string_names_only("accounts", raw, errors).items():
         where = f"accounts.{alias}"
         _check_name(str(alias), where, errors)
         if not isinstance(body, dict):
@@ -191,7 +199,7 @@ def _parse_accounts(raw: dict[str, Any], errors: list[str]) -> dict[str, Account
 
 def _parse_opensearch(raw: dict[str, Any], accounts: dict[str, Account], errors: list[str]) -> dict[str, OpenSearchCluster]:
     clusters: dict[str, OpenSearchCluster] = {}
-    for name, body in raw.items():
+    for name, body in _string_names_only("opensearch_clusters", raw, errors).items():
         where = f"opensearch_clusters.{name}"
         _check_name(str(name), where, errors)
         if not isinstance(body, dict):
@@ -229,9 +237,11 @@ def _parse_opensearch(raw: dict[str, Any], accounts: dict[str, Account], errors:
 
 def _parse_eks(raw: dict[str, Any], accounts: dict[str, Account], errors: list[str]) -> dict[str, EksCluster]:
     clusters: dict[str, EksCluster] = {}
-    for name, body in raw.items():
+    for name, body in _string_names_only("eks_clusters", raw, errors).items():
         where = f"eks_clusters.{name}"
-        if EKS_CLUSTER_NAME_RE.fullmatch(str(name)) is None:
+        if len(name) > MAX_EKS_CLUSTER_NAME_LENGTH:
+            errors.append(f"{where}: name must be at most {MAX_EKS_CLUSTER_NAME_LENGTH} characters")
+        elif EKS_CLUSTER_NAME_RE.fullmatch(name) is None:
             errors.append(f"{where}: name must be an EKS cluster name: letters, digits, dashes, and underscores, starting with a letter or digit")
         if not isinstance(body, dict):
             errors.append(f"{where}: must be a mapping")

@@ -266,3 +266,33 @@ def test_profile_and_context_errors_state_the_whole_rule(config_data):
     rule = "must start with 'triage-' and use only lower-case letters, digits, and dashes"
     assert any("profile" in e and rule in e for e in errors)
     assert any("context" in e and rule in e for e in errors)
+
+
+@pytest.mark.parametrize("section", ["accounts", "opensearch_clusters", "eks_clusters"])
+@pytest.mark.parametrize("key", [True, None, 123, 1.5])
+def test_non_string_names_are_rejected(config_data, section, key):
+    only = next(iter(config_data[section].values()))
+    config_data[section][key] = dict(only)
+    assert f"{section}: every name must be a string; quote it" in errors_for(config_data)
+
+
+def test_non_string_names_are_read_from_yaml_the_way_yaml_reads_them(tmp_path):
+    path = tmp_path / "triage-config.yaml"
+    path.write_text(
+        "oneuptime: {url: 'https://oneuptime.example.com'}\n"
+        "accounts: {prod: {account_id: '111111111111', profile: triage-prod, regions: [eu-west-1]}}\n"
+        "eks_clusters: {yes: {account: prod, region: eu-west-1, context: triage-x}, null: {account: prod, region: eu-west-1, context: triage-y}}\n"
+        "confluence: {space_key: OPS, parent_page_id: '1'}\n"
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path)
+    assert "eks_clusters: every name must be a string; quote it" in excinfo.value.errors
+
+
+def test_eks_cluster_name_is_at_most_one_hundred_characters(config_data):
+    cluster = config_data["eks_clusters"].pop("platform-prod")
+    config_data["eks_clusters"]["a" * 100] = cluster
+    assert "a" * 100 in parse_config(config_data).eks_clusters
+    del config_data["eks_clusters"]["a" * 100]
+    config_data["eks_clusters"]["a" * 101] = cluster
+    assert any("at most 100 characters" in e for e in errors_for(config_data))
