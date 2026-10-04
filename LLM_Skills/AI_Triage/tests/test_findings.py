@@ -344,3 +344,55 @@ def test_evidence_file_with_malformed_facts_is_reported_unreadable(case_dir, fac
     result = check(case_dir, [finding()])
     assert len(result["valid"]) == 1
     assert any("bad-prod-main-eu-west-1.json" in warning and "unreadable" in warning for warning in result["warnings"])
+
+
+def _fact_with_data(tmp_path, data, summary="Security group has 3 rules"):
+    evidence = Evidence("vpc", "prod-main", "eu-west-1", WINDOW)
+    evidence.add(kind=INCIDENT_TIME, resource="sg", summary=summary, time="2026-10-04T10:41:00Z", data=data)
+    evidence.write(tmp_path)
+    return tmp_path
+
+
+DATA = {"changes": ["image changed", "cpu changed", "tcp 5432 from sg-0bbb2222 was added"],
+        "nested": {"deep": [{"note": "listener port moved to 8443"}]}, "count": 4242, "keyname": "x"}
+
+
+def test_excerpt_found_only_in_a_data_list_entry_is_accepted_with_matched_text(tmp_path):
+    result = check(_fact_with_data(tmp_path, DATA), [finding(fact_ids=["vpc-0001"], excerpt="tcp 5432 from sg-0bbb2222")])
+    assert result["rejected"] == []
+    assert result["valid"][0]["matched_text"] == "tcp 5432 from sg-0bbb2222 was added"
+
+
+def test_excerpt_found_only_in_a_nested_dict_is_accepted(tmp_path):
+    result = check(_fact_with_data(tmp_path, DATA), [finding(fact_ids=["vpc-0001"], excerpt="listener port moved")])
+    assert result["rejected"] == []
+
+
+def test_excerpt_spanning_two_list_entries_is_refused(tmp_path):
+    result = check(_fact_with_data(tmp_path, DATA), [finding(fact_ids=["vpc-0001"], excerpt="cpu changed tcp 5432 from sg-0bbb2222")])
+    assert any("not found" in reason for reason in reasons_of(result))
+
+
+def test_a_number_in_data_quoted_as_text_is_refused(tmp_path):
+    assert check(_fact_with_data(tmp_path, DATA), [finding(fact_ids=["vpc-0001"], excerpt="4242 4242 4242")])["rejected"] != []
+    assert check(_fact_with_data(tmp_path, {"count": 998877665}), [finding(fact_ids=["vpc-0001"], excerpt="998877665")])["rejected"] != []
+
+
+def test_a_data_key_name_quoted_is_refused(tmp_path):
+    result = check(_fact_with_data(tmp_path, {"securityGroupRules": ["a"]}), [finding(fact_ids=["vpc-0001"], excerpt="securityGroupRules")])
+    assert result["rejected"] != []
+
+
+def test_matched_text_is_cut_to_500_characters(tmp_path):
+    long_text = "needle " + "x" * 800
+    result = check(_fact_with_data(tmp_path, {"rows": [long_text]}), [finding(fact_ids=["vpc-0001"], excerpt="needle xxxxxxx")])
+    assert len(result["valid"][0]["matched_text"]) == 500
+
+
+def test_provenance_uses_the_fact_where_the_excerpt_was_found_in_data(tmp_path):
+    add_evidence(tmp_path, collector="rds", facts=[(CURRENT, "CPU is at 99% right now", "")])
+    evidence = Evidence("vpc", "prod-main", "eu-west-1", WINDOW)
+    evidence.add(kind=INCIDENT_TIME, resource="sg", summary="rules", time="2026-10-04T10:41:00Z", data={"rules": ["tcp 5432 open"]})
+    evidence.write(tmp_path)
+    ok = check(tmp_path, [finding(fact_ids=["rds-0001", "vpc-0001"], excerpt="tcp 5432 open")])
+    assert ok["rejected"] == []

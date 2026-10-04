@@ -11,6 +11,7 @@ from triage.window import WindowError, parse_time
 
 CHECKED_NAME = "checked.json"
 MIN_EXCERPT = 12
+MAX_MATCHED_TEXT = 500
 MIN_WHOLE_VALUE = 3
 PROVENANCES = ("incident_time", "current", "inferred")
 CONFIDENCES = ("high", "medium", "low")
@@ -99,34 +100,38 @@ def _field_problems(finding: dict) -> list[str]:
     return problems
 
 
-def _whole_values(fact: dict) -> set[str]:
-    """Every whole string value of a fact's summary, excerpt and data, whitespace collapsed."""
-    values = {_collapse(str(fact.get("summary") or "")), _collapse(str(fact.get("excerpt") or ""))}
+def quotable_strings(fact: dict) -> list[str]:
+    """The text a finding may quote: summary, excerpt, and every string in data (never keys or numbers)."""
+    strings = [_collapse(str(fact.get("summary") or "")), _collapse(str(fact.get("excerpt") or ""))]
     pending = [fact.get("data")]
     while pending:
-        item = pending.pop()
+        item = pending.pop(0)
         if isinstance(item, str):
-            values.add(_collapse(item))
+            strings.append(_collapse(item))
         elif isinstance(item, dict):
             pending.extend(item.values())
         elif isinstance(item, list):
             pending.extend(item)
-    return values
+    return strings
 
 
-def _contains_excerpt(fact: dict, needle: str) -> bool:
-    """A long excerpt must appear in the summary or excerpt; a short one must equal a whole value."""
-    if len(needle) >= MIN_EXCERPT:
-        return any(needle in _collapse(str(fact.get(field) or "")) for field in ("summary", "excerpt"))
-    return len(needle) >= MIN_WHOLE_VALUE and needle in _whole_values(fact)
+def _matched_string(fact: dict, needle: str) -> str | None:
+    """The quotable string holding the excerpt. A short excerpt must equal a whole string."""
+    for text in quotable_strings(fact):
+        if len(needle) >= MIN_EXCERPT:
+            if needle in text:
+                return text
+        elif len(needle) >= MIN_WHOLE_VALUE and needle == text:
+            return text
+    return None
 
 
-def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str], dict[str, dict]]:
+def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str], dict[str, dict], str]:
     """Problems with the cited facts and the excerpt, plus the cited facts that exist by qualified id."""
     problems: list[str] = []
     cited: dict[str, dict] = {}
     if not isinstance(finding.get("fact_ids"), list) or not all(isinstance(item, str) for item in finding["fact_ids"]):
-        return problems, cited
+        return problems, cited, ""
     for fact_id in finding["fact_ids"]:
         key, problem = _resolve_citation(fact_id, facts)
         if problem:
@@ -135,9 +140,14 @@ def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str]
             cited[key] = facts[key]
     excerpt = finding.get("excerpt")
     matching: list[dict] = []
+    matched_text = ""
     if isinstance(excerpt, str):
         needle = _collapse(excerpt)
-        matching = [fact for fact in cited.values() if needle and _contains_excerpt(fact, needle)]
+        for fact in cited.values():
+            text = _matched_string(fact, needle) if needle else None
+            if text is not None:
+                matching.append(fact)
+                matched_text = matched_text or text[:MAX_MATCHED_TEXT]
         if not needle:
             problems.append("excerpt is empty")
         elif not matching and len(needle) < MIN_EXCERPT:
@@ -153,14 +163,14 @@ def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str]
         problems.append(f"provenance is {provenance} but no cited fact containing the excerpt has kind {required_kind}")
     elif required_kind and finding["fact_ids"] and not matching and not any(fact.get("kind") == required_kind for fact in cited.values()):
         problems.append(f"provenance is {provenance} but no cited fact has kind {required_kind}")
-    return problems, cited
+    return problems, cited, matched_text
 
 
-def _finding_problems(finding: object, analyst: str, facts: dict[str, dict], seen_ids: set[str]) -> tuple[list[str], dict[str, dict]]:
+def _finding_problems(finding: object, analyst: str, facts: dict[str, dict], seen_ids: set[str]) -> tuple[list[str], dict[str, dict], str]:
     if not isinstance(finding, dict):
-        return ["finding is not an object"], {}
+        return ["finding is not an object"], {}, ""
     problems = _field_problems(finding)
-    citation_problems, cited = _citation_problems(finding, facts)
+    citation_problems, cited, matched_text = _citation_problems(finding, facts)
     problems += citation_problems
     finding_id = finding.get("id")
     if isinstance(finding_id, str) and finding_id:
@@ -173,7 +183,7 @@ def _finding_problems(finding: object, analyst: str, facts: dict[str, dict], see
             parse_time(finding["time"])
         except WindowError:
             problems.append(f"time {finding['time']!r} cannot be parsed")
-    return problems, cited
+    return problems, cited, matched_text
 
 
 def _read_finding_file(path: Path, case_dir: Path) -> tuple[dict | None, str]:
@@ -209,7 +219,7 @@ def check_findings(case_dir: Path) -> dict:
             result["unreadable"].append({"file": f"findings/{path.name}", "reason": reason})
             continue
         for finding in data["findings"]:
-            problems, cited = _finding_problems(finding, analyst, facts, seen_ids)
+            problems, cited, matched_text = _finding_problems(finding, analyst, facts, seen_ids)
             finding_id = finding.get("id") if isinstance(finding, dict) else None
             if problems:
                 result["rejected"].append({"analyst": analyst, "id": finding_id, "reasons": problems})
@@ -219,6 +229,7 @@ def check_findings(case_dir: Path) -> dict:
             stored = redactor.value({**finding, "analyst": analyst})
             stored["fact_ids"] = list(cited)
             stored["fact_summaries"] = {key: fact.get("summary", "") for key, fact in cited.items()}
+            stored["matched_text"] = matched_text
             result["valid"].append(stored)
         if isinstance(data.get("checked"), list):
             result["checked"][analyst] = [redactor.text(item) for item in data["checked"] if isinstance(item, str)]
