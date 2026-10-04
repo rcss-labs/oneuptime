@@ -164,7 +164,7 @@ def test_no_error_log_in_the_window_is_stated_and_no_other_file_is_read(config_d
     ctx, aws = run(config_data, tmp_path, log_answers(files, "PANIC: out of memory"))
     assert aws.called("rds", "download-db-log-file-portion") == []
     fact = by_summary(ctx, "No error log")[0]
-    assert fact.kind == "derived" and "orders-db" in fact.summary and fact.command
+    assert fact.kind == "derived" and "among the 1 files listed" in fact.summary and fact.command
 
 
 def test_empty_listing_states_no_error_log(config_data, tmp_path):
@@ -184,12 +184,99 @@ def test_a_file_that_ends_exactly_at_the_window_start_is_not_read(config_data, t
     assert downloaded(aws) == ["error/postgresql.log.2026-10-04-10"]
 
 
-def test_a_file_without_an_hour_in_its_name_covers_the_hour_before_it_was_last_written(config_data, tmp_path):
-    early = {"LogFileName": "error/early.log", "LastWritten": WINDOW_START_MILLIS + 60_000, "Size": 1}
-    active = {"LogFileName": "error/active.log", "LastWritten": WINDOW_START_MILLIS + 7_200_000 + 600_000, "Size": 1}
-    later = {"LogFileName": "error/later.log", "LastWritten": WINDOW_START_MILLIS + 7_200_000 + 9_000_000, "Size": 1}
-    _, aws = run(config_data, tmp_path, log_answers([early, active, later], ""))
-    assert downloaded(aws) == ["error/early.log", "error/active.log"]
+class PagedListing(FakeAws):
+    """Serves describe-db-log-files page by page, following --starting-token like the CLI pagination does."""
+
+    def __init__(self, answers, pages):
+        super().__init__(answers)
+        self.pages = pages
+        self.tokens = []
+
+    def __call__(self, argv, timeout):
+        if argv[1:3] == ["rds", "describe-db-log-files"]:
+            token = argv[argv.index("--starting-token") + 1] if "--starting-token" in argv else None
+            self.tokens.append(token)
+            self.answers["rds describe-db-log-files"] = self.pages[len(self.tokens) - 1]
+        return super().__call__(argv, timeout)
+
+
+def plain_file(name, minutes_after_start):
+    return {"LogFileName": name, "LastWritten": WINDOW_START_MILLIS + minutes_after_start * 60_000, "Size": 1}
+
+
+def test_at_most_six_files_are_read_the_cover_file_first_then_the_newest(config_data, tmp_path):
+    files = [plain_file(f"error/a{n}.log", n) for n in range(1, 9)]
+    ctx, aws = run(config_data, tmp_path, log_answers(files, ""))
+    assert downloaded(aws) == ["error/a1.log", "error/a4.log", "error/a5.log", "error/a6.log", "error/a7.log", "error/a8.log"]
+    fact = by_summary(ctx, "were not read")[0]
+    assert fact.kind == "derived" and "error/a2.log" in fact.summary and "error/a3.log" in fact.summary and "a8" not in fact.summary
+
+
+def test_the_cover_file_and_the_one_before_it_are_chosen_before_newer_files(config_data, tmp_path):
+    before = {"LogFileName": "error/postgresql.log.2026-10-04-09", "LastWritten": WINDOW_START_MILLIS + 30 * 60_000, "Size": 1}
+    files = [before, hourly(10), hourly(11)] + [plain_file(f"error/z{n}.log", 180 + n) for n in range(1, 6)]
+    ctx, aws = run(config_data, tmp_path, log_answers(files, ""))
+    read = downloaded(aws)
+    assert len(read) == 6
+    assert "error/postgresql.log.2026-10-04-10" in read and "error/postgresql.log.2026-10-04-09" in read
+    assert "error/postgresql.log.2026-10-04-11" in by_summary(ctx, "were not read")[0].summary
+
+
+def test_every_page_of_the_listing_is_followed(config_data, tmp_path):
+    pages = [{"DescribeDBLogFiles": [hourly(10)], "NextToken": "t1"}, {"DescribeDBLogFiles": [hourly(11)]}]
+    fake = PagedListing(healthy_answers(), pages)
+    ctx, aws = run(config_data, tmp_path, healthy_answers(), fake=fake)
+    assert fake.tokens == [None, "t1"]
+    assert downloaded(aws) == ["error/postgresql.log.2026-10-04-10", "error/postgresql.log.2026-10-04-11"]
+    assert by_summary(ctx, "listing was cut") == []
+    assert_read_only(ctx, aws)
+
+
+def test_a_listing_that_is_still_cut_after_five_pages_says_so(config_data, tmp_path):
+    pages = [{"DescribeDBLogFiles": [plain_file(f"error/p{n}.log", n)], "NextToken": f"t{n}"} for n in range(1, 8)]
+    fake = PagedListing(healthy_answers(), pages)
+    ctx, _ = run(config_data, tmp_path, healthy_answers(), fake=fake)
+    assert len(fake.tokens) == 5
+    assert by_summary(ctx, "listing was cut after 5 pages")
+
+
+def test_a_daily_rotated_file_written_during_the_window_is_read(config_data, tmp_path):
+    daily = {"LogFileName": "error/postgresql.log.2026-10-04-00", "LastWritten": WINDOW_START_MILLIS + 6 * 3_600_000, "Size": 1}
+    ctx, aws = run(config_data, tmp_path, log_answers([daily], "2026-10-04 10:30:00 UTC::@:[1]:ERROR:  onset"))
+    assert downloaded(aws) == ["error/postgresql.log.2026-10-04-00"]
+    assert by_summary(ctx, "Database log line")
+    assert by_summary(ctx, "No error log") == []
+
+
+def test_a_date_only_name_covers_that_day_and_an_old_date_does_not(config_data, tmp_path):
+    today = {"LogFileName": "error/postgresql.log.2026-10-04", "LastWritten": WINDOW_START_MILLIS + 3_600_000, "Size": 1}
+    old = {"LogFileName": "error/postgresql.log.2026-10-02", "LastWritten": WINDOW_START_MILLIS - 3_600_000, "Size": 1}
+    _, aws = run(config_data, tmp_path, log_answers([today, old], ""))
+    assert downloaded(aws) == ["error/postgresql.log.2026-10-04"]
+
+
+def test_sql_server_error_log_and_its_error_lines(config_data, tmp_path):
+    files = [{"LogFileName": "log/ERROR", "LastWritten": WINDOW_START_MILLIS + 6 * 3_600_000, "Size": 1}]
+    line = "2026-10-04 10:30:00.12 Logon       Error: 18456, Severity: 14, State: 8."
+    ctx, aws = run(config_data, tmp_path, log_answers(files, line + "\n2026-10-04 10:31:00.12 Server      Started"))
+    assert downloaded(aws) == ["log/ERROR"]
+    facts = [f for f in ctx.evidence.facts if "Error: 18456" in f.excerpt]
+    assert len(facts) == 1 and "Severity: 14, State: 8" in facts[0].excerpt and "Started" not in ctx.evidence.to_json()
+
+
+def test_the_empty_case_names_the_listing_size_and_never_claims_more_than_it_knows(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, log_answers([hourly(9)], ""))
+    assert by_summary(ctx, "No error log file overlapping the window was found among the 1 files listed")
+    assert by_summary(ctx, "listing was cut") == []
+    pages = [{"DescribeDBLogFiles": [plain_file(f"error/o{n}.log", -60)], "NextToken": f"t{n}"} for n in range(1, 8)]
+    ctx, _ = run(config_data, tmp_path, healthy_answers(), fake=PagedListing(healthy_answers(), pages))
+    fact = by_summary(ctx, "No error log file overlapping")[0]
+    assert "5 files listed" in fact.summary and "listing was cut after 5 pages" in fact.summary
+
+
+def test_log_line_facts_say_which_portion_was_read(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, log_answers([hourly(10)], "2026-10-04 10:30:00 UTC::@:[1]:ERROR:  onset"))
+    assert "last 200 lines" in by_summary(ctx, "Database log line")[0].summary
 
 
 def test_no_line_in_the_window_is_stated_with_the_files_that_were_read(config_data, tmp_path):

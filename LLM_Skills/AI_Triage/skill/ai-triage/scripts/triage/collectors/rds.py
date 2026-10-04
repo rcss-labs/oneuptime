@@ -27,11 +27,14 @@ INSTANCE_NOT_FOUND = ("DBInstanceNotFound", "DBInstanceNotFoundFault")
 CLUSTER_NOT_FOUND = ("DBClusterNotFound", "DBClusterNotFoundFault")
 LOG_LINES_TO_READ = "200"
 TOP_WAIT_EVENTS = 5
-PROBLEM_LINE = re.compile(r"ERROR|FATAL|PANIC|(?i:deadlock)")
+PROBLEM_LINE = re.compile(r"ERROR|FATAL|PANIC|(?i:deadlock)|\bError:")
 MASK = "<value>"
-MAX_LOG_FILES_READ = 3
+MAX_LOG_FILES_READ = 6
+MAX_LISTING_PAGES = 5
 LEADING_TIMESTAMP = re.compile(r"\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?")
 FILE_HOUR = re.compile(r"(\d{4}-\d{2}-\d{2})[-.](\d{2})(?!\d)")
+FILE_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+EARLIEST = datetime.min.replace(tzinfo=timezone.utc)
 DOLLAR_TAG = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
 PHONE_SHAPE = re.compile(r"\+?\d+(?:[\s._()-]+\d{2,}){2,}")
 LONG_DIGITS = re.compile(r"\d{3,}")
@@ -202,21 +205,40 @@ def _error_files(files: list[dict]) -> list[dict]:
 
 
 def _file_span(file: dict) -> tuple[datetime, datetime]:
-    """The hour a log file covers: from its name when it carries one, else the hour before it was last written."""
-    match = FILE_HOUR.search(file.get("LogFileName", ""))
-    if match:
-        begin = parse_iso(f"{match.group(1)}T{match.group(2)}:00:00Z")
-        if begin is not None:
-            return begin, begin + timedelta(hours=1)
+    """When a log file may hold lines: from the hour or date in its name (else unknown) to its last write."""
+    name = file.get("LogFileName", "")
     written = datetime.fromtimestamp(file.get("LastWritten", 0) / 1000, tz=timezone.utc)
-    return written - timedelta(hours=1), written
+    hour, day = FILE_HOUR.search(name), FILE_DATE.search(name)
+    if hour and parse_iso(f"{hour.group(1)}T{hour.group(2)}:00:00Z"):
+        begin = parse_iso(f"{hour.group(1)}T{hour.group(2)}:00:00Z")
+        return begin, max(begin + timedelta(hours=1), written)
+    if day and parse_iso(f"{day.group(1)}T00:00:00Z"):
+        begin = parse_iso(f"{day.group(1)}T00:00:00Z")
+        return begin, max(begin + timedelta(days=1), written)
+    return EARLIEST, written
 
 
-def _files_overlapping_window(files: list[dict], window) -> list[dict]:
-    """Files whose hour overlaps the window, whose end is exclusive; the newest few, oldest first."""
-    overlapping = [f for f in files if _file_span(f)[0] < window.end and _file_span(f)[1] > window.start]
-    overlapping.sort(key=lambda f: f.get("LastWritten", 0))
-    return overlapping[-MAX_LOG_FILES_READ:]
+def _overlapping_files(files: list[dict], window) -> list[dict]:
+    """Files that may hold lines inside the window (its end is exclusive), oldest first."""
+    spans = {f["LogFileName"]: _file_span(f) for f in files}
+    inside = [f for f in files if spans[f["LogFileName"]][0] < window.end and spans[f["LogFileName"]][1] > window.start]
+    return sorted(inside, key=lambda f: (spans[f["LogFileName"]][0], f.get("LastWritten", 0)))
+
+
+def _choose_files(overlapping: list[dict], window) -> list[dict]:
+    """At most MAX_LOG_FILES_READ files: the one covering the incident start, the one before it, then the newest."""
+    if not overlapping:
+        return []
+    started = [f for f in overlapping if _file_span(f)[0] <= window.start]
+    latest_begin = max((_file_span(f)[0] for f in started), default=None)
+    cover = min((f for f in started if _file_span(f)[0] == latest_begin), key=lambda f: f.get("LastWritten", 0)) if started else overlapping[0]
+    chosen = [cover]
+    position = overlapping.index(cover)
+    if position > 0:
+        chosen.append(overlapping[position - 1])
+    newest = sorted((f for f in overlapping if f not in chosen), key=lambda f: f.get("LastWritten", 0), reverse=True)
+    chosen += newest[:MAX_LOG_FILES_READ - len(chosen)]
+    return sorted(chosen, key=lambda f: overlapping.index(f))
 
 
 def _line_time(line: str) -> datetime | None:
@@ -224,20 +246,52 @@ def _line_time(line: str) -> datetime | None:
     return parse_iso(f"{match.group(1)}T{match.group(2)}Z") if match else None
 
 
+def _list_error_files(ctx: CollectContext, name: str) -> tuple[list[dict], bool, int] | None:
+    """Every error log file written since the window start, whether the listing was cut, and how many files were listed."""
+    files: list[dict] = []
+    token = None
+    for page in range(MAX_LISTING_PAGES):
+        args = [
+            "--db-instance-identifier", name, "--filename-contains", "error",
+            "--file-last-written", str(ctx.window.epoch_millis()[0]), "--max-items", MAX_LOG_FILES,
+        ]
+        if token:
+            args += ["--starting-token", token]
+        listing = ctx.aws("rds", "describe-db-log-files", args)
+        if listing is None:
+            return None if page == 0 else (_error_files(files), True, len(files))
+        files += listing.get("DescribeDBLogFiles", [])
+        token = listing.get("NextToken")
+        if not token:
+            return _error_files(files), False, len(files)
+    return _error_files(files), True, len(files)
+
+
 def _add_log_lines(ctx: CollectContext, name: str) -> None:
-    listing = ctx.aws("rds", "describe-db-log-files", [
-        "--db-instance-identifier", name, "--filename-contains", "error",
-        "--file-last-written", str(ctx.window.epoch_millis()[0]), "--max-items", MAX_LOG_FILES,
-    ])
-    if listing is None:
+    listed = _list_error_files(ctx, name)
+    if listed is None:
         return
-    files = _files_overlapping_window(_error_files(listing.get("DescribeDBLogFiles", [])), ctx.window)
+    all_files, cut, count = listed
+    overlapping = _overlapping_files(all_files, ctx.window)
+    files = _choose_files(overlapping, ctx.window)
+    cut_note = f", but the listing was cut after {MAX_LISTING_PAGES} pages, so later files could not be checked" if cut else ""
     if not files:
         ctx.evidence.add(
             kind=DERIVED, resource=f"db/{name}", command=ctx.last_command,
-            summary=f"No error log of {name} was written in the window",
+            summary=f"No error log file overlapping the window was found among the {count} files listed{cut_note}",
         )
         return
+    if cut:
+        ctx.evidence.add(
+            kind=DERIVED, resource=f"db/{name}", command=ctx.last_command,
+            summary=f"The listing was cut after {MAX_LISTING_PAGES} pages, so later error log files could not be checked",
+        )
+    skipped = [f["LogFileName"] for f in overlapping if f not in files]
+    if skipped:
+        ctx.evidence.add(
+            kind=DERIVED, resource=f"db/{name}", command=ctx.last_command,
+            summary=f"Error log files overlapping the window that were not read: {', '.join(skipped)}",
+        )
     inside, read_names, command = [], [], ctx.last_command
     for file in files:
         file_name = file.get("LogFileName", "")
@@ -263,7 +317,7 @@ def _add_log_lines(ctx: CollectContext, name: str) -> None:
     for moment, file_name, line in inside[-MAX_LOG_LINES:]:
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=f"db/{name}", time=moment, command=command,
-            summary=f"Database log line in {file_name}", excerpt=_mask_values(line.strip()),
+            summary=f"Database log line in {file_name} (last {LOG_LINES_TO_READ} lines of the file read)", excerpt=_mask_values(line.strip()),
         )
     if not inside and read_names:
         ctx.evidence.add(
