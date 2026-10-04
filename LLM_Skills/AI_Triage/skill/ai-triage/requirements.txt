@@ -1,1 +1,2 @@
 PyYAML==6.0.3
+typesafe-sdk==0.7.2
