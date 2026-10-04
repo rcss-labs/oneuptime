@@ -7,9 +7,9 @@ from datetime import datetime, timedelta, timezone
 
 SAME_TIME_SECONDS = 30
 _TIME_RE = re.compile(
-    r"^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})[T ](?P<hour>\d{2}):(?P<minute>\d{2})"
-    r"(?::(?P<second>\d{2})(?:\.(?P<fraction>\d{1,9}))?)?"
-    r"(?P<zone>[Zz]|[+-]\d{2}(?::?\d{2})?)?$"
+    r"^(?P<year>[0-9]{4})-(?P<month>[0-9]{2})-(?P<day>[0-9]{2})[T ](?P<hour>[0-9]{2}):(?P<minute>[0-9]{2})"
+    r"(?::(?P<second>[0-9]{2})(?:\.(?P<fraction>[0-9]{1,9}))?)?"
+    r"(?P<zone>[Zz]|[+-][0-9]{2}(?::?[0-9]{2})?)?$"
 )
 
 
@@ -69,7 +69,10 @@ def _zone(zone: str) -> timezone:
         return timezone.utc
     sign = -1 if zone[0] == "-" else 1
     digits = zone[1:].replace(":", "")
-    offset = timedelta(hours=int(digits[:2]), minutes=int(digits[2:4] or 0))
+    minutes = int(digits[2:4] or 0)
+    if minutes > 59:
+        raise ValueError("offset minutes must be at most 59")
+    offset = timedelta(hours=int(digits[:2]), minutes=minutes)
     return timezone(sign * offset)
 
 

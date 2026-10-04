@@ -223,3 +223,16 @@ def test_parse_time_does_not_depend_on_newer_fromisoformat(monkeypatch):
 
     monkeypatch.setattr(window_module, "datetime", Boom)
     assert parse_time("2026-10-04T10:00:00.5+0000") == at(10) + timedelta(milliseconds=500)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["２０２６-10-04T10:00:00Z", "2026-10-04T10:00:00+0099", "2026-10-04T10:00:00+00:60", "2026-10-04T10:00:00+２０"],
+)
+def test_parse_time_rejects_non_ascii_digits_and_bad_offset_minutes(text):
+    with pytest.raises(WindowError):
+        parse_time(text)
+
+
+def test_parse_time_accepts_offset_minutes_up_to_59():
+    assert parse_time("2026-10-04T10:00:00+0059") == at(9, 1)

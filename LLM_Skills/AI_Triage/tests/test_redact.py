@@ -1,4 +1,6 @@
 import copy
+import json
+import time
 
 from triage.redact import AuditHit, Redactor, audit_text
 
@@ -45,7 +47,7 @@ def test_rule3_basic_token_replaced_scheme_kept():
 
 def test_rule3_json_authorization_header():
     out = Redactor().text('{"Authorization": "Bearer ' + TOKEN + '"}')
-    assert out == '{"Authorization": "Bearer <SECRET-1>"}'
+    assert json.loads(out) == {"Authorization": "Bearer <SECRET-1>"}
 
 
 def test_rule4_equals_form():
@@ -60,7 +62,7 @@ def test_rule4_colon_form():
 
 def test_rule4_json_form_keeps_quotes():
     out = Redactor().text('{"clientSecret": "' + PASSWORD + '", "region": "eu-west-1"}')
-    assert out == '{"clientSecret": "<SECRET-1>", "region": "eu-west-1"}'
+    assert json.loads(out) == {"clientSecret": "<SECRET-1>", "region": "eu-west-1"}
 
 
 def test_rule4_json_form_without_space_and_with_spaces_in_value():
@@ -351,7 +353,7 @@ SECRET_CASES = [
     ("mysql-pwd", f"MYSQL_PWD={PW}", "MYSQL_PWD=<SECRET-1>"),
     ("pgpassword", f"PGPASSWORD={PW}", "PGPASSWORD=<SECRET-1>"),
     ("passphrase", f"passphrase={PW}", "passphrase=<SECRET-1>"),
-    ("camel-access-key", '{"accessKey": "' + PW + '"}', '{"accessKey": "<SECRET-1>"}'),
+    ("camel-access-key", '{"accessKey": "' + PW + '"}', '{"accessKey":"<SECRET-1>"}'),
     ("camel-private-key", f"privateKey={PW}", "privateKey=<SECRET-1>"),
     ("client-secret", f"client_secret={PW}", "client_secret=<SECRET-1>"),
     (
@@ -647,8 +649,8 @@ def test_comma_separated_url_and_email_not_hidden():
 
 
 def test_json_with_url_and_email_fields_keeps_structure():
-    source = '{"endpoint":"https://h.example.com:443","creds":"u:p","contact":"x@example.com"}'
-    assert Redactor().text(source) == '{"endpoint":"https://h.example.com:443","creds":"u:p","contact":"<EMAIL-1>"}'
+    source = '{"endpoint":"https://h.example.com:443","owner":"u:p","contact":"x@example.com"}'
+    assert Redactor().text(source) == '{"endpoint":"https://h.example.com:443","owner":"u:p","contact":"<EMAIL-1>"}'
     source = '{"url":"https://api.example.com","email":"alice@example.com"}'
     assert Redactor().text(source) == '{"url":"https://api.example.com","email":"<EMAIL-1>"}'
 
@@ -759,3 +761,284 @@ def test_text_and_audit_are_fast_on_hostile_and_realistic_500kb_inputs(name):
 
 def test_audit_docstring_says_secrets_only():
     assert "secrets only" in (redact_module.audit_text.__doc__ or "")
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3: structured data inside text, webhooks, commands, bounds
+# ---------------------------------------------------------------------------
+import ast
+
+TASK_DEFINITION = {"containerDefinitions": [{"name": "api", "environment": [{"name": "DB_PASSWORD", "value": PW}]}]}
+SLACK_HOOK = "https://hooks.slack.com/services/" + "T0" + "ABC/B0" + "DEF/" + "x" * 8 + "Yz12"
+DISCORD_HOOK = "https://discord.com/api/webhooks/" + "1234567890/" + "abcDEF" + "ghiJKL"
+OFFICE_HOOK = "https://example.webhook.office.com/webhookb2/" + "aaaa-bbbb@cccc/IncomingWebhook/dddd"
+WHSEC = "whsec" + "_" + "abcdefghijklmnop"
+
+
+def test_pretty_printed_json_after_a_log_prefix_is_redacted_structurally():
+    message = "[INFO] registering task definition: " + json.dumps(TASK_DEFINITION, indent=4)
+    for out in (Redactor().value({"message": message})["message"], Redactor().text(message)):
+        assert PW not in out
+        assert out.startswith("[INFO] registering task definition: ")
+        assert '"name":"api"' in out.replace(" ", "").replace("\n", "")
+        assert "DB_PASSWORD" in out and "<SECRET-1>" in out
+
+
+def test_python_repr_dict_in_a_log_line():
+    out = Redactor().text("[INFO] event: " + repr(TASK_DEFINITION))
+    assert PW not in out
+    assert out.startswith("[INFO] event: ")
+    parsed = ast.literal_eval(out[len("[INFO] event: "):])
+    assert parsed["containerDefinitions"][0]["environment"] == [{"name": "DB_PASSWORD", "value": "<SECRET-1>"}]
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ('{"name":"DB_PASSWORD","type":"PLAINTEXT","value":"' + PW + '"}', '{"name":"DB_PASSWORD","type":"PLAINTEXT","value":"<SECRET-1>"}'),
+        (
+            '{"Name":"/prod/db/password","Type":"SecureString","Value":"' + PW + '"}',
+            '{"Name":"/prod/db/password","Type":"SecureString","Value":"<SECRET-1>"}',
+        ),
+    ],
+)
+def test_name_value_with_a_key_between_them(source, expected):
+    assert Redactor().text(source) == expected
+    assert audit_text(source) != [] and audit_text(expected) == []
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (  # unclosed, so it cannot be parsed: the widened pattern rule is the fallback
+            '{"name": "DB_PASSWORD",\n  "type": "PLAINTEXT",\n  "value": "' + PW + '"',
+            '{"name": "DB_PASSWORD",\n  "type": "PLAINTEXT",\n  "value": "<SECRET-1>"',
+        ),
+        (
+            "{'name': 'DB_PASSWORD', 'value': '" + PW + "'",
+            "{'name': 'DB_PASSWORD', 'value': '<SECRET-1>'",
+        ),
+        (
+            '{"name" : "DB_PASSWORD" ,\n "value" : "' + PW + '"',
+            '{"name" : "DB_PASSWORD" ,\n "value" : "<SECRET-1>"',
+        ),
+    ],
+)
+def test_name_value_pattern_fallback_for_spans_that_do_not_parse(source, expected):
+    assert Redactor().text(source) == expected
+    assert audit_text(source) != [] and audit_text(expected) == []
+
+
+def test_text_around_a_structured_span_still_goes_through_the_rules():
+    out = Redactor().text(f'password={PW} {{"a": 1}} contact a@example.com')
+    assert out == 'password=<SECRET-1> {"a": 1} contact <EMAIL-1>'
+
+
+def test_unchanged_structured_span_is_left_exactly_as_written():
+    source = 'x {"a": 1,  "b": [1, 2]} y {"a":1,"a":2}'
+    assert Redactor().text(source) == source
+
+
+def test_deeply_nested_input_never_raises_and_is_not_walked_structurally():
+    redactor = Redactor()
+    assert isinstance(redactor.value({"m": "[" * 500 + "]" * 500}), (str, dict))
+    assert isinstance(redactor.text("[" * 500 + "]" * 500), str)
+    nested = '{"a":' * 500 + f'"password={PW}"' + "}" * 500
+    out = redactor.text(nested)
+    assert PW not in out
+    assert PW not in repr(redactor.value({"m": nested}))
+    deep_dict: dict = {}
+    cursor = deep_dict
+    for _ in range(400):
+        cursor["x"] = {}
+        cursor = cursor["x"]
+    assert redactor.value(deep_dict) is not None
+
+
+def test_structure_nested_exactly_fifty_deep_is_walked_and_fifty_one_is_not():
+    def nest(levels: int) -> str:
+        return '{"a":' * levels + f'{{"password":"{PW}"}}' + "}" * levels
+
+    walked = Redactor().text(nest(48))
+    assert PW not in walked
+    too_deep = Redactor().text(nest(60))
+    assert PW not in too_deep  # the pattern rules still catch it
+
+
+def test_text_is_fast_and_safe_on_hostile_bracket_input():
+    for source in ["[" * 250_000 + "]" * 250_000, '["a"]' * 100_000, '{"a":' * 100_000, "[" * 500_000, "{[" * 200_000]:
+        started = time.perf_counter()
+        assert isinstance(Redactor().text(source), str)
+        assert time.perf_counter() - started < 2
+
+
+def test_oversize_span_is_skipped_but_its_children_are_not():
+    inner = '{"name":"DB_PASSWORD","value":"' + PW + '"}'
+    source = "[" + "1," * 110_000 + inner + "]"
+    out = Redactor().text(source)
+    assert PW not in out
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (f"url {SLACK_HOOK} sent", "url https://hooks.slack.com/<SECRET-1> sent"),
+        (f"url {DISCORD_HOOK} sent", "url https://discord.com/<SECRET-1> sent"),
+        (f"url {OFFICE_HOOK} sent", "url https://example.webhook.office.com/<SECRET-1> sent"),
+        (f"signing {WHSEC} ok", "signing <SECRET-1> ok"),
+    ],
+)
+def test_webhook_urls_and_signing_secrets(source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    assert audit_text(source) != [] and audit_text(out) == []
+
+
+def test_lambda_environment_with_slack_webhook():
+    out = Redactor().value({"Environment": {"Variables": {"SLACK_WEBHOOK": SLACK_HOOK, "STAGE": "prod"}}})
+    assert SLACK_HOOK[-12:] not in repr(out)
+    assert out["Environment"]["Variables"]["STAGE"] == "prod"
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (f'- name: "DB_PASSWORD"\n  value: |\n    {PW}\n    more\n- name: A\n  value: b', '- name: "DB_PASSWORD"\n  value: |\n    <SECRET-1>\n- name: A\n  value: b'),
+        (f"-   name: DB_PASSWORD\n    value: {PW}", "-   name: DB_PASSWORD\n    value: <SECRET-1>"),
+        (f"  name: DB_PASSWORD\n  value: >\n    {PW}\n", "  name: DB_PASSWORD\n  value: >\n    <SECRET-1>\n"),
+    ],
+)
+def test_yaml_name_value_block_scalar_and_extra_dash_spaces(source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    assert audit_text(source) != [] and audit_text(out) == []
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (f"curl -u admin:{PW} https://x.example.com", "curl -u admin:<SECRET-1> https://x.example.com"),
+        (f"curl -uadmin:{PW} https://x.example.com", "curl -uadmin:<SECRET-1> https://x.example.com"),
+        (f"curl --user admin:{PW} https://x.example.com", "curl --user admin:<SECRET-1> https://x.example.com"),
+        (f"curl --user=admin:{PW} https://x.example.com", "curl --user=admin:<SECRET-1> https://x.example.com"),
+        ("curl --user admin:123456 https://x.example.com", "curl --user admin:<SECRET-1> https://x.example.com"),
+        (f"wget --user=admin:{PW} https://x.example.com", "wget --user=admin:<SECRET-1> https://x.example.com"),
+        (f"mysql -u root -p{PW} -h db.example.com", "mysql -u root -p<SECRET-1> -h db.example.com"),
+        (f"mysqladmin ping -uroot -p{PW}", "mysqladmin ping -uroot -p<SECRET-1>"),
+        (f"mysqldump -p{PW} app", "mysqldump -p<SECRET-1> app"),
+        (f"docker login -u AWS -p {PW} 111111111111.dkr.ecr.eu-west-1.amazonaws.com", "docker login -u AWS -p <SECRET-1> 111111111111.dkr.ecr.eu-west-1.amazonaws.com"),
+        (f"sshpass -p {PW} ssh host.example.com", "sshpass -p <SECRET-1> ssh host.example.com"),
+        (f"redis-cli -h cache.example.com -a {PW} ping", "redis-cli -h cache.example.com -a <SECRET-1> ping"),
+    ],
+)
+def test_command_line_credentials(source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    assert audit_text(source) != [] and audit_text(out) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "docker run --user app:app img",
+        "curl -sS https://x.example.com; docker run -u app:grp img",
+        "docker run -p 8080:80 img",
+        "mysql -h db.example.com -P 3306 -u root",
+        "docker login -u AWS registry.example.com",
+    ],
+)
+def test_command_lines_without_credentials_are_kept(source):
+    assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize(
+    "items, expected",
+    [
+        (["curl", "-u", "admin:" + PW, "https://x.example.com"], ["curl", "-u", "admin:<SECRET-1>", "https://x.example.com"]),
+        (["curl", "--user=admin:" + PW, "https://x"], ["curl", "--user=admin:<SECRET-1>", "https://x"]),
+        (["curl", "-uadmin:" + PW], ["curl", "-uadmin:<SECRET-1>"]),
+        (["docker", "login", "-p", PW], ["docker", "login", "-p", "<SECRET-1>"]),
+        (["mysqladmin", "ping", "-uroot", "-p" + PW], ["mysqladmin", "ping", "-uroot", "-p<SECRET-1>"]),
+        (["sshpass", "-p", PW, "ssh", "h"], ["sshpass", "-p", "<SECRET-1>", "ssh", "h"]),
+        (["redis-cli", "-a", PW, "ping"], ["redis-cli", "-a", "<SECRET-1>", "ping"]),
+        (["docker", "run", "-u", "app:grp", "img"], ["docker", "run", "-u", "app:grp", "img"]),
+    ],
+)
+def test_exec_form_command_lists(items, expected):
+    assert Redactor().value({"command": items}) == {"command": expected}
+
+
+@pytest.mark.parametrize("key", ["pw", "DB_PW", "MYSQL_ROOT_PW", "creds", "CREDS", "cred", "db_creds"])
+def test_pw_cred_creds_are_secret_words(key):
+    from triage.redact import looks_secret_key
+
+    assert looks_secret_key(key)
+
+
+def test_creds_value_redacted_in_text():
+    assert Redactor().text(f"CREDS=admin:{PW} ok") == "CREDS=<SECRET-1> ok"
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("Received Authorization header: Basic " + B64, "Received Authorization header: Basic <SECRET-1>"),
+        ("Authorization header Basic " + B64 + " rejected", "Authorization header Basic <SECRET-1> rejected"),
+    ],
+)
+def test_authorization_word_followed_by_scheme_and_token(source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    assert audit_text(source) != [] and audit_text(out) == []
+
+
+def test_authorization_word_in_ordinary_prose_is_kept():
+    source = "Authorization failed for user bob after 3 attempts"
+    assert Redactor().text(source) == source
+
+
+def test_mysql_access_denied_is_unchanged():
+    source = "Access denied for user 'root'@'10.0.1.5' (using password: YES)"
+    assert Redactor().text(source) == source
+    assert Redactor().text("(using password: NO)") == "(using password: NO)"
+
+
+@pytest.mark.parametrize("value", ["YES", "NO", "yes", "no", "true", "false", "null", "None"])
+def test_literal_values_are_kept(value):
+    source = f"password: {value}"
+    assert Redactor().text(source) == source
+
+
+def test_unquoted_colon_value_stops_at_close_paren_and_comma():
+    assert Redactor().text(f"login failed (token: {PW}), retrying") == "login failed (token: <SECRET-1>), retrying"
+    assert Redactor().text(f"password: {PW}, user: bob") == "password: <SECRET-1>, user: bob"
+
+
+def test_header_value_stops_at_quote_and_url_userinfo_keeps_host():
+    out = Redactor().text('curl -H "X-Api-Key: ' + PW + '" https://api.example.com/v1')
+    assert out == 'curl -H "X-Api-Key: <SECRET-1>" https://api.example.com/v1'
+    token = "ghs" + "_" + "a1B2c3D4e5F6g7"
+    out = Redactor().text(f"git clone https://x-access-token:{token}@github.com/org/repo")
+    assert out == "git clone https://x-access-token:<SECRET-1>@github.com/org/repo"
+
+
+def test_more_reference_suffixes_and_units_children_are_kept():
+    obj = {
+        "TokenValidityUnits": {"AccessToken": "minutes", "RefreshToken": "days"},
+        "serviceAccountToken": {"audience": "sts.example.com"},
+    }
+    assert Redactor().value(obj) == obj
+    source = "password_changed_at=2026-10-01 auth_failures=7 token_attempts=3 token_errors=0"
+    assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize("shape", ["pwd=x;", 'pwd="x";', "password: x ", "token=a&", "a:b "])
+def test_single_line_inputs_are_linear(shape):
+    source = shape * (1_000_000 // len(shape))
+    started = time.perf_counter()
+    Redactor().text(source)
+    text_seconds = time.perf_counter() - started
+    started = time.perf_counter()
+    audit_text(source)
+    audit_seconds = time.perf_counter() - started
+    assert text_seconds < 2 and audit_seconds < 2, (text_seconds, audit_seconds)
