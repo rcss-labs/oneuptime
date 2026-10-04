@@ -8,8 +8,8 @@ from triage.case import create_case, load_case, parse_incident
 from triage.config import parse_config
 from triage.evidence import CURRENT, INCIDENT_TIME, Evidence
 from triage.findings import check_findings, load_facts, valid_findings
+from triage.compose import LABEL_ORDER
 from triage.report import (
-    LABEL_ORDER,
     REQUIRED_HEADINGS,
     build_work_order,
     coverage_from_evidence,
@@ -58,9 +58,11 @@ VALID_REPORT = {
     ],
     "hypotheses": [
         {"id": "H1", "statement": "Containers are killed for memory", "prediction": "Tasks stop with code 137",
-         "test": "Read the stopped task reasons", "result": "confirmed", "finding_ids": ["compute-1"]},
+         "test": "Read the stopped task reasons", "result": "confirmed", "finding_ids": ["compute-1"],
+         "cause": "C1"},
         {"id": "H2", "statement": "The load balancer is unhealthy", "prediction": "Targets are unhealthy | all zones",
-         "test": "Read target health", "result": "rejected", "finding_ids": ["compute-2"]},
+         "test": "Read target health", "result": "rejected", "finding_ids": ["compute-2"],
+         "cause": "C2"},
     ],
     "actions": [
         {"id": "A1", "type": "mitigation", "label": "recommended", "cause": "C1",
@@ -94,9 +96,51 @@ UNRESOLVED_REPORT = {
     "causes": [{"id": "C1", "statement": "Memory limit", "label": "candidate",
                 "supporting": ["compute-1"], "contradicting": []}],
     "hypotheses": [{"id": "H1", "statement": "Memory", "prediction": "p", "test": "t",
-                    "result": "inconclusive", "finding_ids": ["compute-1"]}],
+                    "result": "inconclusive", "finding_ids": ["compute-1"], "cause": None}],
     "actions": [{**copy.deepcopy(VALID_REPORT["actions"][0]), "label": "candidate"}],
 }
+
+
+GATES_PASSED = {"evidence": True, "no_contradiction": True, "rank": True, "timing": True,
+                "symptom_fit": True, "scope": True}
+SUMMARY = {
+    "typesafe": "available",
+    "model": "jev-test",
+    "thresholds": {"evidence_supports": 0.8, "cause_top_probability": 0.6, "ask_engineer_below": 0.5},
+    "uncalibrated": True,
+    "judged": True,
+    "findings": {
+        "compute-1": {"relation": "supports", "confidence": 0.93, "verdict": "verified"},
+        "compute-2": {"relation": "supports", "confidence": 0.9, "verdict": "verified"},
+    },
+    "causes": {
+        "C1": {"label": "confirmed", "gates": GATES_PASSED, "rank_probability": 0.72,
+               "symptom_fit": 0.83, "scope": "matches", "reasons": []},
+        "C2": {"label": "candidate", "gates": {**GATES_PASSED, "rank": False, "timing": False},
+               "rank_probability": 0.14, "symptom_fit": 0.5, "scope": "broader",
+               "reasons": ["Ranking did not pick this cause in both orderings",
+                           "No supporting finding has a time"]},
+    },
+    "actions": {
+        "A1": {"label": "recommended", "target": "addresses_cause", "target_confidence": 0.9,
+               "specific": 0.88, "reasons": []},
+        "A2": {"label": "candidate", "target": "partly_addresses_cause", "target_confidence": 0.7,
+               "specific": 0.5, "reasons": ["The cause is labelled candidate, not confirmed"]},
+    },
+    "ask_engineer": ["The ranking changed with the order of the options"],
+    "adhoc": [{"id": "deploy_trigger", "reason": "No fixed question covers deploy timing"}],
+}
+
+
+def store_summary(case_dir, summary):
+    (case_dir / "judgments").mkdir(exist_ok=True)
+    (case_dir / "judgments" / "summary.json").write_text(json.dumps(summary))
+
+
+def summary_with(**changes):
+    summary = copy.deepcopy(SUMMARY)
+    summary.update(changes)
+    return summary
 
 
 def add_evidence(case_dir, facts, errors=(), truncated=False, collector="ecs"):
@@ -139,6 +183,7 @@ def case_dir(config, tmp_path):
          "excerpt": "x", "provenance": "current", "confidence": "low"},
     ])
     check_findings(path)
+    store_summary(path, SUMMARY)
     return path
 
 
@@ -344,7 +389,7 @@ def test_recommended_action_needs_confirmed_cause(case, findings, config):
 
 def test_typesafe_value_is_checked(case, findings, config):
     report = mutated(VALID_REPORT, lambda r: r["coverage"].update(typesafe="down"))
-    assert_problem(problems_for(report, case, findings, config), "coverage.typesafe", "unavailable: ")
+    assert_problem(problems_for(report, case, findings, config), "coverage.typesafe", "available")
 
 
 def test_unavailable_typesafe_forbids_confirmed(case, findings, config):
@@ -352,7 +397,9 @@ def test_unavailable_typesafe_forbids_confirmed(case, findings, config):
     assert_problem(problems_for(report, case, findings, config), "TypeSafe", "confirmed")
 
 
-def test_unavailable_typesafe_is_fine_without_confirmed(case, findings, config):
+def test_unavailable_typesafe_is_fine_without_confirmed(case_dir, case, findings, config):
+    store_summary(case_dir, summary_with(typesafe="unavailable: no key", causes={
+        "C1": {**SUMMARY["causes"]["C1"], "label": "probable"}, "C2": SUMMARY["causes"]["C2"]}))
     def downgrade(report):
         report["coverage"]["typesafe"] = "unavailable: no key"
         report["causes"][0]["label"] = "probable"
@@ -372,12 +419,11 @@ def test_all_problems_are_reported_together(case, findings, config):
 # judgments summary cap
 
 def write_summary(case_dir, causes):
-    (case_dir / "judgments").mkdir(exist_ok=True)
-    (case_dir / "judgments" / "summary.json").write_text(json.dumps({"causes": causes}))
+    store_summary(case_dir, summary_with(causes=causes))
 
 
-def test_no_summary_means_no_cap(case, findings, config):
-    assert problems_for(VALID_REPORT, case, findings, config) == []
+def remove_summary(case_dir):
+    (case_dir / "judgments" / "summary.json").unlink()
 
 
 def test_cause_cannot_exceed_the_judged_label(case_dir, case, findings, config):
@@ -581,11 +627,24 @@ def test_timeline_findings_and_causes(case_dir, case):
         assert needle in causes
 
 
-def test_hypotheses_without_a_matching_cause_are_not_lost(case_dir, case):
-    report = mutated(VALID_REPORT, lambda r: r["hypotheses"].append(
-        {"id": "H9", "statement": "Unrelated", "prediction": "p9", "test": "t9", "result": "inconclusive",
-         "finding_ids": []}))
-    assert "H9" in section(render(report, case_dir, case), "## 5. Ranked causes")
+def test_hypotheses_are_shown_under_their_cause_and_the_rest_under_other(case_dir, case):
+    def add(report):
+        report["hypotheses"].append({"id": "H9", "statement": "Unrelated", "prediction": "p9", "test": "t9",
+                                     "result": "inconclusive", "finding_ids": ["compute-1"], "cause": None})
+        report["hypotheses"].append({"id": "H8", "statement": "No key", "prediction": "p8", "test": "t8",
+                                     "result": "inconclusive", "finding_ids": ["compute-1"]})
+    causes = section(render(mutated(VALID_REPORT, add), case_dir, case), "## 5. Ranked causes")
+    first, second = causes.index("### 1."), causes.index("### 2.")
+    other = causes.index("### Other hypotheses")
+    assert first < causes.index("H1") < second < causes.index("H2") < other
+    assert causes.index("H9") > other and causes.index("H8") > other
+
+
+def test_a_hypothesis_does_not_attach_to_a_cause_by_shared_findings(case_dir, case):
+    def share(report):
+        report["hypotheses"][0]["cause"] = None
+    causes = section(render(mutated(VALID_REPORT, share), case_dir, case), "## 5. Ranked causes")
+    assert causes.index("H1") > causes.index("### Other hypotheses")
 
 
 def test_mitigations_come_before_permanent_fixes_and_candidates_are_marked(case_dir, case):
@@ -612,6 +671,7 @@ def test_coverage_section_order_and_content(case_dir, case):
 
 
 def test_typesafe_unavailability_is_stated(case_dir, case):
+    store_summary(case_dir, summary_with(typesafe="unavailable: no key", model=None))
     report = mutated(VALID_REPORT, lambda r: r["coverage"].update(typesafe="unavailable: no key"))
     assert "unavailable: no key" in section(render(report, case_dir, case), "## 7. Coverage notes")
 
@@ -666,3 +726,152 @@ def test_secret_never_appears_in_rendered_output(case_dir, case, findings, confi
     report = mutated(VALID_REPORT, lambda r: r["actions"][0].update(change=f"Use {leaked}"))
     assert_problem(problems_for(report, case, findings, config), "actions[0].change")
     assert secret_value() not in render(report, case_dir, case)
+
+
+# hypothesis cause key
+
+@pytest.mark.parametrize("value", [None, "C1", "C2"])
+def test_hypothesis_cause_may_be_null_a_cause_id_or_absent(case, findings, config, value):
+    report = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].update(cause=value))
+    assert problems_for(report, case, findings, config) == []
+    report = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].pop("cause"))
+    assert problems_for(report, case, findings, config) == []
+
+
+def test_hypothesis_cause_must_be_a_cause_id(case, findings, config):
+    report = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].update(cause="C9"))
+    assert_problem(problems_for(report, case, findings, config), "hypotheses[0].cause", "C9")
+    report = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].update(cause=3))
+    assert_problem(problems_for(report, case, findings, config), "hypotheses[0].cause", "text or null")
+
+
+# rules bound to the stored judgments
+
+def test_recommended_action_needs_the_summary_to_recommend_it(case_dir, case, findings, config):
+    actions = {**SUMMARY["actions"], "A1": {**SUMMARY["actions"]["A1"], "label": "candidate"}}
+    store_summary(case_dir, summary_with(actions=actions))
+    assert_problem(problems_for(VALID_REPORT, case, findings, config), "actions[0]", "A1", "recommended", "summary")
+
+
+def test_recommended_action_missing_from_the_summary_is_a_problem(case_dir, case, findings, config):
+    store_summary(case_dir, summary_with(actions={"A2": SUMMARY["actions"]["A2"]}))
+    assert_problem(problems_for(VALID_REPORT, case, findings, config), "actions[0]", "A1", "not in")
+
+
+def test_candidate_action_may_be_recommended_by_the_summary_without_a_problem(case_dir, case, findings, config):
+    actions = {**SUMMARY["actions"], "A2": {**SUMMARY["actions"]["A2"], "label": "recommended"}}
+    store_summary(case_dir, summary_with(actions=actions))
+    assert problems_for(VALID_REPORT, case, findings, config) == []
+
+
+def test_typesafe_must_equal_the_summary_value(case_dir, case, findings, config):
+    store_summary(case_dir, summary_with(typesafe="unavailable: the connection failed", causes={
+        "C1": {**SUMMARY["causes"]["C1"], "label": "probable"}}))
+    report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(label="probable"))
+    report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
+    assert_problem(problems_for(report, case, findings, config), "coverage.typesafe", "unavailable: the connection failed")
+    report["coverage"]["typesafe"] = "unavailable: the connection failed"
+    assert problems_for(report, case, findings, config) == []
+
+
+@pytest.mark.parametrize("verdict", ["contradicted", "unsupported"])
+def test_finding_judged_against_the_claim_cannot_support_a_cause(case_dir, case, findings, config, verdict):
+    judged = {**SUMMARY["findings"], "compute-2": {"relation": "contradicts", "confidence": 0.9, "verdict": verdict}}
+    store_summary(case_dir, summary_with(findings=judged))
+    def support(report):
+        report["causes"][1].update(supporting=["compute-2"], contradicting=[])
+    problems = problems_for(mutated(VALID_REPORT, support), case, findings, config)
+    assert_problem(problems, "causes[1].supporting", "compute-2", verdict)
+
+
+def test_a_contradicted_finding_may_still_be_listed_as_contradicting(case_dir, case, findings, config):
+    judged = {**SUMMARY["findings"], "compute-2": {"relation": "contradicts", "confidence": 0.9, "verdict": "contradicted"}}
+    store_summary(case_dir, summary_with(findings=judged))
+    assert problems_for(VALID_REPORT, case, findings, config) == []
+
+
+def test_without_a_summary_typesafe_must_be_unavailable(case_dir, case, findings, config):
+    remove_summary(case_dir)
+    problems = problems_for(VALID_REPORT, case, findings, config)
+    assert_problem(problems, "coverage.typesafe", "unavailable: ")
+    assert_problem(problems, "confirmed")
+    def downgrade(report):
+        report["coverage"]["typesafe"] = "unavailable: judging was not run"
+        report["causes"][0]["label"] = "probable"
+        report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
+    assert problems_for(mutated(VALID_REPORT, downgrade), case, findings, config) == []
+
+
+def test_a_summary_that_was_not_judged_counts_as_no_summary_for_the_rules(case_dir, case, findings, config):
+    store_summary(case_dir, summary_with(judged=False, causes={}, actions={}, findings={}))
+    problems = problems_for(VALID_REPORT, case, findings, config)
+    assert_problem(problems, "coverage.typesafe", "unavailable: ")
+    assert_problem(problems, "confirmed")
+    assert not any("judgments/summary.json" in problem for problem in problems)
+
+
+def test_a_summary_without_the_judged_flag_is_not_trusted(case_dir, case, findings, config):
+    summary = copy.deepcopy(SUMMARY)
+    del summary["judged"]
+    store_summary(case_dir, summary)
+    assert_problem(problems_for(VALID_REPORT, case, findings, config), "coverage.typesafe", "unavailable: ")
+
+
+# rendering with the judgments
+
+def test_findings_show_verdict_and_confidence_when_the_summary_has_them(case_dir, case):
+    findings = section(render(VALID_REPORT, case_dir, case), "## 4. Findings")
+    assert "verified" in findings and "0.93" in findings and "supports" in findings
+
+
+def test_causes_show_gates_reasons_probability_fit_and_scope(case_dir, case):
+    causes = section(render(VALID_REPORT, case_dir, case), "## 5. Ranked causes")
+    first, second = causes[:causes.index("### 2.")], causes[causes.index("### 2."):]
+    assert "evidence" in first and "Gates missed: none" in first
+    assert "0.72" in first and "0.83" in first and "matches" in first
+    assert "Gates missed: rank, timing" in second and "Gates passed: evidence, no_contradiction, symptom_fit, scope" in second
+    assert "Ranking did not pick this cause in both orderings" in second and "No supporting finding has a time" in second
+    assert "0.14" in second and "broader" in second
+
+
+def test_actions_show_target_answer_and_candidate_reasons(case_dir, case):
+    order = section(render(VALID_REPORT, case_dir, case), "## 6. Remediation work order")
+    first, second = order[:order.index("### A2")], order[order.index("### A2"):]
+    assert "addresses_cause" in first and "0.9" in first
+    assert "partly_addresses_cause" in second and "The cause is labelled candidate, not confirmed" in second
+
+
+def test_coverage_states_typesafe_engineer_questions_and_adhoc_entries(case_dir, case):
+    coverage = section(render(VALID_REPORT, case_dir, case), "## 7. Coverage notes")
+    assert "TypeSafe: available (model jev-test); thresholds are uncalibrated" in coverage
+    assert "The ranking changed with the order of the options" in coverage
+    assert "deploy_trigger" in coverage and "No fixed question covers deploy timing" in coverage
+
+
+def test_unavailable_summary_is_stated_with_its_reason_and_empty_gates_render(case_dir, case):
+    causes = {"C1": {"label": "probable", "gates": {}, "rank_probability": None, "symptom_fit": None,
+                     "scope": None, "reasons": ["TypeSafe was unavailable"]}}
+    store_summary(case_dir, summary_with(typesafe="unavailable: the connection failed", model=None,
+                                         findings={}, causes=causes, actions={}, ask_engineer=[], adhoc=[]))
+    report = mutated(VALID_REPORT, lambda r: r["coverage"].update(typesafe="unavailable: the connection failed"))
+    text = render(report, case_dir, case)
+    assert "TypeSafe: unavailable: the connection failed" in section(text, "## 7. Coverage notes")
+    assert "TypeSafe was unavailable" in section(text, "## 5. Ranked causes")
+
+
+def test_rendering_without_a_summary_still_works(case_dir, case):
+    remove_summary(case_dir)
+    report = mutated(VALID_REPORT, lambda r: r["coverage"].update(typesafe="unavailable: judging was not run"))
+    text = render(report, case_dir, case)
+    assert_headings(text)
+    assert "TypeSafe: unavailable: judging was not run" in section(text, "## 7. Coverage notes")
+    assert "Gates" not in text
+
+
+def test_adhoc_entries_of_an_unjudged_summary_are_still_rendered(case_dir, case):
+    store_summary(case_dir, summary_with(judged=False, causes={}, actions={}, findings={}, ask_engineer=[]))
+    report = mutated(VALID_REPORT, lambda r: r["coverage"].update(typesafe="unavailable: judging was not run"))
+    text = render(report, case_dir, case)
+    assert "No fixed question covers deploy timing" in section(text, "## 7. Coverage notes")
+    assert "Gates" not in text and "verified" not in text
+    assert "TypeSafe: unavailable: judging was not run" in section(text, "## 7. Coverage notes")

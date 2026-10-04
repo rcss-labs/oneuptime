@@ -10,12 +10,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from triage.compose import LABEL_ORDER, cap_label, number
 from triage.config import TriageConfig
 from triage.findings import evidence_documents, load_facts
 from triage.redact import Redactor, audit_text
 from triage.window import WindowError, format_time, parse_time
 
-LABEL_ORDER = ("candidate", "probable", "confirmed")
 STATUSES = ("cause_found", "unresolved")
 HYPOTHESIS_RESULTS = ("confirmed", "rejected", "inconclusive")
 ACTION_TYPES = ("mitigation", "permanent_fix")
@@ -146,6 +146,8 @@ def _check_shape(report: dict, problems: list[str]) -> dict[str, list[tuple[int,
             _text_field(hypothesis, key, where, problems)
         _choice_field(hypothesis, "result", HYPOTHESIS_RESULTS, where, problems)
         _string_list_field(hypothesis, "finding_ids", where, problems)
+        if hypothesis.get("cause") is not None and not isinstance(hypothesis["cause"], str):
+            problems.append(f"{where}.cause: must be text or null")
     actions = _object_items(report, "actions", problems)
     for index, action in actions:
         _check_action_shape(action, f"actions[{index}]", problems)
@@ -209,10 +211,6 @@ def _check_coverage_shape(coverage: dict, problems: list[str]) -> None:
 
 
 # --- consistency --------------------------------------------------------------------------
-
-def _strength(label: Any) -> int:
-    return LABEL_ORDER.index(label) if label in LABEL_ORDER else -1
-
 
 def _check_finding_ids(items: list[tuple[int, dict]], section: str, keys: tuple[str, ...],
                        findings: dict[str, dict], problems: list[str]) -> None:
@@ -284,6 +282,14 @@ def _check_actions(config: TriageConfig, parts: dict, findings: dict[str, dict],
             problems.append(f"{where}.finding_ids: needs at least one valid finding")
 
 
+def _check_hypothesis_causes(parts: dict, problems: list[str]) -> None:
+    cause_ids = {cause.get("id") for _, cause in parts["causes"]}
+    for index, hypothesis in parts["hypotheses"]:
+        cause = hypothesis.get("cause")
+        if isinstance(cause, str) and cause not in cause_ids:
+            problems.append(f"hypotheses[{index}].cause: {cause!r} is not a cause id")
+
+
 def _check_typesafe(report: dict, parts: dict, problems: list[str]) -> None:
     coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
     typesafe = coverage.get("typesafe")
@@ -293,25 +299,87 @@ def _check_typesafe(report: dict, parts: dict, problems: list[str]) -> None:
                 problems.append(f"causes[{index}]: TypeSafe was unavailable, so no cause may be labelled confirmed")
 
 
-def _check_judged_labels(case: dict, parts: dict, problems: list[str]) -> None:
+def load_summary(case: dict) -> tuple[dict | None, str | None]:
+    """The stored judgments summary, or None, plus a problem when the file exists but cannot be read."""
     path = Path(case.get("case_dir", "")) / "judgments" / SUMMARY_NAME
     if not path.is_file():
-        return
+        return None, None
     try:
-        judged = json.loads(path.read_text())["causes"]
-        if not isinstance(judged, dict):
-            raise TypeError
-    except (OSError, ValueError, KeyError, TypeError):
-        problems.append(f"judgments/{SUMMARY_NAME}: cannot be read as a judgments summary, so labels cannot be checked")
-        return
+        summary = json.loads(path.read_text())
+    except (OSError, ValueError):
+        summary = None
+    if not isinstance(summary, dict) or not isinstance(summary.get("causes"), dict):
+        return None, f"judgments/{SUMMARY_NAME}: cannot be read as a judgments summary, so labels cannot be checked"
+    return summary, None
+
+
+def _judged(summary: dict | None) -> dict | None:
+    """The summary when a judging run wrote it. One written only by ad hoc questions counts as none."""
+    return summary if summary is not None and summary.get("judged") is True else None
+
+
+def _check_causes_against_summary(summary: dict, parts: dict, problems: list[str]) -> None:
+    judged = summary["causes"]
     for index, cause in parts["causes"]:
         label, name = cause.get("label"), cause.get("id")
         entry = judged.get(name)
         if not isinstance(entry, dict):
-            if _strength(label) > 0:
+            if label in LABEL_ORDER and cap_label(label, "candidate") != label:
                 problems.append(f"causes[{index}] ({name}): not in judgments/{SUMMARY_NAME}, so at most candidate; labelled {label}")
-        elif _strength(label) > _strength(entry.get("label")):
-            problems.append(f"causes[{index}] ({name}): labelled {label}, stronger than the judged label {entry.get('label')}")
+        elif label in LABEL_ORDER and entry.get("label") in LABEL_ORDER and label != cap_label(label, entry["label"]):
+            problems.append(f"causes[{index}] ({name}): labelled {label}, stronger than the judged label {entry['label']}")
+
+
+def _check_actions_against_summary(summary: dict, parts: dict, problems: list[str]) -> None:
+    judged = summary.get("actions") if isinstance(summary.get("actions"), dict) else {}
+    for index, action in parts["actions"]:
+        if action.get("label") != "recommended":
+            continue
+        entry = judged.get(action.get("id"))
+        if not isinstance(entry, dict):
+            problems.append(f"actions[{index}] ({action.get('id')}): recommended, but it is not in judgments/{SUMMARY_NAME}")
+        elif entry.get("label") != "recommended":
+            problems.append(f"actions[{index}] ({action.get('id')}): recommended, but the summary labels it {entry.get('label')}")
+
+
+def _check_supporting_against_summary(summary: dict, parts: dict, problems: list[str]) -> None:
+    verdicts = summary.get("findings") if isinstance(summary.get("findings"), dict) else {}
+    for index, cause in parts["causes"]:
+        for finding_id in cause.get("supporting") if isinstance(cause.get("supporting"), list) else []:
+            verdict = (verdicts.get(finding_id) or {}).get("verdict") if isinstance(verdicts.get(finding_id), dict) else None
+            if verdict in ("contradicted", "unsupported"):
+                problems.append(f"causes[{index}].supporting: {finding_id} was judged {verdict}, so it cannot support a cause")
+
+
+def _check_typesafe_against_summary(report: dict, summary: dict | None, problems: list[str]) -> None:
+    coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
+    typesafe = coverage.get("typesafe")
+    if not isinstance(typesafe, str):
+        return
+    if summary is None:
+        if not typesafe.startswith(TYPESAFE_UNAVAILABLE_PREFIX):
+            problems.append(f"coverage.typesafe: no judging run is stored, so it must start with '{TYPESAFE_UNAVAILABLE_PREFIX}'")
+    elif typesafe != summary.get("typesafe"):
+        problems.append(f"coverage.typesafe: {typesafe!r} must equal the summary's value {summary.get('typesafe')!r}")
+
+
+def _check_judgments(report: dict, case: dict, parts: dict, problems: list[str]) -> None:
+    raw, unreadable = load_summary(case)
+    if unreadable:
+        problems.append(unreadable)
+        return
+    summary = _judged(raw)
+    _check_typesafe_against_summary(report, summary, problems)
+    coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
+    already_barred = str(coverage.get("typesafe")).startswith(TYPESAFE_UNAVAILABLE_PREFIX)
+    if summary is None and not already_barred:
+        for index, cause in parts["causes"]:
+            if cause.get("label") == "confirmed":
+                problems.append(f"causes[{index}]: no judging run is stored, so no cause may be labelled confirmed")
+    if summary is not None:
+        _check_causes_against_summary(summary, parts, problems)
+        _check_actions_against_summary(summary, parts, problems)
+        _check_supporting_against_summary(summary, parts, problems)
 
 
 def _walk_text(value: Any, path: str):
@@ -344,8 +412,9 @@ def validate_report(report: Any, case: dict, findings: dict[str, dict], config: 
     _check_causes(parts, findings, problems)
     _check_status(report, parts, problems)
     _check_actions(config, parts, findings, problems)
+    _check_hypothesis_causes(parts, problems)
     _check_typesafe(report, parts, problems)
-    _check_judged_labels(case, parts, problems)
+    _check_judgments(report, case, parts, problems)
     _check_secrets(report, problems)
     return problems
 
@@ -489,7 +558,17 @@ def _render_incident(case: dict) -> list[str]:
     return lines
 
 
-def _render_findings(findings: dict[str, dict], facts: dict[str, dict]) -> list[str]:
+def _finding_verdict_lines(finding_id: str, summary: dict | None) -> list[str]:
+    entry = ((summary or {}).get("findings") or {}).get(finding_id)
+    if not isinstance(entry, dict):
+        return []
+    confidence = entry.get("confidence")
+    detail = ", ".join(part for part in (
+        entry.get("relation"), f"confidence {number(confidence)}" if isinstance(confidence, (int, float)) else None) if part)
+    return [_field("TypeSafe verdict", f"{entry.get('verdict', '-')} ({detail})" if detail else entry.get("verdict"))]
+
+
+def _render_findings(findings: dict[str, dict], facts: dict[str, dict], summary: dict | None) -> list[str]:
     lines = ["## 4. Findings", ""]
     if not findings:
         return lines + ["None."]
@@ -502,6 +581,7 @@ def _render_findings(findings: dict[str, dict], facts: dict[str, dict]) -> list[
             lines += [f"**{finding['id']}**: {_inline(finding['claim'])}", "",
                       _field("Provenance", finding["provenance"]), _field("Confidence", finding["confidence"]),
                       _field("Cited facts", ", ".join(finding["fact_ids"]))]
+            lines += _finding_verdict_lines(finding["id"], summary)
             for fact_id in finding["fact_ids"]:
                 fact = facts.get(fact_id)
                 if fact is None:
@@ -522,27 +602,49 @@ def _hypothesis_table(hypotheses: list[dict]) -> list[str]:
     return lines
 
 
-def _render_causes(report: dict) -> list[str]:
+def _numeric(value: Any) -> str:
+    return number(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else "-"
+
+
+def _judgment_lines(cause_id: str, summary: dict | None) -> list[str]:
+    entry = ((summary or {}).get("causes") or {}).get(cause_id)
+    if not isinstance(entry, dict):
+        return []
+    gates = entry.get("gates") if isinstance(entry.get("gates"), dict) else {}
+    passed = [name for name, ok in gates.items() if ok]
+    missed = [name for name, ok in gates.items() if not ok]
+    lines = [_field("Gates passed", ", ".join(passed) or "none") if gates else _field("Gates", "none were evaluated"),
+             _field("Gates missed", ", ".join(missed) or "none") if gates else None,
+             _field("Ranking probability", _numeric(entry.get("rank_probability"))),
+             _field("Symptom fit", _numeric(entry.get("symptom_fit"))),
+             _field("Scope", entry.get("scope"))]
+    lines = [line for line in lines if line]
+    reasons = [str(reason) for reason in entry.get("reasons") or []]
+    if reasons:
+        lines += ["- Reasons:"] + [f"  - {_inline(reason)}" for reason in reasons]
+    return lines
+
+
+def _render_causes(report: dict, summary: dict | None) -> list[str]:
     lines = ["## 5. Ranked causes", ""]
     if not report["causes"]:
         return lines + ["None."]
-    claimed: set[str] = set()
     for rank, cause in enumerate(report["causes"], 1):
-        cited = set(cause["supporting"]) | set(cause["contradicting"])
-        tested = [h for h in report["hypotheses"] if cited & set(h["finding_ids"])]
-        claimed.update(h["id"] for h in tested)
+        tested = [h for h in report["hypotheses"] if h.get("cause") == cause["id"]]
         lines += [f"### {rank}. {cause['id']} ({cause['label']}): {_inline(cause['statement'])}", "",
                   _field("Supporting findings", ", ".join(cause["supporting"]) or "none"),
-                  _field("Contradicting findings", ", ".join(cause["contradicting"]) or "none"), ""]
-        lines += _hypothesis_table(tested) if tested else ["No hypothesis cites this cause's findings."]
+                  _field("Contradicting findings", ", ".join(cause["contradicting"]) or "none")]
+        lines += _judgment_lines(cause["id"], summary) + [""]
+        lines += _hypothesis_table(tested) if tested else ["No hypothesis tested this cause."]
         lines.append("")
-    others = [h for h in report["hypotheses"] if h["id"] not in claimed]
+    cause_ids = {cause["id"] for cause in report["causes"]}
+    others = [h for h in report["hypotheses"] if h.get("cause") not in cause_ids]
     if others:
         lines += ["### Other hypotheses", ""] + _hypothesis_table(others) + [""]
     return lines[:-1]
 
 
-def _render_action(action: dict) -> list[str]:
+def _render_action(action: dict, summary: dict | None) -> list[str]:
     target = action["target"]
     lines = [f"### {action['id']}: {_inline(action['title'])}", ""]
     if action["label"] == "candidate":
@@ -555,19 +657,28 @@ def _render_action(action: dict) -> list[str]:
               _field("Change", action["change"]), _field("Rationale", action["rationale"]),
               _field("Findings", ", ".join(action["finding_ids"])), _field("Risk", action["risk"]),
               _field("Blast radius", action["blast_radius"])]
+    entry = ((summary or {}).get("actions") or {}).get(action["id"])
+    if isinstance(entry, dict):
+        confidence = entry.get("target_confidence")
+        answer = entry.get("target")
+        if answer is not None:
+            lines.append(_field("Target answer", f"{answer} (confidence {_numeric(confidence)})"))
+        if action["label"] == "candidate" and entry.get("reasons"):
+            lines.append("- Reasons it is a candidate:")
+            lines += [f"  - {_inline(reason)}" for reason in entry["reasons"]]
     for key, label in (("preconditions", "Preconditions"), ("verification", "Verification"), ("rollback", "Rollback")):
         lines.append(f"- {label}:")
         lines += [f"  - {_inline(step)}" for step in action[key]] or ["  - None."]
     return lines
 
 
-def _render_actions(report: dict) -> list[str]:
+def _render_actions(report: dict, summary: dict | None) -> list[str]:
     lines = ["## 6. Remediation work order", ""]
     ordered = [a for kind in ACTION_TYPES for a in report["actions"] if a["type"] == kind]
     if not ordered:
         return lines + ["None."]
     for action in ordered:
-        lines += _render_action(action) + [""]
+        lines += _render_action(action, summary) + [""]
     return lines[:-1]
 
 
@@ -580,16 +691,29 @@ def _rejected_findings(case: dict) -> list[dict]:
     return [item for item in rejected or [] if isinstance(item, dict)]
 
 
-def _render_coverage(report: dict, case: dict, evidence_gaps: list[dict]) -> list[str]:
+def _typesafe_line(report: dict, summary: dict | None) -> str:
+    typesafe = summary.get("typesafe") if summary else report["coverage"]["typesafe"]
+    if typesafe != "available":
+        return f"TypeSafe: {_inline(typesafe)}"
+    if summary is None:
+        return "TypeSafe: available; no judgments are stored for this case"
+    return f"TypeSafe: available (model {_inline(summary.get('model') or 'unknown')}); thresholds are uncalibrated"
+
+
+def _render_coverage(report: dict, case: dict, evidence_gaps: list[dict], summary: dict | None,
+                     adhoc: list[dict]) -> list[str]:
     lines = ["## 7. Coverage notes", "", "**Not checked**", ""]
     lines += _bullets([f"{e['what']}: {e['why']}" for e in report["coverage"]["not_checked"]])
     lines += ["", "**Evidence errors**", ""]
     entries = [f"{gap['code']}: `{_inline(e['command'] or e['file'])}` ({_inline(e['message'])})"
                for gap in evidence_gaps for e in gap["entries"]]
     lines += _bullets(entries)
-    typesafe = report["coverage"]["typesafe"]
-    lines += ["", "**TypeSafe**", "", "TypeSafe was available." if typesafe == "available" else f"TypeSafe {_inline(typesafe)}",
-              "", "**Rejected findings**", ""]
+    asks = [str(item) for item in (summary or {}).get("ask_engineer") or []]
+    lines += ["", "**TypeSafe**", "", _typesafe_line(report, summary), "", "**Questions for the engineer**", ""]
+    lines += _bullets(asks)
+    lines += ["", "**Ad hoc questions**", ""]
+    lines += _bullets([f"{entry.get('id')}: {entry.get('reason')}" for entry in adhoc if isinstance(entry, dict)])
+    lines += ["", "**Rejected findings**", ""]
     lines += _bullets([f"{r.get('analyst', '?')} {r.get('id')}: {'; '.join(map(str, r.get('reasons', [])))}"
                        for r in _rejected_findings(case)])
     lines += ["", "**Open questions**", ""] + _bullets(report["open_questions"])
@@ -615,15 +739,18 @@ def render_report(report: dict, case: dict, findings: dict[str, dict], timeline_
 
     incident = case["incident"]
     facts = load_facts(Path(case["case_dir"]))
+    raw_summary, _ = load_summary(case)
+    summary = _judged(raw_summary)
+    adhoc = (raw_summary or {}).get("adhoc") or []
     blocks = [
         [f"{REQUIRED_HEADINGS[0]} {_inline(incident['number'])} {_inline(incident['title'])}"],
         _render_summary(report),
         _render_incident(case),
         ["## 3. Timeline", "", render_rows(timeline_rows) if timeline_rows else "None."],
-        _render_findings(findings, facts),
-        _render_causes(report),
-        _render_actions(report),
-        _render_coverage(report, case, evidence_gaps),
+        _render_findings(findings, facts, summary),
+        _render_causes(report, summary),
+        _render_actions(report, summary),
+        _render_coverage(report, case, evidence_gaps, summary, adhoc),
         _render_map_changes(report),
         _render_run(report, case, now),
     ]

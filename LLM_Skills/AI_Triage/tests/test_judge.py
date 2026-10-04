@@ -18,6 +18,7 @@ from triage.judge import (
     match_resource,
     prepare_state,
     rank_causes,
+    run_adhoc,
     run_judgments,
 )
 from triage.judge_client import JudgeReply, JudgeUnavailable
@@ -488,3 +489,47 @@ def test_locate_accepts_confidence_at_the_threshold(tmp_path, config):
 def test_locate_asks_when_typesafe_is_unavailable(tmp_path, config):
     result = locate(tmp_path, config, FakeJudge(fail_with="down"))
     assert result["decision"] == "ask" and result["confidence"] is None and result["probabilities"] == {}
+
+
+# the judged flag
+
+ADHOC_DOCUMENT = {
+    "id": "deploy_trigger", "reason": "No fixed question covers deploy timing", "state": {"deploy": "checkout-api:42"},
+    "question": {"type": "choice", "instructions": "Is `deploy` the likely trigger?",
+                 "criteria": {"yes": "The deploy is the likely trigger", "no": "The deploy is not the likely trigger"}},
+}
+ADHOC_ANSWER = {"deploy_trigger": {"type": "choice", "choice": "yes", "confidence": 0.8, "probabilities": {"yes": 0.8, "no": 0.2}}}
+
+
+def test_a_judging_run_marks_its_summary_judged(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    assert run(case_dir, config, FakeJudge(make_responder()))["judged"] is True
+
+
+def test_an_unavailable_judging_run_is_still_judged(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    assert run(case_dir, config, FakeJudge(fail_with="down"))["judged"] is True
+
+
+def test_adhoc_alone_writes_a_summary_that_is_not_judged(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    run_adhoc(case_dir, session_for(case_dir, config, FakeJudge(ADHOC_ANSWER)), config, ADHOC_DOCUMENT)
+    summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
+    assert summary["judged"] is False and summary["causes"] == {}
+
+
+def test_a_later_judging_run_keeps_the_adhoc_list_and_becomes_judged(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    run_adhoc(case_dir, session_for(case_dir, config, FakeJudge(ADHOC_ANSWER)), config, ADHOC_DOCUMENT)
+    summary = run(case_dir, config, FakeJudge(make_responder()))
+    assert summary["judged"] is True
+    assert summary["adhoc"] == [{"id": "deploy_trigger", "reason": "No fixed question covers deploy timing"}]
+    assert summary["causes"]["C1"]["label"] == "confirmed"
+    assert json.loads((case_dir / "judgments" / "summary.json").read_text())["adhoc"] == summary["adhoc"]
+
+
+def test_a_rerun_over_a_judged_summary_starts_with_no_adhoc_entries(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    run(case_dir, config, FakeJudge(make_responder()))
+    run_adhoc(case_dir, session_for(case_dir, config, FakeJudge(ADHOC_ANSWER)), config, ADHOC_DOCUMENT)
+    assert run(case_dir, config, FakeJudge(make_responder()))["adhoc"] == []

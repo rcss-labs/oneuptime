@@ -260,9 +260,21 @@ def _finding_order(causes: list[dict]) -> list[str]:
     return ordered
 
 
-def _base_summary(config: TriageConfig, typesafe: str, model: str | None) -> dict:
+def _base_summary(config: TriageConfig, typesafe: str, model: str | None, judged: bool = True) -> dict:
+    """`judged` is false only for the minimal summary that ad hoc questions create before any judging run."""
     return {"typesafe": typesafe, "model": model, "thresholds": dict(config.typesafe_thresholds), "uncalibrated": True,
-            "findings": {}, "causes": {}, "actions": {}, "ask_engineer": [], "adhoc": []}
+            "judged": judged, "findings": {}, "causes": {}, "actions": {}, "ask_engineer": [], "adhoc": []}
+
+
+def _minimal_adhoc_entries(case_dir: Path) -> list:
+    """The ad hoc list of a summary that only ad hoc questions wrote; empty when there is none."""
+    try:
+        summary = json.loads((Path(case_dir) / "judgments" / SUMMARY_NAME).read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(summary, dict) or summary.get("judged") is not False:
+        return []
+    return list(summary.get("adhoc") or [])
 
 
 def _draft_label(cause: dict) -> str:
@@ -374,6 +386,7 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
     case_dir = Path(case_dir)
     case = load_case(case_dir)
     report = load_report_draft(case_dir)
+    adhoc = _minimal_adhoc_entries(case_dir)
     findings = valid_findings(case_dir)
     session = JudgeSession(judge, JudgmentStore(case_dir), config, Redactor())
     causes, actions = report["causes"], report.get("actions", [])
@@ -387,6 +400,7 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
     else:
         summary = _compose_summary(config, report, findings, parse_time(case["incident_start"]), session.model,
                                    verdicts, cause_answers, rank, action_answers)
+    summary["adhoc"] = adhoc
     write_summary(case_dir, summary)
     return summary
 
@@ -429,7 +443,7 @@ def run_adhoc(case_dir: Path, session: JudgeSession, config: TriageConfig, docum
         except ValueError as error:
             raise JudgmentError([f"{path}: not valid JSON ({error})"]) from error
     else:
-        summary = _base_summary(config, "available", reply.model)
+        summary = _base_summary(config, "available", reply.model, judged=False)
     summary.setdefault("adhoc", []).append({"id": question_id, "reason": reason})
     write_summary(case_dir, summary)
     return {"id": question_id, "answer": reply.answers[question_id]}
