@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from triage.config import ConfigError, default_config_path, load_config
+from triage.fixtures import FixtureError, fixture_dir
 from triage.verify import EXPIRED, exit_code, render_table, verify_all
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -24,6 +25,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=default_config_path(SKILL_DIR), help="path to the config file")
     parser.add_argument("--account", action="append", default=[], metavar="ALIAS", help="check only this account; repeatable")
     args = parser.parse_args(argv)
+    try:
+        replaying = fixture_dir() is not None
+    except FixtureError as error:
+        print(error, file=sys.stderr)
+        return 2
+    if replaying:
+        print("verify_access is not available in replay mode", file=sys.stderr)
+        return 2
     try:
         config = load_config(args.config)
     except ConfigError as exc:

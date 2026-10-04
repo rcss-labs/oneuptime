@@ -244,3 +244,47 @@ def test_nothing_is_logged_when_the_log_variable_is_unset(tmp_path, monkeypatch)
     monkeypatch.delenv(LOG_ENV, raising=False)
     aws(FixtureRunner(tmp_path), "ecs", "list-clusters")
     assert not (tmp_path / "calls.log").exists()
+
+
+# fix round 1: entry shapes, one read per process, verify_access, preflight kubeconfig
+
+BAD_ENTRIES = [
+    ("aws.json", {"match": ["ecs", "list-clusters"], "error": {"stderr": "boom"}}, "entry 0"),
+    ("aws.json", {"match": ["ecs", "list-clusters"], "error": {"code": "x", "stderr": "boom"}}, "entry 0"),
+    ("aws.json", {"match": ["ecs", "list-clusters"], "error": {"code": 1}}, "entry 0"),
+    ("aws.json", {"match": ["ecs", "list-clusters"], "contains": "checkout"}, "entry 0"),
+    ("aws.json", {"match": "ecs list-clusters"}, "entry 0"),
+    ("kubectl.json", {"match": ["get", "pods"], "stdout": 5}, "entry 0"),
+    ("kubectl.json", {"match": ["get", "pods"], "error": {"code": 1}}, "entry 0"),
+    ("opensearch.json", {"path_contains": 7}, "entry 0"),
+    ("opensearch.json", {"path_contains": "x", "method": None}, "entry 0"),
+    ("opensearch.json", {"path_contains": "x", "status": "200"}, "entry 0"),
+]
+
+
+@pytest.mark.parametrize("name, entry, where", BAD_ENTRIES)
+def test_a_bad_entry_is_a_fixture_error_naming_the_file_and_entry(tmp_path, name, entry, where):
+    write(tmp_path, name, [entry])
+    with pytest.raises(FixtureError) as raised:
+        if name == "opensearch.json":
+            fixture_transport(tmp_path)
+        else:
+            FixtureRunner(tmp_path)
+    assert name in str(raised.value) and where in str(raised.value)
+
+
+def test_files_are_read_once_per_process_across_runners(tmp_path):
+    write(tmp_path, "aws.json", [{"match": ["ecs", "list-clusters"], "result": {"n": 1}}])
+    first = FixtureRunner(tmp_path)
+    write(tmp_path, "aws.json", [{"match": ["ecs", "list-clusters"], "result": {"n": 2}}])
+    for runner in (first, kube_runner_from_env({FIXTURE_ENV: str(tmp_path)}), FixtureRunner(tmp_path)):
+        assert json.loads(aws(runner, "ecs", "list-clusters")[1]) == {"n": 1}
+
+
+def test_verify_access_refuses_to_run_in_replay_mode(tmp_path, monkeypatch, capsys):
+    import verify_access
+
+    monkeypatch.setenv(FIXTURE_ENV, str(tmp_path))
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: pytest.fail("a real subprocess was started"))
+    assert verify_access.main([]) == 2
+    assert "verify_access is not available in replay mode" in capsys.readouterr().err

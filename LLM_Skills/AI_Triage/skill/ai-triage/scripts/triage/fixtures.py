@@ -37,16 +37,60 @@ def replay_banner(directory: Path) -> str:
     return f"REPLAY MODE: answers come from {directory}; nothing is called."
 
 
-def _load_entries(directory: Path, name: str, required_key: str) -> list[dict[str, Any]]:
-    path = directory / name
+# Each file is read and checked once per process, whoever asks for it.
+_ENTRY_CACHE: dict[Path, list[dict[str, Any]]] = {}
+
+
+def _is_text_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _entry_problem(kind: str, entry: Any) -> str | None:
+    """What is wrong with one entry, or None."""
+    if not isinstance(entry, dict):
+        return "is not an object"
+    if kind == "opensearch":
+        if not isinstance(entry.get("path_contains"), str):
+            return "needs a text 'path_contains'"
+        if "method" in entry and not isinstance(entry["method"], str):
+            return "has a 'method' that is not text"
+        if "status" in entry and not _is_int(entry["status"]):
+            return "has a 'status' that is not a whole number"
+        return None
+    if not _is_text_list(entry.get("match")) or not entry["match"]:
+        return "needs 'match' as a list of words"
+    if "contains" in entry and not _is_text_list(entry["contains"]):
+        return "has a 'contains' that is not a list of text"
+    if "error" in entry:
+        error = entry["error"]
+        if not (isinstance(error, dict) and _is_int(error.get("code")) and isinstance(error.get("stderr"), str)):
+            return "has an 'error' that needs a whole-number 'code' and a text 'stderr'"
+    if kind == "kubectl" and "stdout" in entry and not isinstance(entry["stdout"], str):
+        return "has a 'stdout' that is not text"
+    return None
+
+
+def _load_entries(directory: Path, name: str, kind: str) -> list[dict[str, Any]]:
+    path = (directory / name).resolve()
+    if path in _ENTRY_CACHE:
+        return _ENTRY_CACHE[path]
     if not path.is_file():
         return []
     try:
         entries = json.loads(path.read_text())
     except (OSError, ValueError) as error:
         raise FixtureError(f"cannot read {path}: {error}") from error
-    if not isinstance(entries, list) or not all(isinstance(entry, dict) and required_key in entry for entry in entries):
-        raise FixtureError(f"{path} must be a list of entries that each have '{required_key}'")
+    if not isinstance(entries, list):
+        raise FixtureError(f"{path} must be a list of entries")
+    for index, entry in enumerate(entries):
+        problem = _entry_problem(kind, entry)
+        if problem:
+            raise FixtureError(f"{name} entry {index} {problem} ({path})")
+    _ENTRY_CACHE[path] = entries
     return entries
 
 
@@ -76,8 +120,8 @@ class FixtureRunner:
     """A Runner that answers aws and kubectl argvs from aws.json and kubectl.json."""
 
     def __init__(self, directory: Path):
-        self._aws = _load_entries(directory, "aws.json", "match")
-        self._kubectl = _load_entries(directory, "kubectl.json", "match")
+        self._aws = _load_entries(directory, "aws.json", "aws")
+        self._kubectl = _load_entries(directory, "kubectl.json", "kubectl")
 
     def __call__(self, argv: list[str], timeout: int) -> tuple[int, str, str]:
         program = argv[0] if argv else ""
@@ -110,7 +154,7 @@ class FixtureRunner:
 
 
 def fixture_transport(directory: Path) -> Transport:
-    entries = _load_entries(directory, "opensearch.json", "path_contains")
+    entries = _load_entries(directory, "opensearch.json", "opensearch")
 
     def transport(method: str, url: str, body: "bytes | None", timeout_seconds: int, verify_tls: bool, ca_bundle: "str | None") -> tuple[int, str]:
         _log({"tool": "opensearch", "method": method, "url": url})
