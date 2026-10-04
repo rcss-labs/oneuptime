@@ -11,6 +11,7 @@ from triage.metrics import MetricSpec, add_metric_facts
 
 MAX_EVENTS = 30
 MAX_ITEMS = "20"
+TASK_LEVEL_FIELDS = ("cpu", "memory")
 
 
 def _short_name(arn: str) -> str:
@@ -49,9 +50,9 @@ def _add_deployments(ctx: CollectContext, resource: str, service: dict) -> None:
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=resource, time=deployment.get("createdAt"), command=ctx.last_command,
             summary=(
-                f"Deployment {deployment.get('id')} ({deployment.get('status')}) rollout {deployment.get('rolloutState')}, "
-                f"task definition {_short_name(deployment.get('taskDefinition', ''))}, "
-                f"running {deployment.get('runningCount')} of desired {deployment.get('desiredCount')}"
+                f"Deployment of {_short_name(deployment.get('taskDefinition', ''))} was created; "
+                f"state read now: {deployment.get('rolloutState')}, "
+                f"{deployment.get('runningCount')} of {deployment.get('desiredCount')} tasks running"
             ),
             excerpt=deployment.get("rolloutStateReason") or "",
         )
@@ -101,6 +102,9 @@ def _describe_task_definition(ctx: CollectContext, reference: str) -> dict | Non
 
 
 def _add_task_definition(ctx: CollectContext, resource: str, reference: str, definition: dict) -> None:
+    task_level = "".join(
+        f", task {field} {definition[field]}" for field in TASK_LEVEL_FIELDS if definition.get(field) is not None
+    )
     for container in definition.get("containerDefinitions", []):
         environment = env_summary(_environment(container).items())
         names = ", ".join(environment) or "none"
@@ -108,7 +112,7 @@ def _add_task_definition(ctx: CollectContext, resource: str, reference: str, def
             kind=CURRENT, resource=resource, command=ctx.last_command,
             summary=(
                 f"Task definition {reference} container {container.get('name')}: image {container.get('image')}, "
-                f"cpu {container.get('cpu')}, memory {container.get('memory')}, environment variables {names}"
+                f"cpu {container.get('cpu')}, memory {container.get('memory')}{task_level}, environment variables {names}"
             ),
             data={"container": container.get("name"), "environment": environment},
         )
@@ -143,7 +147,11 @@ def _add_definition_diff(ctx: CollectContext, resource: str, reference: str, cur
     if previous is None:
         return
     old, new = _containers_by_name(previous), _containers_by_name(current)
-    changes = []
+    changes = [
+        f"task {field} {previous.get(field)} -> {current.get(field)}"
+        for field in TASK_LEVEL_FIELDS
+        if previous.get(field) != current.get(field)
+    ]
     for name in sorted(old.keys() | new.keys()):
         if name not in old or name not in new:
             changes.append(f"container {name} {'added' if name in new else 'removed'}")

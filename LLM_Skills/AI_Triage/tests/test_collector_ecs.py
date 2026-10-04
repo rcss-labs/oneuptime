@@ -326,3 +326,30 @@ def test_diff_reports_a_changed_host(config_data, tmp_path):
     COLLECTOR.run(ctx, dict(TARGETS))
     diff = next(f for f in ctx.evidence.facts if "compared with" in f.summary)
     assert "DB_HOST changed from https://a.example.com to https://b.example.com" in diff.summary
+
+
+def test_deployment_fact_separates_creation_from_current_state(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, healthy_answers())
+    fact = next(f for f in ctx.evidence.facts if f.kind == "incident_time" and "Deployment" in f.summary)
+    assert fact.summary == (
+        "Deployment of checkout-api:42 was created; state read now: COMPLETED, 2 of 2 tasks running"
+    )
+    assert fact.time == "2026-10-04T10:42:10Z"
+
+
+def test_task_level_cpu_and_memory_are_shown_and_diffed(config_data, tmp_path):
+    def with_task_level(revision, cpu, memory):
+        body = task_definition(revision)
+        body["taskDefinition"].update({"cpu": cpu, "memory": memory})
+        for entry in body["taskDefinition"]["containerDefinitions"]:
+            entry.pop("cpu"), entry.pop("memory")
+        return body
+
+    ctx, _, _ = make_context(config_data, tmp_path, healthy_answers(), collector="ecs")
+    ctx.runner = RevisionAws(healthy_answers(), with_task_level(42, "1024", "2048"), with_task_level(41, "512", "2048"))
+    COLLECTOR.run(ctx, dict(TARGETS))
+    current = next(f for f in ctx.evidence.facts if f.kind == "current" and "Task definition" in f.summary)
+    assert "task cpu 1024" in current.summary and "task memory 2048" in current.summary
+    diff = next(f for f in ctx.evidence.facts if "compared with" in f.summary)
+    assert "task cpu 512 -> 1024" in diff.summary
+    assert "task memory" not in diff.summary
