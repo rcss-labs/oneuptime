@@ -21,26 +21,36 @@ PLACEHOLDER_RE = re.compile(r"<[A-Z]+-\d+>")
 _NUMBERED_PLACEHOLDER_RE = re.compile(r"<(SECRET|EMAIL|IP)-(\d+)>")
 _SCHEME_AND_PLACEHOLDER_RE = re.compile(r"(?:[A-Za-z]+ )?<[A-Z]+-\d+>")
 
-# A key is secret when one of its components is a secret word, ends in one, or "key" follows a qualifier.
+# A name is secret when one of its parts (split on separators and camel case, trailing digits
+# stripped) holds a secret stem, unless its last part says it names something else (see
+# NAME_ENDINGS). SECRET_WORDS stays exported for collectors that look up single words.
 SECRET_WORDS = frozenset({
     "password", "passwords", "passwd", "pass", "pwd", "passphrase", "secret", "secrets", "token",
     "apikey", "apikeys", "credential", "credentials", "auth", "cookie", "cookies",
     "authorization", "proxyauthorization", "pw", "cred", "creds",
 })
-SECRET_SUFFIXES = ("token", "secret", "password", "passwd", "apikey")
-KEY_QUALIFIERS = frozenset({
-    "api", "access", "secret", "private", "encryption", "signing", "auth", "license", "master",
-    "ssh", "session", "client",
+# Long stems match anywhere inside a part.
+LONG_SECRET_STEMS = (
+    "pass", "passwd", "password", "secret", "token", "cred", "auth", "private", "session", "cookie",
+    "bearer", "signature", "license", "licence", "hmac",
+)
+# Whole English words that hold a long stem but never name a secret ("Gates passed: ...").
+STEM_WORD_EXCEPTIONS = frozenset({"passed", "passing", "bypass", "passenger", "passengers", "compass"})
+# Short stems match a whole part only.
+SHORT_SECRET_STEMS = frozenset({
+    "key", "keys", "pwd", "pw", "psw", "pswd", "psk", "sk", "pat", "pin", "otp", "mfa", "jwt", "sig",
+    "salt", "pepper", "nonce", "seed", "dsn", "cert", "code",
 })
+# These short stems also match at the end of a part (apikey, mysqlpwd).
+END_SECRET_STEMS = ("key", "keys", "pwd")
 KEY_WORDS = frozenset({"key", "keys"})
-# A final "key" is secret unless the component before it says what kind of key it is.
+# A "key" part is not secret when the part before it (or its own prefix) says what kind of key it is.
 NON_SECRET_KEY_KINDS = frozenset({
     "partition", "sort", "s3", "routing", "cache", "kms", "primary", "foreign", "idempotency",
     "object", "hash", "shard", "range", "dedup", "group", "row", "public", "index", "tag",
-    "metric", "map", "lookup",
-    "parameter",
+    "metric", "map", "lookup", "parameter", "attribute",
 })
-# A key ending in one of these names a reference or a setting, not the secret itself.
+# A name ending in one of these names a reference, a setting or a measurement, not the secret.
 REFERENCE_SUFFIXES = frozenset({
     "arn", "id", "ids", "name", "names", "status", "type", "version", "count", "enabled",
     "expiry", "expires", "rotation", "length", "policy", "url", "path",
@@ -48,6 +58,11 @@ REFERENCE_SUFFIXES = frozenset({
     "expiration", "mode", "stages", "flows", "prevention", "required", "file",
     "at", "failures", "attempts", "errors", "audience",
 })
+NAME_ENDINGS = REFERENCE_SUFFIXES | frozenset({
+    "source", "endpoint", "flow", "requests", "remaining", "state", "schema", "usage", "spec",
+    "metadata", "fingerprint", "ms", "latency",
+})
+PERSONAL_WORDS = frozenset({"user", "usr", "username", "login", "email", "mail", "owner", "phone", "msisdn", "ssn"})
 AUTHORIZATION_WORDS = frozenset({"authorization", "proxyauthorization"})
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
@@ -70,9 +85,16 @@ def key_components(key: str) -> list[str]:
 
 
 @functools.lru_cache(maxsize=8192)
+def _name_parts(key: str) -> tuple[str, ...]:
+    """Lower-case parts of a name with trailing digits stripped: DbPassword2 -> (db, password)."""
+    parts = (part.rstrip("0123456789") for part in _components(key))
+    return tuple(part for part in parts if part)
+
+
+@functools.lru_cache(maxsize=8192)
 def is_reference_key(key: str) -> bool:
-    components = _components(key)
-    return bool(components) and components[-1] in REFERENCE_SUFFIXES
+    parts = _name_parts(key)
+    return bool(parts) and parts[-1] in NAME_ENDINGS
 
 
 @functools.lru_cache(maxsize=8192)
@@ -81,20 +103,46 @@ def is_authorization_key(key: str) -> bool:
     return bool(components) and components[-1] in AUTHORIZATION_WORDS
 
 
+def _is_key_kind(part: str) -> bool:
+    return part in NON_SECRET_KEY_KINDS or part.rstrip("0123456789") in NON_SECRET_KEY_KINDS
+
+
+def _secret_part(parts: tuple[str, ...], raw: tuple[str, ...], index: int) -> bool:
+    part = parts[index]
+    if part in STEM_WORD_EXCEPTIONS:
+        return False
+    if any(stem in part for stem in LONG_SECRET_STEMS):
+        return True
+    if part in KEY_WORDS:  # a bare "key" is a lookup key (S3 Key=, a tag Key)
+        return len(parts) > 1 and not (index > 0 and _is_key_kind(raw[index - 1]))
+    if part in SHORT_SECRET_STEMS:
+        return True
+    for stem in END_SECRET_STEMS:
+        if part.endswith(stem) and len(part) > len(stem):
+            return stem not in KEY_WORDS or not _is_key_kind(part[:-len(stem)])
+    return False
+
+
 @functools.lru_cache(maxsize=8192)
 def looks_secret_key(key: str) -> bool:
-    components = _components(key)
-    if not components or components[-1] in REFERENCE_SUFFIXES:
+    """Whether a name says its value is a secret.
+
+    Order: the name's last part is checked first; a reference or measurement ending (Name, Id,
+    Arn, Endpoint, Count, ...) means "not secret" whatever stems the name holds (ruling 9). Only
+    then are the stems tried (ruling 11). A bare "key" and a key qualified by a non-secret kind
+    (PartitionKey, AttributeKey) are not secret.
+    """
+    parts = _name_parts(key)
+    if not parts or parts[-1] in NAME_ENDINGS:
         return False
-    for index, part in enumerate(components):
-        if part in SECRET_WORDS or part.endswith(SECRET_SUFFIXES):
-            return True
-        if any(part.endswith(qualifier + "key") for qualifier in KEY_QUALIFIERS):
-            return True
-        if part in KEY_WORDS and index > 0 and components[index - 1] in KEY_QUALIFIERS:
-            return True
-    last = components[-1]
-    return last in KEY_WORDS and len(components) > 1 and components[-2] not in NON_SECRET_KEY_KINDS
+    raw = tuple(part for part in _components(key) if part.rstrip("0123456789"))
+    return any(_secret_part(parts, raw, index) for index in range(len(parts)))
+
+
+@functools.lru_cache(maxsize=8192)
+def looks_personal_key(key: str) -> bool:
+    """Whether a name says its value is personal data (user, email, phone ...), by whole parts."""
+    return any(part in PERSONAL_WORDS for part in _name_parts(key))
 
 
 # --- span rules: each returns the spans of text that are secret --------------------------

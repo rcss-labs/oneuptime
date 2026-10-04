@@ -90,7 +90,7 @@ def test_rule4_does_not_touch_auth_in_hostnames_and_paths():
 
 
 def test_rule4_ignores_ordinary_keys():
-    text = 'region=eu-west-1 monkey=1 {"name": "web", "keyboard": "us"} key=abc'
+    text = 'region=eu-west-1 {"name": "web", "keyboard": "us"} key=abc'
     assert Redactor().text(text) == text
 
 
@@ -403,7 +403,7 @@ def test_audit_reports_every_secret_case_and_is_clean_after_redaction(name, sour
         "git clone git@github.com:example/repo.git",
         "npm install left-pad@1.3.0",
         "netmask 255.255.255.0 bind 0.0.0.0:8080 multicast 224.0.0.251",
-        "author=bob authority: ca tokenizer=bert max_tokens=4096 auth_type=iam",
+        "auth_type=iam token_units=s KeySchema=pk",
         "partition_key=user-123 routing_key=orders.created s3_key=logs/x cache_key=home sort_key=ts",
         "KeyName=web kms_key_id=abc token_expiry=3600 secret_name=db SecretArn=x SecretStatus=active",
         "sha " + HEX + HEX[:8] + " image digest",
@@ -442,10 +442,10 @@ def test_placeholder_numbering_skips_numbers_already_in_the_text():
         ("privateKey", True), ("secretKey", True), ("apiKey", True), ("client_secret", True),
         ("x-api-key", True), ("AUTH_TOKEN", True), ("PGPASSWORD", True), ("secrets", True),
         ("api_keys", True), ("Cookie", True), ("SecretAccessKey", True), ("ssh_key", True),
-        ("author", False), ("tokenizer", False), ("max_tokens", False), ("partition_key", False),
+        ("partition_key", False),
         ("s3_key", False), ("sort_key", False), ("KeyName", False), ("kms_key_id", False),
         ("SecretArn", False), ("SecretStatus", False), ("AuthorizationType", False),
-        ("token_expiry", False), ("secret_name", False), ("monkey", False), ("region", False),
+        ("token_expiry", False), ("secret_name", False), ("region", False),
     ],
 )
 def test_secret_key_component_matching(key, expected):
@@ -1042,3 +1042,77 @@ def test_single_line_inputs_are_linear(shape):
     audit_text(source)
     audit_seconds = time.perf_counter() - started
     assert text_seconds < 2 and audit_seconds < 2, (text_seconds, audit_seconds)
+
+
+# ---------------------------------------------------------------------------
+# Fix round 4
+# ---------------------------------------------------------------------------
+from triage.redact import looks_personal_key, looks_secret_key
+
+RULING_11_SECRET_NAMES = [
+    # trailing digits are stripped from every part
+    "DB_PASS1", "DbPassword2", "DB_TOKEN2", "SERVICE_SECRET2", "DB_KEY1", "REDIS_AUTH1_HOST",
+    # long stems anywhere inside a part
+    "pass", "passwd", "password", "secret", "token", "cred", "auth", "private", "session", "cookie",
+    "bearer", "signature", "license", "licence", "hmac", "MyPassValue", "oauthState2Value", "x_sessionx",
+    "github_bearer_value", "X-Amz-Signature", "hmacvalue", "client_licence",
+    # short stems as whole parts, key and pwd also at the end of a part
+    "db_key", "apikey", "db_pwd", "mysqlpwd", "psw", "pswd", "psk", "sk", "pat", "pin",
+    "otp", "mfa", "jwt", "sig", "salt", "pepper", "nonce", "seed", "dsn", "cert", "code",
+    "USER_PIN", "SENTRY_DSN", "TLS_CERT", "GITHUB_PAT", "MFA_SEED", "STRIPE_SK", "WIFI_PSK", "OTP_CODE",
+]
+
+
+@pytest.mark.parametrize("name", RULING_11_SECRET_NAMES)
+def test_ruling_11_secret_names(name):
+    assert looks_secret_key(name) is True
+
+
+@pytest.mark.parametrize(
+    "name, expected, why",
+    [
+        ("MONKEY", True, "key at the end of a part, as in apikey: hiding a harmless value is acceptable"),
+        ("KEYSPACE", False, "key neither a whole part nor the end of one"),
+        ("AUTHOR", True, "auth is a long stem and matches inside a part"),
+        ("PASSENGER_COUNT", False, "the Count ending (ruling 9) wins over the pass stem"),
+        ("TOKENIZER_MODE", False, "the Mode ending wins over the token stem"),
+        ("TOKENIZER", True, "token is a long stem and matches inside a part"),
+        ("MAX_CONN", False, "conn is not a stem; connection strings are caught by their value"),
+        ("CONN_POOL_SIZE", False, "conn is not a stem"),
+        ("key", False, "a bare key names a lookup key (S3 Key=, tag Key), kept by ruling 9"),
+        ("Key", False, "as above"),
+        ("AttributeKey", False, "ruling 9: the secret word qualifies a non-secret thing"),
+        ("ParameterKey", False, "ruling 9"),
+        ("TagKey", False, "ruling 9"),
+        ("KeyName", False, "ruling 9: Name ending"),
+        ("KeyId", False, "ruling 9: Id ending"),
+        ("TokenEndpoint", False, "ruling 9: Endpoint ending"),
+        ("DB_KEY1_ID", False, "ruling 9 ending after digit stripping"),
+        ("s3_key", False, "a kind of key that is not secret"),
+        ("KeyMaterial", True, "key as a whole part with no non-secret qualifier"),
+        ("passed", False, "an English word that holds the stem but never names a secret (report: Gates passed)"),
+        ("tests_passing", False, "as above"),
+        ("bypass", False, "as above"),
+        ("PassedValue", False, "as above"),
+    ],
+)
+def test_ruling_11_edge_names(name, expected, why):
+    assert looks_secret_key(name) is expected, why
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("user", True), ("USR", True), ("username", True), ("login", True), ("email", True), ("mail", True),
+        ("owner", True), ("phone", True), ("msisdn", True), ("ssn", True), ("DbUser2", True),
+        ("contact_email", True), ("ownerPhone", True), ("LOGIN_NAME", True),
+        ("userspace", False), ("mailbox_size", False), ("region", False), ("password", False),
+    ],
+)
+def test_ruling_11_personal_names(name, expected):
+    assert looks_personal_key(name) is expected
+
+
+def test_report_gate_line_is_not_redacted():
+    line = "- Gates passed: evidence, no_contradiction, rank"
+    assert Redactor().text(line) == line
