@@ -357,3 +357,28 @@ def test_gateway_load_balancer_uses_its_own_namespace(config_data, tmp_path):
     gateway = load_balancer(Type="gateway")
     _, aws, _ = run(config_data, tmp_path, healthy_answers(**{"elbv2 describe-load-balancers": gateway}))
     assert {q["MetricStat"]["Metric"]["Namespace"] for q in queries(aws)} == {"AWS/GatewayELB"}
+
+
+def test_cname_record_reads_with_the_right_article(config_data, tmp_path):
+    record = {"Name": "www.example.com.", "Type": "CNAME", "ResourceRecords": [{"Value": DNS_NAME}]}
+    ctx, _, _ = run(config_data, tmp_path, dns_answers(record), HOSTNAME)
+    assert "has a CNAME record pointing at" in dns_facts(ctx)[0].summary
+
+
+def test_listener_facts_and_certificate_lookups_are_capped_with_notes(config_data, tmp_path):
+    listeners = []
+    for n in range(30):
+        https = listener(8000 + n, "HTTPS", f"{LISTENER_ARN}{n}")
+        https["Certificates"] = [{"CertificateArn": f"{CERT_ARN}{n}"}]
+        listeners.append(https)
+    results = {"MetricDataResults": [{"Id": "m0", "Timestamps": ["2026-10-04T10:41:00+00:00"], "Values": [1.0]}]}
+    answers = healthy_answers(**{"elbv2 describe-listeners": {"Listeners": listeners},
+                                 "cloudwatch get-metric-data": results,
+                                 **certificate("2026-10-10T00:00:00+00:00")})
+    answers["elbv2 describe-listeners"] = {"Listeners": listeners}
+    ctx, aws, _ = run(config_data, tmp_path, answers)
+    assert len(by_summary(ctx, "Listener HTTPS 80")) >= 20
+    assert len([f for f in ctx.evidence.facts if f.summary.startswith("Listener HTTPS") and "certificate" in f.summary]) == 20
+    assert len(aws.called("acm", "describe-certificate")) == 20
+    assert by_summary(ctx, "10 listeners were not listed") and by_summary(ctx, "10 certificates were not checked")
+    assert by_summary(ctx, "HTTPCode_ELB_5XX_Count") and not ctx.evidence.truncated

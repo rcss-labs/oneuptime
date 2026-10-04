@@ -11,6 +11,8 @@ from triage.metrics import MetricSpec, add_metric_facts
 from triage.window import describe_offset, format_time
 
 MAX_LISTENERS = 5
+MAX_LISTENER_FACTS = 20
+MAX_CERTIFICATES = 20
 MAX_TARGET_GROUPS = 10
 MAX_UNHEALTHY_FACTS = 20
 LOAD_BALANCER_NOT_FOUND = ("LoadBalancerNotFound",)
@@ -60,22 +62,33 @@ def _listener_text(listener: dict) -> str:
     return f"Listener {listener.get('Protocol')} {listener.get('Port')}"
 
 
-def _add_listeners(ctx: CollectContext, resource: str, balancer_arn: str, group_names: dict[str, str]) -> list[str]:
-    """Add listener and rule facts; return the ARNs of the certificates the listeners use."""
+def _add_listeners(
+    ctx: CollectContext, resource: str, balancer_arn: str, group_names: dict[str, str]
+) -> tuple[list[str], str]:
+    """Add listener and rule facts; return the ACM certificate ARNs the listeners use and the listing command."""
     reply = ctx.aws("elbv2", "describe-listeners", ["--load-balancer-arn", balancer_arn])
+    command = ctx.last_command
+    listeners = (reply or {}).get("Listeners", [])
     certificates: list[str] = []
-    for listener in (reply or {}).get("Listeners", []):
+    for listener in listeners:
         arns = [c.get("CertificateArn", "") for c in listener.get("Certificates", [])]
         # IAM server certificates are not ACM certificates and acm describe-certificate rejects them.
         certificates += [arn for arn in arns if ":acm:" in arn and arn not in certificates]
+    for listener in listeners[:MAX_LISTENER_FACTS]:
+        arns = [c.get("CertificateArn", "") for c in listener.get("Certificates", [])]
         shown = ", ".join(_last_segment(arn) for arn in arns) or "none"
         ctx.evidence.add(
-            kind=CURRENT, resource=resource, command=ctx.last_command,
+            kind=CURRENT, resource=resource, command=command,
             summary=f"{_listener_text(listener)}, certificate {shown}",
         )
-    for listener in (reply or {}).get("Listeners", [])[:MAX_LISTENERS]:
+    if len(listeners) > MAX_LISTENER_FACTS:
+        ctx.evidence.add(
+            kind=DERIVED, resource=resource, command=command,
+            summary=f"{len(listeners) - MAX_LISTENER_FACTS} listeners were not listed ({len(listeners)} exist)",
+        )
+    for listener in listeners[:MAX_LISTENERS]:
         _add_rules(ctx, resource, listener, group_names)
-    return certificates
+    return certificates, command
 
 
 def _forwarded_groups(rule: dict) -> list[str]:
@@ -275,7 +288,10 @@ def _add_dns_record(ctx: CollectContext, hostname: str, dns_name: str) -> None:
         if any(_normal_name(target) == _normal_name(dns_name) for target in _record_targets(record)):
             ctx.evidence.add(
                 kind=CURRENT, resource=resource, command=ctx.last_command,
-                summary=f"{hostname} has an {record.get('Type')} record pointing at {dns_name}, this load balancer",
+                summary=(
+                    f"{hostname} has {'a' if record.get('Type') == 'CNAME' else 'an'} {record.get('Type')} record "
+                    f"pointing at {dns_name}, this load balancer"
+                ),
             )
             return
     shown = "; ".join(f"{r.get('Type')} record to {', '.join(_record_targets(r)) or 'no value'}" for r in records)
@@ -313,7 +329,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     groups = _describe_target_groups(ctx, arn)
     groups_command = ctx.last_command
     group_names = {g.get("TargetGroupArn", ""): g.get("TargetGroupName", "") for g in groups}
-    certificates = _add_listeners(ctx, resource, arn, group_names)
+    certificates, listeners_command = _add_listeners(ctx, resource, arn, group_names)
     listed = groups[:MAX_TARGET_GROUPS]
     for group in listed:
         _add_target_group(ctx, resource, group, groups_command)
@@ -327,8 +343,13 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         _add_target_health(ctx, resource, group, unhealthy)
         _add_group_attributes(ctx, resource, group)
     _add_unhealthy_targets(ctx, resource, unhealthy)
-    for certificate in certificates:
+    for certificate in certificates[:MAX_CERTIFICATES]:
         _add_certificate(ctx, resource, certificate)
+    if len(certificates) > MAX_CERTIFICATES:
+        ctx.evidence.add(
+            kind=DERIVED, resource=resource, command=listeners_command,
+            summary=f"{len(certificates) - MAX_CERTIFICATES} certificates were not checked ({len(certificates)} are in use)",
+        )
     if targets.get("hostname"):
         _add_dns_record(ctx, _normal_name(targets["hostname"]), balancer.get("DNSName", ""))
     _add_metrics(ctx, resource, balancer, groups)
