@@ -1,24 +1,30 @@
 """Split a shell command line into simple command segments.
 
 This is a small quote-aware scanner, not a shell. It accepts only text whose
-meaning it fully understands. Anything bash would expand, substitute, or
+meaning it fully understands. Anything zsh (or bash) would expand, substitute, or
 reinterpret in a way the guard cannot see raises Unparseable, and the guard then
-refuses to auto-approve the command. The scanner targets bash and zsh as Claude
-Code invokes them.
+refuses to auto-approve the command.
+
+Outside quotes a word may hold only the characters in WORD_CHARS. Beyond those,
+the scanner accepts single and double quotes, backslash escapes, $HOME at the
+start of a word, blanks, the separators | and &&, and a fixed set of output
+redirects. There is no input redirect: an unquoted < is always refused, which
+also covers zsh numeric globs, process substitution, and here-documents.
 """
 from __future__ import annotations
 
 import os
 import re
+import string
 from dataclasses import dataclass
 
-SEPARATORS = frozenset({";", "&&", "||", "|", "|&", "&"})
+SEPARATORS = frozenset({"&&", "|"})
 HARMLESS_TARGETS = frozenset({"/dev/null"})
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 BLANKS = " \t"
-# Unquoted characters that bash would expand, group, or treat as a comment.
-UNQUOTED_REFUSED = frozenset("{}*?[]#()")
-# What may follow $HOME, or ~, for the expansion to be a plain path prefix.
+# The only characters an unquoted word may contain; anything else is refused unless a rule below accepts it.
+WORD_CHARS = frozenset(string.ascii_letters + string.digits + "-_./:=,@%+")
+# What may follow $HOME for the expansion to be a plain path prefix.
 AFTER_HOME = frozenset("/'\" \t\n")
 DIGITS_RE = re.compile(r"^[0-9]+$")
 WORD_SPLITTING_OR_GLOB = frozenset(" \t\n*?[]{}~")
@@ -34,7 +40,7 @@ class Segment:
     env: tuple[str, ...]
     writes_file: bool
     preceded_by: str  # the separator before this segment, "" for the first
-    reads_file: bool = False
+    reads_file: bool = False  # always False now that input redirects are refused; kept for the guard
 
 
 @dataclass(frozen=True)
@@ -46,7 +52,7 @@ class _Word:
 def _home_directory() -> str:
     home = os.environ.get("HOME", "")
     if not home:
-        raise Unparseable("HOME is not set, so $HOME and ~ cannot be expanded")
+        raise Unparseable("HOME is not set, so $HOME cannot be expanded")
     return home
 
 
@@ -70,7 +76,7 @@ class _Scanner:
     def expand_home(self, index: int, quoted: bool) -> int:
         """Handle a `$` at text[index]; return the index after the expansion."""
         text = self.text
-        if text.startswith("${HOME}", index):
+        if text.startswith("${HOME}", index) and quoted:  # unquoted braces are outside the allow-list
             end = index + len("${HOME}")
         elif text.startswith("$HOME", index):
             end = index + len("$HOME")
@@ -125,7 +131,7 @@ class _Scanner:
         text = self.text
         char = text[index]
         digits = "".join(self.chars) if self.in_word and self.first_quote is None else ""
-        if DIGITS_RE.match(digits) and char in "<>&":
+        if DIGITS_RE.match(digits) and char in ">&":
             # Digits written right against a redirect are a descriptor, never an argument.
             # Only the descriptors 1 and 2 before > are accepted.
             if char != ">" or digits not in ("1", "2"):
@@ -133,11 +139,7 @@ class _Scanner:
             self.chars, self.in_word = [], False
         self.end_word()
         following = text[index + 1] if index + 1 < len(text) else ""
-        if char == ";":
-            if following in (";", "&"):
-                raise Unparseable("unsupported operator ;" + following)
-            operator = ";"
-        elif char == "&":
+        if char == "&":
             if following == "&":
                 operator = "&&"
             elif following == ">":
@@ -146,19 +148,17 @@ class _Scanner:
                     raise Unparseable("&> must follow whitespace")
                 operator = "&>>" if text.startswith("&>>", index) else "&>"
             else:
-                operator = "&"
+                raise Unparseable("only && and &> may start with &")
         elif char == "|":
-            operator = "||" if following == "|" else "|&" if following == "&" else "|"
-        elif char == ">":
+            if following in ("|", "&"):
+                raise Unparseable("unsupported operator |" + following)
+            operator = "|"
+        else:  # ">"
             if following == "(":
                 raise Unparseable("process substitution")
             if following == "|":
                 raise Unparseable("unsupported operator >|")
             operator = {">": ">>", "&": ">&"}.get(following, ">")
-        else:  # "<"
-            if following in ("<", "(", ">", "&"):
-                raise Unparseable("unsupported input redirect")
-            operator = "<"
         after = index + len(operator)
         if operator in (">", ">>", "&>", "&>>") and text[after : after + 1] == "!":
             raise Unparseable("zsh clobber override")
@@ -197,26 +197,18 @@ class _Scanner:
                 index = self.expand_home(index, quoted=False)
             elif char == "`":
                 raise Unparseable("contains a backtick")
-            elif char == "~":
-                following = text[index + 1] if index + 1 < size else ""
-                if self.in_word or (following and following not in "/ \t\n;&|<>"):
-                    raise Unparseable("contains a ~ expansion")
-                self.chars.extend(_home_directory())
-                self.in_word = True
-                self.mark_quoted()
-                index += 1
-            elif char in UNQUOTED_REFUSED:
-                raise Unparseable(f"contains {char}")
-            elif char in ";&|<>":
+            elif char == "<":
+                raise Unparseable("contains an unquoted < (input redirect or zsh numeric glob)")
+            elif char in "&|>":
                 index = self.scan_operator(index)
-            elif ord(char) < 0x20 or ord(char) == 0x7F or (ord(char) > 0x7F and char.isspace()):
-                raise Unparseable("contains a control character or unusual whitespace")
             elif char == "=" and not self.in_word:
                 raise Unparseable("a word starting with = is expanded by zsh")
-            else:
+            elif char in WORD_CHARS:
                 self.chars.append(char)
                 self.in_word = True
                 index += 1
+            else:
+                raise Unparseable(f"contains the unquoted character {char!r}")
         self.end_word()
         return self.tokens
 
@@ -233,17 +225,17 @@ def split_command(command: str) -> list[Segment]:
 
     segments: list[Segment] = []
     words: list[_Word] = []
-    writes_file = reads_file = False
+    writes_file = False
     preceded_by = ""
 
     def flush(next_separator: str) -> None:
-        nonlocal words, writes_file, reads_file, preceded_by
+        nonlocal words, writes_file, preceded_by
         env: list[str] = []
         while words and _is_assignment(words[0]):
             env.append(words.pop(0).text)
-        if words or env or writes_file or reads_file:
-            segments.append(Segment(tuple(w.text for w in words), tuple(env), writes_file, preceded_by, reads_file))
-        words, writes_file, reads_file, preceded_by = [], False, False, next_separator
+        if words or env or writes_file:
+            segments.append(Segment(tuple(w.text for w in words), tuple(env), writes_file, preceded_by))
+        words, writes_file, preceded_by = [], False, next_separator
 
     index = 0
     while index < len(tokens):
@@ -258,9 +250,7 @@ def split_command(command: str) -> list[Segment]:
             if index + 1 >= len(tokens) or not isinstance(tokens[index + 1], _Word):
                 raise Unparseable("redirect without a target")
             target = tokens[index + 1].text
-            if token == "<":
-                reads_file = True
-            elif token == ">&":
+            if token == ">&":
                 if target not in ("1", "2"):
                     raise Unparseable("only >&1 and >&2 are accepted")
             elif target not in HARMLESS_TARGETS:

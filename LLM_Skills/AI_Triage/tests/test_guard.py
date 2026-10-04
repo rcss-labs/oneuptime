@@ -43,7 +43,7 @@ def test_validated_reads_are_approved(command):
     [
         "aws ecs describe-services --cluster a --profile admin --region eu-west-1",
         f"aws ecs list-clusters {AWS_OK} && aws ecs stop-task --task t {AWS_OK}",
-        f"aws ecs list-clusters {AWS_OK}; aws s3 rm s3://b/k {AWS_OK}",
+        f"aws ecs list-clusters {AWS_OK} && aws s3 rm s3://b/k {AWS_OK}",
         f"kubectl {KUBE_OK} delete pod p",
         "curl -s https://opensearch.internal.example.com/_cat/indices",
         "curl -XDELETE https://opensearch.internal.example.com/app-logs-2026",
@@ -80,7 +80,6 @@ def test_commands_the_guard_cannot_check_force_a_prompt(command):
         f"aws ecs list-clusters {AWS_OK} > clusters.json",
         f"aws ecs list-clusters {AWS_OK} | tee clusters.json",
         f"aws ecs list-clusters {AWS_OK} | xargs rm -rf",
-        f"aws ecs list-clusters {AWS_OK}; grep -r password /etc",
         f"/usr/bin/python3 {SKILL}/scripts/preflight.py",
         f"{PY} /tmp/other.py",
         f"{PY} {SKILL}/scripts/../../evil.py",
@@ -123,7 +122,7 @@ def test_skill_folder_with_a_space_in_its_path_is_recognised():
 
 
 def test_deny_outranks_ask_and_reason_names_the_problem():
-    verdict = decide(f"cat ~/.aws/config; aws ecs stop-task --task t {AWS_OK}", CONTEXT)
+    verdict = decide(f'cat "$HOME/.aws/config" && aws ecs stop-task --task t {AWS_OK}', CONTEXT)
     assert verdict.kind == DENY and "not a known read" in verdict.reason
 
 
@@ -146,7 +145,8 @@ def test_home_relative_script_paths_are_recognised(monkeypatch):
     monkeypatch.setenv("HOME", "/home/eng")
     command = '"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/preflight.py"'
     assert kind(command) == ALLOW
-    assert kind("~/.claude/skills/ai-triage/.venv/bin/python ~/.claude/skills/ai-triage/scripts/preflight.py") == ALLOW
+    # round 4: an unquoted ~ is outside the allow-list, so the guard leaves it to the normal permission flow
+    assert kind("~/.claude/skills/ai-triage/.venv/bin/python ~/.claude/skills/ai-triage/scripts/preflight.py") == PASS
 
 
 # ---- fix round 1 -------------------------------------------------------------
@@ -242,7 +242,6 @@ def test_strict_grammar_filters_after_a_pipe_are_allowed(filter_command):
         "sort -o /home/eng/.bashrc",
         "uniq - /home/eng/.zshrc",
         "grep -r . /home/eng/.ssh",
-        "grep x < /home/eng/.ssh/id_example",
         "jq -n env",
         "jq -n '$ENV'",
         "LD_PRELOAD=/tmp/x.so jq .",
@@ -295,13 +294,13 @@ def test_filters_outside_the_strict_grammar_are_not_allowed(filter_command):
 
 
 def test_a_filter_with_a_redirect_is_not_allowed():
-    assert kind(f"aws ecs list-clusters {AWS_OK} | grep x < in.txt") == PASS
+    assert kind(f"aws ecs list-clusters {AWS_OK} | grep x < in.txt") == ASK  # round 4: < is unparseable
     assert kind(f"aws ecs list-clusters {AWS_OK} | grep x > out.txt") == PASS
 
 
 def test_a_filter_not_preceded_by_a_plain_pipe_is_not_allowed():
-    assert kind(f"aws ecs list-clusters {AWS_OK}; jq .") == PASS
-    assert kind(f"aws ecs list-clusters {AWS_OK} |& jq .") == PASS
+    assert kind(f"aws ecs list-clusters {AWS_OK}; jq .") == ASK  # round 4: ; and |& are unparseable
+    assert kind(f"aws ecs list-clusters {AWS_OK} |& jq .") == ASK
     assert kind("jq .") == PASS
 
 
@@ -315,12 +314,16 @@ def test_a_filter_that_mentions_aws_but_breaks_the_grammar_asks():
         f"PYTHONPATH=/tmp/evil {PY} {SCRIPT}/preflight.py",
         f"AWS_CONFIG_FILE=/tmp/cfg {PY} {SCRIPT}/verify_access.py",
         f"FOO=1 {PY} {SCRIPT}/validate_map.py",
-        f"{PY} {SCRIPT}/preflight.py < /home/eng/.ssh/id_example",
         f"PYTHONPATH=/tmp/evil {PY} {SCRIPT}/opensearch_query.py --cluster logs-prod health",
     ],
 )
 def test_environment_and_input_redirects_never_ride_on_an_own_script(command):
     assert kind(command) == ASK
+
+
+def test_an_input_redirect_on_an_own_script_is_never_allowed():
+    # round 4: any unquoted < is unparseable; with no aws or kubectl in the text the guard passes it on
+    assert kind(f"{PY} {SCRIPT}/preflight.py < /home/eng/.ssh/id_example") == PASS
 
 
 @pytest.mark.parametrize(
@@ -467,3 +470,47 @@ def test_the_three_everyday_commands_stay_allowed(monkeypatch):
     assert kind(
         'kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context triage-prod-main -n payments get pods -o json'.replace("triage-prod-main", "triage-platform-prod")
     ) == ALLOW
+
+
+# ---- fix round 4 -------------------------------------------------------------
+
+KUBE_HOME = '--kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context triage-platform-prod -n payments'
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # re-review round 3, Critical 1: zsh numeric globs read as an input plus an output redirect
+        f"kubectl {KUBE_HOME} get pods <-> /dev/null",
+        f"aws ecs list-clusters {AWS_OK} <-> /dev/null",
+        f"kubectl {KUBE_HOME} get delete<-> /dev/null",
+        f"kubectl {KUBE_HOME} get <-> /dev/null pods",
+    ],
+)
+def test_round_3_numeric_glob_reproductions_never_get_allow(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert kind(command) in (ASK, DENY)
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    ["<1-30> /dev/null", "<1-> /dev/null", "<-9> /dev/null", "; echo", "& echo", "|| echo", "&! echo", "&| echo",
+     "~", "a\u00a0b", "!!", "^a", "[ab]", "{a,b}", "#", "x\u00e9"],
+)
+def test_constructs_outside_the_allow_list_never_get_allow(suffix, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert kind(f"kubectl {KUBE_HOME} get pods {suffix}") == ASK
+    assert kind(f"aws ecs list-clusters {AWS_OK} {suffix}") == ASK
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"aws ecs list-clusters {AWS_OK}; aws s3 rm s3://b/k {AWS_OK}",
+        f"aws ecs list-clusters {AWS_OK}; grep -r password /etc",
+        f"aws ecs list-clusters {AWS_OK} | grep x < /home/eng/.ssh/id_example",
+    ],
+)
+def test_semicolon_lists_and_input_redirects_now_ask(command):
+    # These were deny or pass before round 4; ; and < are now outside what the scanner accepts.
+    assert kind(command) == ASK

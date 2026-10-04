@@ -14,9 +14,9 @@ def test_single_command():
 
 
 def test_pipes_and_lists_are_split_and_remember_their_separator():
-    segments = split_command("aws a b | jq . && echo ok ; echo done || true &")
-    assert [s.argv for s in segments] == [("aws", "a", "b"), ("jq", "."), ("echo", "ok"), ("echo", "done"), ("true",)]
-    assert [s.preceded_by for s in segments] == ["", "|", "&&", ";", "||"]
+    segments = split_command("aws a b | jq . && echo ok")
+    assert [s.argv for s in segments] == [("aws", "a", "b"), ("jq", "."), ("echo", "ok")]
+    assert [s.preceded_by for s in segments] == ["", "|", "&&"]
 
 
 def test_quoted_operators_stay_inside_their_argument():
@@ -33,7 +33,7 @@ def test_leading_assignments_are_separated_from_argv():
 
 @pytest.mark.parametrize(
     "command",
-    ["aws a b 2>/dev/null", "aws a b > /dev/null 2>&1", "aws a b 2>&1 | jq .", "jq . < input.json"],
+    ["aws a b 2>/dev/null", "aws a b > /dev/null 2>&1", "aws a b 2>&1 | jq ."],
 )
 def test_harmless_redirects_do_not_count_as_writes(command):
     first = split_command(command)[0]
@@ -172,13 +172,12 @@ def test_empty_quoted_word_is_a_real_argument(home):
 
 
 def test_dollar_home_is_expanded_at_the_start_of_a_word(home):
-    assert argvs("echo $HOME/x ${HOME}/y $HOME") == [("echo", "/home/eng/x", "/home/eng/y", "/home/eng")]
+    assert argvs("echo $HOME/x $HOME") == [("echo", "/home/eng/x", "/home/eng")]
     assert argvs('echo "$HOME/x" "${HOME}" "$HOME"/y') == [("echo", "/home/eng/x", "/home/eng", "/home/eng/y")]
     assert argvs("echo $HOME'/x'") == [("echo", "/home/eng/x")]
 
 
-def test_tilde_is_expanded_only_at_the_start_of_a_word(home):
-    assert argvs("echo ~/x ~") == [("echo", "/home/eng/x", "/home/eng")]
+def test_a_quoted_tilde_is_literal(home):
     assert argvs("echo '~' \"~/x\"") == [("echo", "~", "~/x")]
 
 
@@ -224,18 +223,16 @@ def test_other_output_redirects_to_files_are_writes(command):
     assert split_command(command)[0].writes_file is True
 
 
-def test_input_redirect_sets_reads_file_and_not_writes_file():
-    [segment] = split_command("grep x < /etc/hosts")
-    assert segment.reads_file is True and segment.writes_file is False
-    assert segment.argv == ("grep", "x")
+def test_input_redirect_is_unparseable():
     assert split_command("grep x")[0].reads_file is False
-    with pytest.raises(Unparseable):  # round 2: descriptor 0 is refused
-        split_command("grep x 0<f")
+    for command in ("grep x < /etc/hosts", "grep x 0<f"):  # round 4: no input redirect at all
+        with pytest.raises(Unparseable):
+            split_command(command)
 
 
-def test_pipe_ampersand_and_clobber_operators():
-    segments = split_command("a |& b | c")
-    assert [s.preceded_by for s in segments] == ["", "|&", "|"]
+def test_pipe_ampersand_is_unparseable():
+    with pytest.raises(Unparseable):  # round 4: only | and && separate commands
+        split_command("a |& b | c")
 
 
 def test_a_quoted_first_word_is_never_an_assignment():
@@ -309,7 +306,7 @@ def test_control_characters_odd_whitespace_and_a_leading_equals_are_unparseable(
 def test_quoted_non_ascii_whitespace_and_equals_in_the_middle_are_literal():
     assert split_command("echo 'a\u00a0b' x=y a=b")[0].argv == ("echo", "a\u00a0b", "x=y", "a=b")
     assert split_command("echo '=ls'")[0].argv == ("echo", "=ls")
-    assert split_command("echo é")[0].argv == ("echo", "é")
+    assert split_command("echo 'é'")[0].argv == ("echo", "é")
 
 
 # ---- fix round 3: redirects by allow-list ------------------------------------
@@ -329,7 +326,6 @@ def test_quoted_non_ascii_whitespace_and_equals_in_the_middle_are_literal():
         ("&> f echo a", True, False),
         ("echo a 2>&1", False, False), ("echo a 1>&2", False, False), ("echo a >&2", False, False),
         ("echo a >&1", False, False), ("echo a >& 2", False, False),
-        ("echo a < f", False, True), ("echo a <f", False, True),
         ("echo a > /dev/null", False, False), ("echo a 2>/dev/null", False, False),
         ("echo a &>/dev/null", False, False), ("echo a &>> /dev/null", False, False),
     ],
@@ -362,9 +358,57 @@ def test_a_digit_separated_by_space_is_an_ordinary_argument():
     assert split_command("echo 2 > /dev/null")[0].argv == ("echo", "2")
     assert split_command("echo -n 2 &>/dev/null")[0].argv == ("echo", "-n", "2")
     assert split_command("echo 9 &>f")[0].argv == ("echo", "9")
-    assert split_command("echo 2 &")[0].argv == ("echo", "2")
 
 
-def test_a_separator_ampersand_is_still_fine():
-    assert [s.argv for s in split_command("echo a & echo b")] == [("echo", "a"), ("echo", "b")]
-    assert [s.argv for s in split_command("echo a&echo b")] == [("echo", "a"), ("echo", "b")]
+def test_double_ampersand_still_separates():
+    assert [s.argv for s in split_command("echo a && echo b")] == [("echo", "a"), ("echo", "b")]
+    assert [s.argv for s in split_command("echo a&&echo b")] == [("echo", "a"), ("echo", "b")]
+
+
+# ---- fix round 4: no input redirect, unquoted characters by allow-list -------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # zsh numeric globs (re-review round 3, Critical 1)
+        "echo a <-> /dev/null", "echo a <1-30> /dev/null", "echo a <1-> /dev/null", "echo a <-9> /dev/null",
+        "echo a x<-> /dev/null", "echo a <->", "echo a get <-> /dev/null pods",
+        # every other input form
+        "echo a < f", "echo a <f", "echo a<f", "echo a <<EOF", "echo a <<< w", "echo a <(b)", "echo a <> f",
+        "echo a <&0", "echo a 0<f", "echo a 1<f",
+    ],
+)
+def test_an_unquoted_less_than_is_always_unparseable(command):
+    with pytest.raises(Unparseable):
+        split_command(command)
+
+
+@pytest.mark.parametrize("char", list("!^~#*?[]{}()<;&") +["|&", "||", "&!", "&|", ">&-", "=(x)", "$((1+1))"])
+def test_characters_outside_the_allow_list_are_unparseable(char, home):
+    for command in (f"echo a {char}", f"echo a{char}b", f"echo {char}a b"):
+        with pytest.raises(Unparseable):
+            split_command(command)
+
+
+@pytest.mark.parametrize("char", ["\u00e9", "\u00a0", "\u2028", "\u200b", "\uff1b", "\x7f", "\x01", "`", "$"])
+def test_non_ascii_control_and_stray_characters_are_unparseable(char):
+    with pytest.raises(Unparseable):
+        split_command(f"echo a{char}b")
+
+
+def test_every_allowed_unquoted_character_is_kept_literally():
+    word = "AZaz09-_./:=,@%+"
+    assert split_command(f"echo {word} -n --x=y,z a@b%c+d")[0].argv == ("echo", word, "-n", "--x=y,z", "a@b%c+d")
+
+
+def test_an_unquoted_braced_home_is_unparseable_but_a_double_quoted_one_is_fine(home):
+    with pytest.raises(Unparseable):
+        split_command("echo ${HOME}/y")
+    assert argvs('echo "${HOME}/y"') == [("echo", "/home/eng/y")]
+
+
+@pytest.mark.parametrize("command", ["echo ~", "echo ~/x", "~/bin/x a"])
+def test_an_unquoted_tilde_is_unparseable(command, home):
+    with pytest.raises(Unparseable):
+        split_command(command)
