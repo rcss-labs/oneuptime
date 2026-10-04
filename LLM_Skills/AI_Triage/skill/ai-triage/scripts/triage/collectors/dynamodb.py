@@ -1,11 +1,13 @@
 """DynamoDB collector: table state, capacity, indexes, scaling activity, throttling metrics. No item is ever read."""
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from triage.collectors import Collector
 from triage.collectors.common import newest_in_window, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
-from triage.metrics import MetricSpec, add_metric_facts, fetch
+from triage.metrics import MetricSpec, _fetch, _summary_text, add_metric_facts
 
 MAX_ACTIVITIES = 20
 TABLE_NOT_FOUND = ("ResourceNotFoundException",)
@@ -51,19 +53,29 @@ def _add_operation_metrics(ctx: CollectContext, name: str, resource: str) -> Non
         for metric, stat in OPERATION_METRICS for operation in OPERATIONS
     ]
     errors_before = len(ctx.evidence.errors)
-    summaries = fetch(ctx, specs)
-    with_data = [spec for spec, summary in zip(specs, summaries) if summary.datapoints]
-    if with_data:
-        add_metric_facts(ctx, resource, with_data)
-    elif len(ctx.evidence.errors) > errors_before:
+    summaries, window_command, window_read = _fetch(ctx, specs, 300, None)
+    if not window_read:
         ctx.evidence.add(
-            kind=DERIVED, resource=resource, command=ctx.last_command,
+            kind=DERIVED, resource=resource, command=window_command,
             summary="The per-operation throttling and system error metrics could not be read (see errors)",
         )
-    else:
+        return
+    for summary in summaries:
+        if summary.datapoints:
+            ctx.evidence.add(
+                kind=INCIDENT_TIME, resource=resource, time=summary.peak_time, command=window_command,
+                summary=_summary_text(summary), data=asdict(summary),
+            )
+    if len(ctx.evidence.errors) > errors_before:
         ctx.evidence.add(
             kind=DERIVED, resource=resource, command=ctx.last_command,
-            summary="No throttling or system error was recorded for any operation in the window (no data for the per-operation metrics)",
+            summary="The one-week baseline for the per-operation metrics could not be read (see errors); the window values are reported without a comparison",
+        )
+    problems = [s for s in summaries if s.datapoints and s.label.split()[0] in ("ThrottledRequests", "SystemErrors")]
+    if not problems:
+        ctx.evidence.add(
+            kind=DERIVED, resource=resource, command=window_command,
+            summary="No throttling or system error was recorded for any operation in the window (no data for ThrottledRequests or SystemErrors)",
         )
 
 

@@ -209,3 +209,47 @@ def test_scaling_activity_list_is_bounded_by_max_items(config_data, tmp_path):
     activities = {"ScalingActivities": [{"Description": f"a{n}", "StartTime": f"2026-10-04T10:{n:02d}:00+00:00", "StatusCode": "Successful"} for n in range(30)]}
     ctx, _ = run(config_data, tmp_path, healthy_answers(**{"application-autoscaling describe-scaling-activities": activities}))
     assert len(by_summary(ctx, "Scaling activity")) <= 20
+
+
+def per_operation_calls(fake):
+    return [q for q in fake.queries if any("Operation" in {d["Name"] for d in x["MetricStat"]["Metric"]["Dimensions"]} for x in q)]
+
+
+def test_a_busy_table_without_throttling_still_gets_the_no_throttling_fact(config_data, tmp_path):
+    ctx, _ = run_with_metrics(config_data, tmp_path, {("SuccessfulRequestLatency", "GetItem"): 12.5})
+    assert by_summary(ctx, "SuccessfulRequestLatency GetItem (Maximum): peak 12.5")
+    assert len(by_summary(ctx, "throttling or system error was recorded")) == 1
+
+
+def test_no_such_fact_when_throttling_or_errors_have_data(config_data, tmp_path):
+    for data in ({("ThrottledRequests", "Scan"): 3.0}, {("SystemErrors", "PutItem"): 1.0}):
+        ctx, _ = run_with_metrics(config_data, tmp_path, data)
+        assert by_summary(ctx, "throttling or system error was recorded") == []
+
+
+def test_per_operation_metrics_cost_two_calls(config_data, tmp_path):
+    _, fake = run_with_metrics(config_data, tmp_path, {("ThrottledRequests", "Query"): 12.0})
+    calls = per_operation_calls(fake)
+    assert len(calls) == 2
+
+
+class BaselineDenied(MetricsByQuery):
+    """Fails only the call that reads the week-earlier baseline."""
+
+    def __call__(self, argv, timeout):
+        if argv[1:3] == ["cloudwatch", "get-metric-data"] and argv[argv.index("--start-time") + 1].startswith("2026-09-27"):
+            queries = json.loads(argv[argv.index("--metric-data-queries") + 1])
+            if any(any(d["Name"] == "Operation" for d in q["MetricStat"]["Metric"]["Dimensions"]) for q in queries):
+                return access_denied("GetMetricData")[0], "", access_denied("GetMetricData")[1]
+        return super().__call__(argv, timeout)
+
+
+def test_a_failed_baseline_is_named_and_the_window_is_still_reported(config_data, tmp_path):
+    answers = healthy_answers()
+    ctx, aws, _ = make_context(config_data, tmp_path, answers, collector="dynamodb")
+    ctx.runner = BaselineDenied(answers, {("ThrottledRequests", "Query"): 12.5})
+    COLLECTOR.run(ctx, dict(TARGETS))
+    assert by_summary(ctx, "ThrottledRequests Query (Sum): peak 12.5")
+    fact = by_summary(ctx, "one-week baseline")[0]
+    assert fact.kind == "derived" and "could not be read" in fact.summary and "window" in fact.summary
+    assert by_summary(ctx, "per-operation throttling and system error metrics could not be read") == []
