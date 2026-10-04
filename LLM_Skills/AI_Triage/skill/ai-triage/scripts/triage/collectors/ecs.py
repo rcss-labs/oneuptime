@@ -80,6 +80,14 @@ def _add_stopped_tasks(ctx: CollectContext, cluster: str, name: str, resource: s
         ["--cluster", cluster, "--service-name", name, "--desired-status", "STOPPED", "--max-items", MAX_ITEMS],
     )
     arns = (listed or {}).get("taskArns", [])
+    if listed is not None and not arns:
+        ctx.evidence.add(
+            kind=DERIVED, resource=resource, command=ctx.last_command,
+            summary=(
+                f"No stopped tasks were found for service {name} "
+                "(ECS keeps stopped tasks visible for only about an hour)"
+            ),
+        )
     if not arns:
         return
     described = ctx.aws("ecs", "describe-tasks", ["--cluster", cluster, "--tasks", *arns])
@@ -138,11 +146,22 @@ def _container_changes(name: str, old: dict, new: dict) -> list[str]:
     return changes
 
 
-def _add_definition_diff(ctx: CollectContext, resource: str, reference: str, current: dict) -> None:
+def _previous_reference(service: dict, reference: str) -> str | None:
+    """The task definition of a non-primary deployment, else the revision one below the current one."""
+    for deployment in service.get("deployments", []):
+        other = _short_name(deployment.get("taskDefinition", ""))
+        if deployment.get("status") != "PRIMARY" and other and other != reference:
+            return other
     family, _, revision = reference.rpartition(":")
-    if not revision.isdigit() or int(revision) <= 1:
+    if revision.isdigit() and int(revision) > 1:
+        return f"{family}:{int(revision) - 1}"
+    return None
+
+
+def _add_definition_diff(ctx: CollectContext, resource: str, reference: str, current: dict, service: dict) -> None:
+    previous_reference = _previous_reference(service, reference)
+    if previous_reference is None:
         return
-    previous_reference = f"{family}:{int(revision) - 1}"
     previous = _describe_task_definition(ctx, previous_reference)
     if previous is None:
         return
@@ -198,7 +217,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     definition = _describe_task_definition(ctx, reference)
     if definition is not None:
         _add_task_definition(ctx, resource, reference, definition)
-        _add_definition_diff(ctx, resource, reference, definition)
+        _add_definition_diff(ctx, resource, reference, definition, service)
     _add_scaling_activities(ctx, cluster, name, resource)
     _add_metrics(ctx, cluster, name, resource)
 

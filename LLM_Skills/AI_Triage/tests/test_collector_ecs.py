@@ -188,7 +188,7 @@ def test_task_definition_diff_by_name_without_values(config_data, tmp_path):
     fake = RevisionAws(healthy_answers(), current, previous)
     ctx.runner = fake
     COLLECTOR.run(ctx, dict(TARGETS))
-    diff = next(f for f in ctx.evidence.facts if f.kind == "derived")
+    diff = next(f for f in ctx.evidence.facts if "compared with" in f.summary)
     assert "checkout:1" in diff.summary and "checkout:2" in diff.summary
     assert "cpu" in diff.summary
     assert "NEW_FLAG" in diff.summary and "OLD_FLAG" in diff.summary and "LOG_LEVEL" in diff.summary
@@ -236,7 +236,7 @@ def test_metrics_are_added(config_data, tmp_path):
     ]}
     ctx, aws, _ = run(config_data, tmp_path, healthy_answers(**{"cloudwatch get-metric-data": results}))
     assert by_summary(ctx, "CPUUtilization (Average): peak 96.2")
-    assert by_summary(ctx, "MemoryUtilization (Average): peak 50.0")
+    assert by_summary(ctx, "MemoryUtilization (Average): peak 50 at")
     queries = json.loads(aws.called("cloudwatch", "get-metric-data")[0][
         aws.called("cloudwatch", "get-metric-data")[0].index("--metric-data-queries") + 1])
     dims = queries[0]["MetricStat"]["Metric"]["Dimensions"]
@@ -353,3 +353,28 @@ def test_task_level_cpu_and_memory_are_shown_and_diffed(config_data, tmp_path):
     diff = next(f for f in ctx.evidence.facts if "compared with" in f.summary)
     assert "task cpu 512 -> 1024" in diff.summary
     assert "task memory" not in diff.summary
+
+
+def test_no_stopped_tasks_adds_a_note(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, healthy_answers())
+    note = next(f for f in ctx.evidence.facts if f.kind == "derived" and "stopped" in f.summary.lower())
+    assert "No stopped tasks were found for service checkout-api" in note.summary
+
+
+def test_previous_revision_comes_from_the_non_primary_deployment(config_data, tmp_path):
+    older = TASK_DEF_ARN.replace(":42", ":39")
+    svc = service()
+    svc["services"][0]["deployments"].append({
+        "id": "ecs-svc/0", "status": "ACTIVE", "taskDefinition": older, "desiredCount": 1,
+        "runningCount": 1, "pendingCount": 0, "rolloutState": "COMPLETED", "createdAt": "2026-10-04T09:00:00+00:00"})
+    current = {"taskDefinition": {"family": "checkout-api", "revision": 42, "containerDefinitions": [container(cpu=512)]}}
+    previous = {"taskDefinition": {"family": "checkout-api", "revision": 39, "containerDefinitions": [container(cpu=256)]}}
+    answers = healthy_answers(**{"ecs describe-services": svc})
+    ctx, _, _ = make_context(config_data, tmp_path, answers, collector="ecs")
+    fake = RevisionAws(answers, current, previous)
+    fake.revisions["checkout-api:39"] = previous
+    ctx.runner = fake
+    COLLECTOR.run(ctx, dict(TARGETS))
+    diff = next(f for f in ctx.evidence.facts if "compared with" in f.summary)
+    assert "compared with checkout-api:39" in diff.summary
+    assert "cpu 256 -> 512" in diff.summary
