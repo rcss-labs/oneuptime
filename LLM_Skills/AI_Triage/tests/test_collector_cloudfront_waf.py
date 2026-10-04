@@ -298,7 +298,7 @@ def test_the_distributions_own_web_acl_comes_from_its_configuration(config_data,
 
 
 def test_a_classic_waf_id_or_an_empty_one_is_ignored(config_data, tmp_path):
-    for value in ("", "a1b2c3d4-0000-1111-2222-333344445555"):
+    for value in ("", "a1b2c3d4-0000-1111-2222-3333aaaa5555"):
         answers = answers_for(**{"cloudfront get-distribution": distribution(web_acl_id=value)})
         _, aws, _ = run(config_data, tmp_path, answers, {"distribution_id": "E1EXAMPLE"})
         assert aws.called("wafv2", "get-web-acl") == []
