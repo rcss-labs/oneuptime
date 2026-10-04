@@ -188,10 +188,13 @@ def test_task_definition_diff_by_name_without_values(config_data, tmp_path):
     fake = RevisionAws(healthy_answers(), current, previous)
     ctx.runner = fake
     COLLECTOR.run(ctx, dict(TARGETS))
-    diff = next(f for f in ctx.evidence.facts if "compared with" in f.summary)
-    assert "checkout:1" in diff.summary and "checkout:2" in diff.summary
-    assert "cpu" in diff.summary
-    assert "NEW_FLAG" in diff.summary and "OLD_FLAG" in diff.summary and "LOG_LEVEL" in diff.summary
+    diff = next(f for f in ctx.evidence.facts if "between revision" in f.summary)
+    changes = " | ".join(diff.data["changes"])
+    assert "between revision 41 and 42" in diff.summary
+    assert "checkout:1" in changes and "checkout:2" in changes
+    assert "cpu" in changes
+    assert "NEW_FLAG" in changes and "OLD_FLAG" in changes and "LOG_LEVEL" in changes
+    assert "DB_PASSWORD" in changes and "values hidden" in changes
     document = ctx.evidence.to_json()
     assert secret not in document and old_secret not in document
     assert_read_only(ctx, fake)
@@ -200,7 +203,7 @@ def test_task_definition_diff_by_name_without_values(config_data, tmp_path):
 def test_no_diff_for_revision_one(config_data, tmp_path):
     answers = healthy_answers(**{"ecs describe-services": service(taskDefinition=TASK_DEF_ARN.replace(":42", ":1"))})
     ctx, aws, _ = run(config_data, tmp_path, answers)
-    assert by_summary(ctx, "compared with") == []
+    assert by_summary(ctx, "between revision") == []
     assert len(aws.called("ecs", "describe-task-definition")) == 1
 
 
@@ -324,8 +327,8 @@ def test_diff_reports_a_changed_host(config_data, tmp_path):
     ctx, _, _ = make_context(config_data, tmp_path, healthy_answers(), collector="ecs")
     ctx.runner = RevisionAws(healthy_answers(), current, previous)
     COLLECTOR.run(ctx, dict(TARGETS))
-    diff = next(f for f in ctx.evidence.facts if "compared with" in f.summary)
-    assert "DB_HOST changed from https://a.example.com to https://b.example.com" in diff.summary
+    diff = next(f for f in ctx.evidence.facts if "between revision" in f.summary)
+    assert "container app: DB_HOST changed from https://a.example.com to https://b.example.com" in diff.data["changes"]
 
 
 def test_deployment_fact_separates_creation_from_current_state(config_data, tmp_path):
@@ -350,9 +353,9 @@ def test_task_level_cpu_and_memory_are_shown_and_diffed(config_data, tmp_path):
     COLLECTOR.run(ctx, dict(TARGETS))
     current = next(f for f in ctx.evidence.facts if f.kind == "current" and "Task definition" in f.summary)
     assert "task cpu 1024" in current.summary and "task memory 2048" in current.summary
-    diff = next(f for f in ctx.evidence.facts if "compared with" in f.summary)
-    assert "task cpu 512 -> 1024" in diff.summary
-    assert "task memory" not in diff.summary
+    diff = next(f for f in ctx.evidence.facts if "between revision" in f.summary)
+    assert "task cpu 512 -> 1024" in diff.data["changes"]
+    assert not any("task memory" in change for change in diff.data["changes"])
 
 
 def test_no_stopped_tasks_adds_a_note(config_data, tmp_path):
@@ -375,6 +378,46 @@ def test_previous_revision_comes_from_the_non_primary_deployment(config_data, tm
     fake.revisions["checkout-api:39"] = previous
     ctx.runner = fake
     COLLECTOR.run(ctx, dict(TARGETS))
-    diff = next(f for f in ctx.evidence.facts if "compared with" in f.summary)
-    assert "compared with checkout-api:39" in diff.summary
-    assert "cpu 256 -> 512" in diff.summary
+    diff = next(f for f in ctx.evidence.facts if "between revision" in f.summary)
+    assert "between revision 39 and 42" in diff.summary
+    assert "container app cpu 256 -> 512" in diff.data["changes"]
+
+
+def test_diff_summary_is_short_with_a_count_and_the_list_is_in_data(config_data, tmp_path):
+    image_old = "111111111111.dkr.ecr.eu-west-1.amazonaws.com/" + "checkout-service/" * 8 + "app:1"
+    image_new = image_old[:-1] + "2"
+    old_env = {f"SETTING_{n}": f"old-{n}" for n in range(5)}
+    new_env = {f"SETTING_{n}": f"new-{n}" for n in range(5)}
+    current = {"taskDefinition": {"family": "checkout-api", "revision": 42, "containerDefinitions": [container(image=image_new, env=new_env)]}}
+    previous = {"taskDefinition": {"family": "checkout-api", "revision": 41, "containerDefinitions": [container(image=image_old, env=old_env)]}}
+    ctx, _, _ = make_context(config_data, tmp_path, healthy_answers(), collector="ecs")
+    ctx.runner = RevisionAws(healthy_answers(), current, previous)
+    COLLECTOR.run(ctx, dict(TARGETS))
+    diff = next(f for f in ctx.evidence.facts if "between revision" in f.summary)
+    assert diff.summary == "The task definition changed between revision 41 and 42: 6 changes (image, 5 environment values)"
+    assert len(diff.data["changes"]) == 6
+    assert "changes_omitted" not in diff.data
+
+
+def test_diff_list_is_capped(config_data, tmp_path):
+    old_env = {f"SETTING_{n}": "a" for n in range(60)}
+    new_env = {f"SETTING_{n}": "b" for n in range(60)}
+    current = {"taskDefinition": {"family": "checkout-api", "revision": 42, "containerDefinitions": [container(env=new_env)]}}
+    previous = {"taskDefinition": {"family": "checkout-api", "revision": 41, "containerDefinitions": [container(env=old_env)]}}
+    ctx, _, _ = make_context(config_data, tmp_path, healthy_answers(), collector="ecs")
+    ctx.runner = RevisionAws(healthy_answers(), current, previous)
+    COLLECTOR.run(ctx, dict(TARGETS))
+    diff = next(f for f in ctx.evidence.facts if "between revision" in f.summary)
+    assert len(diff.data["changes"]) == 50
+    assert diff.data["changes_omitted"] == 10
+    assert "60 changes" in diff.summary
+
+
+def test_no_change_between_revisions(config_data, tmp_path):
+    same = task_definition(41)
+    ctx, _, _ = make_context(config_data, tmp_path, healthy_answers(), collector="ecs")
+    ctx.runner = RevisionAws(healthy_answers(), same, same)
+    COLLECTOR.run(ctx, dict(TARGETS))
+    diff = next(f for f in ctx.evidence.facts if "between revision" in f.summary)
+    assert diff.summary.startswith("The task definition did not change between revision 41 and 42")
+    assert diff.data["changes"] == []

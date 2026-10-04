@@ -12,6 +12,8 @@ from triage.metrics import MetricSpec, add_metric_facts
 MAX_EVENTS = 30
 MAX_ITEMS = "20"
 TASK_LEVEL_FIELDS = ("cpu", "memory")
+MAX_CHANGES = 50
+MAX_CHANGE_LENGTH = 300
 
 
 def _short_name(arn: str) -> str:
@@ -134,15 +136,18 @@ def _environment(container: dict) -> dict[str, Any]:
     return {entry.get("name", ""): entry.get("value") for entry in container.get("environment", [])}
 
 
-def _container_changes(name: str, old: dict, new: dict) -> list[str]:
-    changes = []
+Change = tuple[str, str]  # (kind, sentence)
+
+
+def _container_changes(name: str, old: dict, new: dict) -> list[Change]:
+    changes: list[Change] = []
     for field in ("image", "cpu", "memory"):
         if old.get(field) != new.get(field):
-            changes.append(f"container {name} {field} {old.get(field)} -> {new.get(field)}")
+            changes.append((field, f"container {name} {field} {old.get(field)} -> {new.get(field)}"))
     old_env, new_env = _environment(old), _environment(new)
     raw_changed = {key for key in old_env.keys() & new_env.keys() if old_env[key] != new_env[key]}
     for sentence in env_changes(env_summary(old_env.items()), env_summary(new_env.items()), raw_changed):
-        changes.append(f"container {name}: {sentence}")
+        changes.append(("environment value", f"container {name}: {sentence}"))
     return changes
 
 
@@ -166,21 +171,47 @@ def _add_definition_diff(ctx: CollectContext, resource: str, reference: str, cur
     if previous is None:
         return
     old, new = _containers_by_name(previous), _containers_by_name(current)
-    changes = [
-        f"task {field} {previous.get(field)} -> {current.get(field)}"
+    changes: list[Change] = [
+        (f"task {field}", f"task {field} {previous.get(field)} -> {current.get(field)}")
         for field in TASK_LEVEL_FIELDS
         if previous.get(field) != current.get(field)
     ]
     for name in sorted(old.keys() | new.keys()):
         if name not in old or name not in new:
-            changes.append(f"container {name} {'added' if name in new else 'removed'}")
+            changes.append(("container", f"container {name} {'added' if name in new else 'removed'}"))
         else:
             changes += _container_changes(name, old[name], new[name])
-    detail = "; ".join(changes) or "no difference in image, cpu, memory, or environment variables"
+    before, after = _revision(previous_reference), _revision(reference)
+    data: dict[str, Any] = {"changes": [text[:MAX_CHANGE_LENGTH] for _, text in changes[:MAX_CHANGES]]}
+    if len(changes) > MAX_CHANGES:
+        data["changes_omitted"] = len(changes) - MAX_CHANGES
     ctx.evidence.add(
-        kind=DERIVED, resource=resource, command=ctx.last_command,
-        summary=f"Task definition {reference} compared with {previous_reference}: {detail}",
+        kind=DERIVED, resource=resource, command=ctx.last_command, data=data,
+        summary=_diff_summary(before, after, changes),
     )
+
+
+def _revision(reference: str) -> str:
+    return reference.rpartition(":")[2]
+
+
+def _diff_summary(before: str, after: str, changes: list[Change]) -> str:
+    if not changes:
+        return (
+            f"The task definition did not change between revision {before} and {after} "
+            "(image, cpu, memory, and environment values were compared)"
+        )
+    counts: dict[str, int] = {}
+    for kind, _ in changes:
+        counts[kind] = counts.get(kind, 0) + 1
+    parts = []
+    for kind, count in counts.items():
+        if kind == "environment value":
+            parts.append(f"{count} environment value{'s' if count > 1 else ''}")
+        else:
+            parts.append(kind if count == 1 else f"{count} {kind}s")
+    plural = "change" if len(changes) == 1 else "changes"
+    return f"The task definition changed between revision {before} and {after}: {len(changes)} {plural} ({', '.join(parts)})"
 
 
 def _add_scaling_activities(ctx: CollectContext, cluster: str, name: str, resource: str) -> None:
