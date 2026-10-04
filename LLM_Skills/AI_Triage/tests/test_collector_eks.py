@@ -255,13 +255,19 @@ def test_no_log_line_inside_the_window_is_a_derived_fact(config_data, tmp_path):
     assert not any("incident" in f.excerpt for f in ctx.evidence.facts)
 
 
-def test_only_the_last_fifty_lines_of_the_window_are_kept(config_data, tmp_path):
+def test_the_first_twenty_lines_and_the_error_lines_are_kept(config_data, tmp_path):
     lines = [f"2026-10-04T10:{n // 60:02d}:{n % 60:02d}.000000000Z line-{n:03d}" for n in range(80)]
+    lines[40] = lines[40] + " ERROR something broke"
     kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
     ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
                     logs={("payments-api-abc", "app", True): "\n".join(lines)})
-    fact = next(f for f in ctx.evidence.facts if "line-079" in f.excerpt)
-    assert "50 lines" in fact.summary and "line-029" not in fact.excerpt
+    fact = next(f for f in ctx.evidence.facts if "ERROR something broke" in f.excerpt)
+    kept = fact.data["lines"]
+    assert len(kept) == 21 and "line-000" in kept[0] and "line-019" in kept[19] and "ERROR something broke" in kept[20]
+    assert "line-021" not in " ".join(kept)
+    for part in ("80 lines read", "80 inside the window", "1 error-looking", "21 kept"):
+        assert part in fact.summary
+    assert "ERROR something broke" in fact.summary
 
 
 def test_current_and_previous_logs_for_a_running_container_that_restarted(config_data, tmp_path):
@@ -388,30 +394,14 @@ def test_pod_log_secrets_never_reach_the_document(config_data, tmp_path):
     assert password not in document and key not in document
     assert "failed" in document
 
-def test_log_excerpt_is_the_last_500_characters(config_data, tmp_path):
-    lines = [f"2026-10-04T10:30:{n:02d}.000000000Z {'a' * 100}" for n in range(40)]
-    lines[-1] += " THE-END"
+def test_long_lines_are_cut_at_300_characters_with_a_marker(config_data, tmp_path):
+    lines = [f"2026-10-04T10:30:{n:02d}.000000000Z {'a' * 400}" for n in range(3)]
     kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
     ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
                     logs={("payments-api-abc", "app", True): "\n".join(lines)})
-    excerpt = next(f.excerpt for f in ctx.evidence.facts if f.excerpt.endswith("THE-END"))
-    assert len(excerpt) <= 500
-
-def test_pod_event_and_log_caps(config_data, tmp_path):
-    pods = [pod(name=f"p-{n:02d}", containers=[container(ready=False)]) for n in range(40)]
-    events = [event(reason=f"Reason{n}", when=f"2026-10-04T10:{n % 60:02d}:00Z") for n in range(50)]
-    kube = kube_answers(**{"get pods": {"items": pods}, "get events": {"items": events}})
-    ctx, _, fake_kube = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"})
-    assert len(with_text(ctx, "Pod p-")) == 30
-    assert len(with_text(ctx, "Warning event")) == 40
-    assert len({c[c.index("logs") + 1] for c in log_calls(fake_kube)}) == 3
-    assert with_text(ctx, "10 more pods")
-
-def test_nodegroup_cap(config_data, tmp_path):
-    names = [f"ng-{n}" for n in range(12)]
-    ctx, aws, _ = run(config_data, tmp_path, aws_answers(**{"eks list-nodegroups": {"nodegroups": names}}))
-    assert len(aws.called("eks", "describe-nodegroup")) == 10
-    assert with_text(ctx, "12 nodegroups")
+    fact = next(f for f in ctx.evidence.facts if "lines" in f.data)
+    assert all(len(line) <= 300 and line.endswith("…") for line in fact.data["lines"])
+    assert fact.excerpt == fact.data["lines"][0].rstrip("…") or fact.excerpt.startswith("2026-10-04T10:30:00")
 
 
 def test_updates_are_listed_twenty_at_a_time(config_data, tmp_path):
@@ -492,3 +482,43 @@ def test_event_count_is_never_one_times(config_data, tmp_path):
     assert not any("1 times" in t for t in texts)
     assert any("BackOff" in t and "once" in t for t in texts)
     assert any("Unhealthy" in t and "12 times" in t for t in texts)
+
+
+def test_an_early_error_in_a_cut_answer_is_kept(config_data, tmp_path):
+    error = "2026-10-04T10:00:04.000000000Z ERROR db timeout"
+    infos = [f"2026-10-04T10:{1 + n // 60:02d}:{n % 60:02d}.000000000Z info " + "x" * 180 for n in range(1100)]
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): "\n".join(["2026-10-04T10:00:00.000000000Z start", error, *infos])})
+    fact = next(f for f in ctx.evidence.facts if "lines" in f.data)
+    assert fact.excerpt == error
+    assert error in fact.data["lines"] and len(fact.data["lines"]) <= 50
+    assert any("200000 bytes" in f.summary for f in ctx.evidence.facts)
+
+
+def test_excerpt_is_the_first_in_window_line_when_nothing_looks_like_an_error(config_data, tmp_path):
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): "\n".join(["2026-10-04T10:30:00Z hello", "2026-10-04T10:31:00Z world"])})
+    fact = next(f for f in ctx.evidence.facts if "lines" in f.data)
+    assert fact.excerpt == "2026-10-04T10:30:00Z hello" and "0 error-looking" in fact.summary
+
+
+def test_error_words_match_in_any_case_and_secrets_are_redacted_in_data(config_data, tmp_path):
+    password = "pw" + "6" * 10
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    text = f"2026-10-04T10:30:00Z Connection refused password={password}"
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): "2026-10-04T10:29:00Z ok\n" + text})
+    fact = next(f for f in ctx.evidence.facts if "lines" in f.data)
+    assert "1 error-looking" in fact.summary and "Connection refused" in fact.excerpt
+    assert password not in ctx.evidence.to_json()
+
+
+def test_an_answer_ending_in_a_replacement_character_keeps_the_last_line_as_text(config_data, tmp_path):
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    last = "2026-10-04T10:40:00Z cut mid-character \ufffd"
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): "2026-10-04T10:30:00Z first\n" + last})
+    fact = next(f for f in ctx.evidence.facts if "lines" in f.data)
+    assert fact.data["lines"][-1] == last

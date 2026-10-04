@@ -15,7 +15,13 @@ MAX_ADDONS = 20
 MAX_UPDATES = "20"
 MAX_WORKLOADS = 10
 MAX_CONTAINERS_PER_POD = 2
-LOG_LINES = 50
+LOG_HEAD_LINES = 20
+LOG_ERROR_LINES = 30
+LOG_LINE_CHARS = 300
+_ERROR_LOOKING = re.compile(
+    r"\b(error|fatal|critical|panic|warn|warning)\b|exception|traceback|panic|killed|refused|timeout|denied|failed",
+    re.IGNORECASE,
+)
 LOG_BYTES = 200000
 MAX_PODS = 30
 MAX_EVENTS = 40
@@ -298,17 +304,28 @@ def _fetch_logs(ctx: CollectContext, cluster: str, namespace: str, pod_name: str
                 summary=f"No log line of {which} {container} in pod {pod_name} falls inside the incident window",
             )
         return
-    kept = inside[-LOG_LINES:]
-    # Redact line by line before cutting, so a secret cut by the excerpt boundary cannot leave a fragment.
-    text = "\n".join(ctx.evidence.redactor.text(line) for _, line in kept)
+    errors = [index for index, (_, line) in enumerate(inside) if _ERROR_LOOKING.search(line)]
+    wanted = sorted(set(range(min(LOG_HEAD_LINES, len(inside)))) | set(errors[:LOG_ERROR_LINES]))
+    # Redact each line before it is cut or quoted, so no secret survives at a cut boundary.
+    kept = [(inside[i][0], _shorten(ctx.evidence.redactor.text(inside[i][1]))) for i in wanted]
+    first_error = _shorten(ctx.evidence.redactor.text(inside[errors[0]][1])) if errors else None
+    shown = first_error or kept[0][1]
+    error_text = f"; first error-looking line: {first_error}" if first_error else ""
     ctx.evidence.add(
         kind=INCIDENT_TIME, resource=resource, time=kept[0][0], command=ctx.last_command,
         summary=(
             f"Log lines of {which} {container} in pod {pod_name} from {format_time(kept[0][0])} "
-            f"to {format_time(kept[-1][0])} ({len(kept)} lines kept of {len(inside)} inside the window)"
+            f"to {format_time(kept[-1][0])}: {len(output.splitlines())} lines read, {len(inside)} inside the window, "
+            f"{len(errors)} error-looking, {len(kept)} kept (the first {LOG_HEAD_LINES} and the error-looking lines)"
+            f"{error_text}"
         ),
-        excerpt=text[-MAX_EXCERPT:],
+        data={"lines": [line for _, line in kept]},
+        excerpt=shown,
     )
+
+
+def _shorten(line: str) -> str:
+    return line if len(line) <= LOG_LINE_CHARS else line[: LOG_LINE_CHARS - 1] + "…"
 
 
 def _add_logs(ctx: CollectContext, cluster: str, namespace: str, pod: dict) -> None:
