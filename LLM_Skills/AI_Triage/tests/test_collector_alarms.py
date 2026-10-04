@@ -31,7 +31,8 @@ def run(config_data, tmp_path, answers, targets):
 def test_declares_its_targets():
     assert COLLECTOR.name == "alarms"
     assert COLLECTOR.required == ()
-    assert COLLECTOR.optional == ("alarm_names", "name_prefix")
+    assert COLLECTOR.optional == ()
+    assert COLLECTOR.one_of == ("alarm_names", "name_prefix")
 
 
 def test_alarm_names_give_current_facts(config_data, tmp_path):
@@ -125,11 +126,6 @@ def test_no_alarms_found(config_data, tmp_path):
     assert_read_only(ctx, aws)
 
 
-def test_no_target_is_an_error(config_data, tmp_path):
-    ctx, aws = run(config_data, tmp_path, {}, {})
-    assert ctx.evidence.errors and not aws.calls
-
-
 def test_history_failure_is_recorded_and_collection_continues(config_data, tmp_path):
     answers = {"cloudwatch describe-alarms": {"MetricAlarms": [alarm("cpu-high")]},
                "cloudwatch describe-alarm-history": (254, "An error occurred (AccessDeniedException) when calling the DescribeAlarmHistory operation: no")}
@@ -188,3 +184,62 @@ def test_oldest_first_history_gives_earliest_alarm_time(config_data, tmp_path):
     ctx, _ = run(config_data, tmp_path, answers, {"alarm_names": "cpu-high"})
     first = [f for f in ctx.evidence.facts if f.kind == "derived"]
     assert "2026-10-04T10:30:00Z" in first[0].summary
+
+
+def test_more_than_fifty_prefix_matches_is_said(config_data, tmp_path):
+    answers = {"cloudwatch describe-alarms": {"MetricAlarms": [alarm("svc-cpu")], "NextToken": "abc"},
+               "cloudwatch describe-alarm-history": {"AlarmHistoryItems": []}}
+    ctx, _ = run(config_data, tmp_path, answers, {"name_prefix": "svc-"})
+    notes = [f for f in ctx.evidence.facts if f.kind == "derived" and "more alarms match" in f.summary.lower()]
+    assert len(notes) == 1 and "50" in notes[0].summary
+
+
+def test_no_next_token_means_no_note(config_data, tmp_path):
+    answers = {"cloudwatch describe-alarms": {"MetricAlarms": [alarm("svc-cpu")]},
+               "cloudwatch describe-alarm-history": {"AlarmHistoryItems": []}}
+    ctx, _ = run(config_data, tmp_path, answers, {"name_prefix": "svc-"})
+    assert not [f for f in ctx.evidence.facts if "more alarms match" in f.summary.lower()]
+
+
+def history_by_alarm(config_data, tmp_path, alarms_reply, when_by_name, targets):
+    ctx, aws, _ = make_context(config_data, tmp_path, {"cloudwatch describe-alarms": alarms_reply}, collector="alarms")
+    original = aws.__call__
+
+    def per_alarm(argv, timeout):
+        if argv[1:3] == ["cloudwatch", "describe-alarm-history"]:
+            aws.calls.append(argv)
+            when = when_by_name.get(argv[argv.index("--alarm-name") + 1])
+            items = [history(when, "OK", "ALARM")] if when else []
+            return 0, json.dumps({"AlarmHistoryItems": items}), ""
+        return original(argv, timeout)
+
+    ctx.runner = per_alarm
+    COLLECTOR.run(ctx, targets)
+    return ctx, aws
+
+
+def test_first_alarm_is_a_metric_alarm_and_a_tied_composite_is_named_second(config_data, tmp_path):
+    reply = {"MetricAlarms": [alarm("m1")], "CompositeAlarms": [composite("c1")]}
+    ctx, _ = history_by_alarm(config_data, tmp_path, reply, {"m1": IN_WINDOW, "c1": IN_WINDOW}, {"alarm_names": "m1,c1"})
+    first = [f for f in ctx.evidence.facts if f.summary.startswith("The first alarm")]
+    assert len(first) == 1
+    assert "was m1 at 2026-10-04T10:42:10Z" in first[0].summary
+    assert "c1" in first[0].summary and "composite" in first[0].summary
+
+
+def test_composite_that_changed_later_is_not_mentioned(config_data, tmp_path):
+    reply = {"MetricAlarms": [alarm("m1")], "CompositeAlarms": [composite("c1")]}
+    ctx, _ = history_by_alarm(config_data, tmp_path, reply, {"m1": IN_WINDOW, "c1": LATER}, {"alarm_names": "m1,c1"})
+    first = [f for f in ctx.evidence.facts if f.summary.startswith("The first alarm")]
+    assert "c1" not in first[0].summary
+
+
+def test_metric_alarms_get_history_before_composites_and_left_out_alarms_are_said(config_data, tmp_path):
+    reply = {"CompositeAlarms": [composite(f"c{i}") for i in range(5)],
+             "MetricAlarms": [alarm(f"m{i}") for i in range(18)]}
+    ctx, aws = history_by_alarm(config_data, tmp_path, reply, {}, {"name_prefix": "x"})
+    asked = [c[c.index("--alarm-name") + 1] for c in aws.called("cloudwatch", "describe-alarm-history")]
+    assert len(asked) == 20
+    assert all(f"m{i}" in asked for i in range(18))
+    note = [f for f in ctx.evidence.facts if f.kind == "derived" and "history" in f.summary and "left out" in f.summary]
+    assert len(note) == 1 and "3" in note[0].summary
