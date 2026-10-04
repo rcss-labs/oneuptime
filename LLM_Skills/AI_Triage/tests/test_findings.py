@@ -300,3 +300,47 @@ def test_analyst_field_must_match_the_file_name(case_dir):
     assert result["checked"] == {"compute": ["real"]}
     assert [item["file"] for item in result["unreadable"]] == ["findings/evil.json"]
     assert "analyst" in result["unreadable"][0]["reason"]
+
+
+@pytest.mark.parametrize("stem_word", ["auth", "token", "password", "api-keys", "credentials", "secret"])
+def test_stored_ids_and_summaries_are_never_redacted(tmp_path, stem_word):
+    add_evidence(tmp_path, collector="lambda", suffix=f"{stem_word}-service",
+                 facts=[(INCIDENT_TIME, "Throttles peaked at 40 for the function", "")])
+    qualified = f"lambda-prod-main-eu-west-1-{stem_word}-service:lambda-0001"
+    result = check(tmp_path, [finding(fact_ids=[qualified], excerpt="Throttles peaked at 40")])
+    assert result["rejected"] == []
+    stored = json.loads((tmp_path / "findings" / "checked.json").read_text())["valid"][0]
+    assert stored["fact_ids"] == [qualified]
+    assert stored["fact_summaries"] == {qualified: "Throttles peaked at 40 for the function"}
+
+
+def test_short_excerpt_must_be_a_whole_value_not_a_substring_of_the_summary(tmp_path):
+    evidence = Evidence("ecs", "prod-main", "eu-west-1", WINDOW)
+    evidence.add(kind=INCIDENT_TIME, resource="svc", summary="Instance db is available", time="2026-10-04T10:41:00Z", data={"az": "a"})
+    evidence.write(tmp_path)
+    assert check(tmp_path, [finding(excerpt="a")])["rejected"] != []
+
+
+def test_whole_value_shorter_than_three_characters_never_qualifies(tmp_path):
+    add_evidence(tmp_path, facts=[(INCIDENT_TIME, "ok", "")])
+    assert check(tmp_path, [finding(excerpt="ok")])["rejected"] != []
+
+
+def test_short_excerpt_equal_to_the_facts_own_excerpt_field_is_accepted(tmp_path):
+    add_evidence(tmp_path, facts=[(INCIDENT_TIME, "Task stopped with a reason", "OOMKilled")])
+    assert check(tmp_path, [finding(excerpt="OOMKilled")])["rejected"] == []
+
+
+def test_short_excerpt_equal_to_a_data_value_is_accepted_without_appearing_in_the_summary(tmp_path):
+    evidence = Evidence("ecs", "prod-main", "eu-west-1", WINDOW)
+    evidence.add(kind=INCIDENT_TIME, resource="svc", summary="Task stopped", time="2026-10-04T10:41:00Z", data={"reason": "OOMKilled"})
+    evidence.write(tmp_path)
+    assert check(tmp_path, [finding(excerpt="OOMKilled")])["rejected"] == []
+
+
+@pytest.mark.parametrize("facts", [5, "x", [1], [None]])
+def test_evidence_file_with_malformed_facts_is_reported_unreadable(case_dir, facts):
+    (case_dir / "evidence" / "bad-prod-main-eu-west-1.json").write_text(json.dumps({"collector": "bad", "facts": facts}))
+    result = check(case_dir, [finding()])
+    assert len(result["valid"]) == 1
+    assert any("bad-prod-main-eu-west-1.json" in warning and "unreadable" in warning for warning in result["warnings"])

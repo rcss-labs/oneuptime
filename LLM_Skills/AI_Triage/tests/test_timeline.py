@@ -141,3 +141,12 @@ def test_times_are_converted_to_utc(tmp_path):
 def test_backslashes_are_escaped_before_pipes():
     row = {"time": "2026-10-04T10:38:00Z", "source": "ecs", "fact_id": None, "resource": "", "text": "path C:\\ |", "offset": "x"}
     assert "path C:\\\\ \\|" in render_rows([row])
+
+
+def test_evidence_file_with_malformed_facts_is_reported_not_a_crash(tmp_path):
+    case = make_case(tmp_path)
+    (case / "evidence").mkdir()
+    (case / "evidence" / "bad-prod-main-eu-west-1.json").write_text(json.dumps({"collector": "bad", "facts": 5}))
+    (case / "evidence" / "worse-prod-main-eu-west-1.json").write_text(json.dumps({"collector": "worse", "facts": [1]}))
+    rows = build_timeline(case)
+    assert rows[-1]["source"] == "timeline" and "2 evidence files" in rows[-1]["text"] and "unreadable" in rows[-1]["text"]

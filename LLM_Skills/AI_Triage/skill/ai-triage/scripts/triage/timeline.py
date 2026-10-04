@@ -28,7 +28,7 @@ def _row(time: str, source: str, text: str, fact_id: str | None = None, resource
     return {"time": time, "source": source, "fact_id": fact_id, "resource": resource, "text": text}
 
 
-def _raw_rows(case_dir: Path, case: dict, incident: dict) -> list[dict]:
+def _raw_rows(case_dir: Path, case: dict, incident: dict, warnings: list[str]) -> list[dict]:
     rows = []
     incident_times = case.get("incident") if isinstance(case.get("incident"), dict) else {}
     for key, text in _INCIDENT_TEXTS:
@@ -39,7 +39,7 @@ def _raw_rows(case_dir: Path, case: dict, incident: dict) -> list[dict]:
         for entry in entries if isinstance(entries, list) else []:
             if isinstance(entry, dict) and entry.get("time"):
                 rows.append(_row(entry["time"], "oneuptime", str(entry.get("text", ""))))
-    for file_name, document in evidence_documents(case_dir):
+    for file_name, document in evidence_documents(case_dir, warnings):
         for fact in document.get("facts", []):
             if isinstance(fact, dict) and fact.get("kind") == INCIDENT_TIME and fact.get("time"):
                 fact_id = fact.get("id")
@@ -59,7 +59,8 @@ def build_timeline(case_dir: Path) -> list[dict]:
     start = parse_time(case["incident_start"])
     rows = []
     skipped = 0
-    for row in _raw_rows(case_dir, case, incident):
+    unreadable_files: list[str] = []
+    for row in _raw_rows(case_dir, case, incident, unreadable_files):
         if row["fact_id"] == _BAD_ID:
             skipped += 1
             continue
@@ -82,6 +83,8 @@ def build_timeline(case_dir: Path) -> list[dict]:
         notes.append(f"{dropped} more rows farther from the incident start were left out")
     if skipped:
         notes.append(f"{skipped} events with an unreadable time or fact id were left out")
+    if unreadable_files:
+        notes.append(f"{len(unreadable_files)} evidence files were unreadable and left out")
     for text in notes:
         note = _row("", "timeline", text)
         note["offset"] = ""

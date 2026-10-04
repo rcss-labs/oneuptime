@@ -11,6 +11,7 @@ from triage.window import WindowError, parse_time
 
 CHECKED_NAME = "checked.json"
 MIN_EXCERPT = 12
+MIN_WHOLE_VALUE = 3
 PROVENANCES = ("incident_time", "current", "inferred")
 CONFIDENCES = ("high", "medium", "low")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -28,7 +29,8 @@ def evidence_documents(case_dir: Path, warnings: list[str] | None = None) -> lis
             document = load_evidence(path)
         except (OSError, ValueError):
             document = None
-        if not isinstance(document, dict):
+        facts = document.get("facts", []) if isinstance(document, dict) else None
+        if not isinstance(facts, list) or not all(isinstance(fact, dict) for fact in facts):
             if warnings is not None:
                 warnings.append(f"evidence file {path.name} is unreadable and was skipped")
             continue
@@ -98,8 +100,8 @@ def _field_problems(finding: dict) -> list[str]:
 
 
 def _whole_values(fact: dict) -> set[str]:
-    """Every whole string value of a fact's summary and data, whitespace collapsed."""
-    values = {_collapse(str(fact.get("summary") or ""))}
+    """Every whole string value of a fact's summary, excerpt and data, whitespace collapsed."""
+    values = {_collapse(str(fact.get("summary") or "")), _collapse(str(fact.get("excerpt") or ""))}
     pending = [fact.get("data")]
     while pending:
         item = pending.pop()
@@ -110,6 +112,13 @@ def _whole_values(fact: dict) -> set[str]:
         elif isinstance(item, list):
             pending.extend(item)
     return values
+
+
+def _contains_excerpt(fact: dict, needle: str) -> bool:
+    """A long excerpt must appear in the summary or excerpt; a short one must equal a whole value."""
+    if len(needle) >= MIN_EXCERPT:
+        return any(needle in _collapse(str(fact.get(field) or "")) for field in ("summary", "excerpt"))
+    return len(needle) >= MIN_WHOLE_VALUE and needle in _whole_values(fact)
 
 
 def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str], dict[str, dict]]:
@@ -128,18 +137,16 @@ def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str]
     matching: list[dict] = []
     if isinstance(excerpt, str):
         needle = _collapse(excerpt)
-        matching = [
-            fact for fact in cited.values()
-            if any(needle in _collapse(str(fact.get(field) or "")) for field in ("summary", "excerpt"))
-        ]
+        matching = [fact for fact in cited.values() if needle and _contains_excerpt(fact, needle)]
         if not needle:
             problems.append("excerpt is empty")
+        elif not matching and len(needle) < MIN_EXCERPT:
+            problems.append(
+                f"excerpt is shorter than {MIN_EXCERPT} characters and is not a whole value "
+                f"(at least {MIN_WHOLE_VALUE} characters) of a cited fact"
+            )
         elif not matching:
             problems.append("excerpt was not found in the summary or excerpt of any cited fact")
-        elif len(needle) < MIN_EXCERPT and not any(needle in _whole_values(fact) for fact in matching):
-            problems.append(
-                f"excerpt is shorter than {MIN_EXCERPT} characters and is not the whole value of a cited fact"
-            )
     provenance = finding.get("provenance")
     required_kind = {"incident_time": INCIDENT_TIME, "current": CURRENT}.get(provenance)
     if required_kind and finding["fact_ids"] and matching and not any(fact.get("kind") == required_kind for fact in matching):
@@ -208,13 +215,11 @@ def check_findings(case_dir: Path) -> dict:
                 result["rejected"].append({"analyst": analyst, "id": finding_id, "reasons": problems})
                 continue
             seen_ids.add(finding_id)
-            stored = {
-                **finding,
-                "analyst": analyst,
-                "fact_ids": list(cited),
-                "fact_summaries": {key: fact.get("summary", "") for key, fact in cited.items()},
-            }
-            result["valid"].append(redactor.value(stored))
+            # Ids and summaries come from evidence that is already redacted, and an id is not text.
+            stored = redactor.value({**finding, "analyst": analyst})
+            stored["fact_ids"] = list(cited)
+            stored["fact_summaries"] = {key: fact.get("summary", "") for key, fact in cited.items()}
+            result["valid"].append(stored)
         if isinstance(data.get("checked"), list):
             result["checked"][analyst] = [redactor.text(item) for item in data["checked"] if isinstance(item, str)]
         for request in data.get("requests") if isinstance(data.get("requests"), list) else []:
