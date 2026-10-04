@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from triage.collectors import Collector
-from triage.collectors.common import parse_iso, split_csv
+from triage.collectors.common import parse_iso, split_csv, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME, MAX_EXCERPT
 from triage.metrics import MetricSpec, add_metric_facts
 from triage.window import format_time
 
 MAX_INSTANCES = 10
+LATEST_RETRY_CODES = ("UnsupportedOperation", "IncorrectInstanceState")
 
 
 def _time_text(value: object) -> str:
@@ -68,9 +69,10 @@ def _add_status(ctx: CollectContext, entry: dict) -> bool:
 
 def _add_console_tail(ctx: CollectContext, instance_id: str) -> None:
     arguments = ["--instance-id", instance_id]
-    reply = ctx.aws("ec2", "get-console-output", [*arguments, "--latest"])
-    if reply is None:
-        # Not every instance type supports --latest; the failure stays recorded and one plain call follows.
+    reply = ctx.aws("ec2", "get-console-output", [*arguments, "--latest"], not_found=LATEST_RETRY_CODES)
+    # Retry without --latest only when it is unsupported, the instance is not ready, or the answer was empty.
+    # Any other error (access denied, for one) is already recorded once and a second call would repeat it.
+    if was_not_found(ctx, LATEST_RETRY_CODES) or (reply is not None and not reply.get("Output")):
         reply = ctx.aws("ec2", "get-console-output", arguments)
     output = (reply or {}).get("Output")
     if not output:

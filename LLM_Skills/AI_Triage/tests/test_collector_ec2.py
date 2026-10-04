@@ -206,3 +206,39 @@ def test_metrics_are_added_per_instance(config_data, tmp_path):
     assert with_text(ctx, "CPUUtilization")
     failed = with_text(ctx, "StatusCheckFailed (Maximum)")
     assert failed and failed[0].kind == "incident_time"
+
+
+def test_console_access_denied_is_one_error_and_no_retry(config_data, tmp_path):
+    ctx, aws, kube = run(config_data, tmp_path, answers(**{
+        "ec2 describe-instance-status": {"InstanceStatuses": [status(system="impaired")]},
+        "ec2 get-console-output": access_denied("GetConsoleOutput")}))
+    assert len(aws.called("ec2", "get-console-output")) == 1
+    errors = [e for e in ctx.evidence.errors if "get-console-output" in e["command"]]
+    assert len(errors) == 1 and errors[0]["code"] == "AccessDeniedException"
+    assert_read_only(ctx, aws, kube)
+
+
+def test_an_unsupported_latest_leaves_no_error_when_the_plain_call_works(config_data, tmp_path):
+    replies = answers(**{"ec2 describe-instance-status": {"InstanceStatuses": [status(system="impaired")]},
+                         "ec2 get-console-output": console("tail")})
+    ctx, _, _ = make_context(config_data, tmp_path, replies, collector="ec2")
+    ctx.runner = ConsoleAws(replies)
+    COLLECTOR.run(ctx, {"instance_ids": "i-0aaa"})
+    assert not [e for e in ctx.evidence.errors if "get-console-output" in e["command"]]
+
+
+def test_an_empty_latest_answer_is_retried_without_latest(config_data, tmp_path):
+    class EmptyThenFull(FakeAws):
+        def __call__(self, argv, timeout):
+            if argv[1:3] == ["ec2", "get-console-output"] and "--latest" in argv:
+                self.calls.append(argv)
+                return 0, '{"InstanceId": "i-0aaa", "Output": ""}', ""
+            return super().__call__(argv, timeout)
+
+    replies = answers(**{"ec2 describe-instance-status": {"InstanceStatuses": [status(system="impaired")]},
+                         "ec2 get-console-output": console("older tail")})
+    ctx, _, _ = make_context(config_data, tmp_path, replies, collector="ec2")
+    ctx.runner = fake = EmptyThenFull(replies)
+    COLLECTOR.run(ctx, {"instance_ids": "i-0aaa"})
+    assert len(fake.called("ec2", "get-console-output")) == 2
+    assert any(f.excerpt == "older tail" for f in ctx.evidence.facts)
