@@ -132,7 +132,7 @@ class _Walk:
 
     def _follow_records(self, account: Account, region: str, zone_list: list[dict], hostname: str) -> str | None:
         """Look up the record, then follow CNAMEs that land in a zone of the same account."""
-        name, target = hostname, None
+        name, target, seen = hostname, None, [hostname]
         for follow in range(MAX_DNS_FOLLOWS + 1):
             zone = _best_zone(name, zone_list)
             if zone is None:
@@ -148,6 +148,10 @@ class _Walk:
             target = next_name
             if not is_cname:
                 break
+            if next_name in seen:
+                self.discovery.notes.append(f"DNS records form a loop: {' → '.join([*seen, next_name])}")
+                break
+            seen.append(next_name)
             if follow == MAX_DNS_FOLLOWS:
                 self.discovery.notes.append(
                     f"Stopped following DNS records after {MAX_DNS_FOLLOWS} hops; {next_name} was not looked up")

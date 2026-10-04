@@ -391,3 +391,14 @@ def test_dns_stops_after_three_follow_ups(config):
     found = discover_hostname(HOSTNAME, config, runner=runner)
     assert runner.lookups == [HOSTNAME, "h1.example.com", "h2.example.com", "h3.example.com"]
     assert any("3 hops" in note for note in found.notes)
+
+
+def test_cname_loop_is_named_as_a_loop(config):
+    runner = cname_chain_runner({
+        HOSTNAME: cname(HOSTNAME, "b.example.com"),
+        "b.example.com": cname("b.example.com", HOSTNAME),
+    })
+    found = discover_hostname(HOSTNAME, config, runner=runner)
+    assert runner.lookups == [HOSTNAME, "b.example.com"]
+    assert any("loop" in note and f"{HOSTNAME} → b.example.com → {HOSTNAME}" in note for note in found.notes)
+    assert not any("hops" in note for note in found.notes)
