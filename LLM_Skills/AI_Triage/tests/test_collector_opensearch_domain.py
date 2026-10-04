@@ -145,3 +145,29 @@ def test_secret_looking_endpoint_text_is_redacted(config_data, tmp_path):
 def test_the_domain_is_never_queried_for_documents(config_data, tmp_path):
     _, aws = run(config_data, tmp_path, healthy_answers())
     assert {argv[1] for argv in aws.calls} == {"opensearch", "cloudwatch"}
+
+
+def test_vpc_domain_endpoint_comes_from_the_endpoints_map(config_data, tmp_path):
+    answers = healthy_answers(**{"opensearch describe-domain": domain(Endpoint=None, Endpoints={"vpc": "vpc-logs-prod.eu-west-1.es.example.com"})})
+    ctx, _ = run(config_data, tmp_path, answers)
+    assert "endpoint vpc-logs-prod.eu-west-1.es.example.com" in ctx.evidence.facts[0].summary
+    assert "endpoint none" not in ctx.evidence.facts[0].summary
+
+
+def test_not_found_fact_names_its_command_and_records_no_error(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, healthy_answers(**{"opensearch describe-domain": NOT_FOUND}))
+    assert ctx.evidence.facts[0].command
+    assert ctx.evidence.errors == []
+
+
+def test_denied_describe_domain_is_an_error_not_a_missing_domain(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, healthy_answers(**{"opensearch describe-domain": access_denied("DescribeDomain")}))
+    assert ctx.evidence.facts == []
+    assert [e["code"] for e in ctx.evidence.errors] == ["AccessDeniedException"]
+
+
+def test_pending_change_without_a_start_time_is_a_current_fact(config_data, tmp_path):
+    pending = {"ChangeProgressStatus": {"ChangeId": "c" * 36, "Status": "PENDING"}}
+    ctx, _ = run(config_data, tmp_path, healthy_answers(**{"opensearch describe-domain-change-progress": pending}))
+    fact = by_summary(ctx, "configuration change")[0]
+    assert fact.kind == "current" and fact.time is None

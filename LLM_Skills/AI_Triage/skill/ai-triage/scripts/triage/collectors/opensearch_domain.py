@@ -5,17 +5,22 @@ This reads the AWS control plane only; it never queries the domain for documents
 from __future__ import annotations
 
 from triage.collectors import Collector
-from triage.collectors.common import in_window
+from triage.collectors.common import in_window, parse_iso, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, INCIDENT_TIME
 from triage.metrics import MetricSpec, add_metric_facts
 
 IN_PROGRESS = ("PENDING", "PROCESSING")
+DOMAIN_NOT_FOUND = ("ResourceNotFoundException",)
 METRICS = (
     ("ClusterStatus.red", "Maximum"), ("ClusterStatus.yellow", "Maximum"), ("FreeStorageSpace", "Minimum"),
     ("JVMMemoryPressure", "Maximum"), ("CPUUtilization", "Average"), ("ThreadpoolWriteRejected", "Sum"),
     ("ThreadpoolSearchRejected", "Sum"), ("5xx", "Sum"),
 )
+
+
+def _endpoint(status: dict) -> str:
+    return status.get("Endpoint") or (status.get("Endpoints") or {}).get("vpc") or "none"
 
 
 def _domain_summary(name: str, status: dict) -> str:
@@ -24,7 +29,7 @@ def _domain_summary(name: str, status: dict) -> str:
     processing = "processing a change" if status.get("Processing") else "not processing a change"
     return (
         f"Domain {name} runs {status.get('EngineVersion')} on {cluster.get('InstanceCount')} x {cluster.get('InstanceType')}, "
-        f"storage {disk}, {processing}, endpoint {status.get('Endpoint') or 'none'}"
+        f"storage {disk}, {processing}, endpoint {_endpoint(status)}"
     )
 
 
@@ -53,7 +58,8 @@ def _add_change_progress(ctx: CollectContext, resource: str, name: str) -> None:
     if status not in IN_PROGRESS and not (in_window(ctx.window, started) or in_window(ctx.window, updated)):
         return
     ctx.evidence.add(
-        kind=INCIDENT_TIME, resource=resource, time=started, command=ctx.last_command,
+        kind=INCIDENT_TIME if parse_iso(started) else CURRENT, resource=resource, time=parse_iso(started),
+        command=ctx.last_command,
         summary=(
             f"Domain configuration change {progress.get('ChangeId')} is {status} "
             f"(config change status {progress.get('ConfigChangeStatus')}, {progress.get('TotalNumberOfStages')} stages)"
@@ -64,11 +70,11 @@ def _add_change_progress(ctx: CollectContext, resource: str, name: str) -> None:
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     name = targets["domain"]
     resource = f"domain/{name}"
-    reply = ctx.aws("opensearch", "describe-domain", ["--domain-name", name])
+    reply = ctx.aws("opensearch", "describe-domain", ["--domain-name", name], not_found=DOMAIN_NOT_FOUND)
     status = (reply or {}).get("DomainStatus")
     if not status:
-        if reply is not None or (ctx.evidence.errors and "NotFound" in ctx.evidence.errors[-1]["code"]):
-            ctx.evidence.add(kind=CURRENT, resource=resource, summary=f"Domain {name} was not found")
+        if reply is not None or was_not_found(ctx, DOMAIN_NOT_FOUND):
+            ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=f"Domain {name} was not found")
         return
     ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=_domain_summary(name, status))
     _add_health(ctx, resource, name)
