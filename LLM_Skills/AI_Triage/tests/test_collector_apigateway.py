@@ -78,7 +78,7 @@ def test_healthy_rest_api(config_data, tmp_path):
     assert "*/* rate 100.0 burst 200" in stage.summary and "cache enabled (AVAILABLE)" in stage.summary
     assert "inside the window" not in stage.summary
     assert not [f for f in ctx.evidence.facts if f.kind == "incident_time"]
-    assert value_of(aws.called("apigateway", "get-deployments")[0], "--max-items") == "5"
+    assert value_of(aws.called("apigateway", "get-deployments")[0], "--max-items") == "50"
     assert ctx.evidence.errors == []
     assert_read_only(ctx, aws, kube)
 
@@ -129,7 +129,7 @@ def test_http_api(config_data, tmp_path):
     assert "rate 50.0 burst 80" in stage.summary and "updated inside the window" in stage.summary
     assert [f for f in ctx.evidence.facts if f.kind == "incident_time" and "dep9" in f.summary]
     assert aws.called("apigateway", "get-stages") == []
-    assert value_of(aws.called("apigatewayv2", "get-deployments")[0], "--max-items") == "5"
+    assert value_of(aws.called("apigatewayv2", "get-deployments")[0], "--max-items") == "50"
     sent = queries(aws)
     assert {q["MetricStat"]["Metric"]["MetricName"] for q in sent} == {"5xx", "4xx", "Latency", "IntegrationLatency", "Count"}
     assert sent[0]["MetricStat"]["Metric"]["Dimensions"] == [
@@ -140,6 +140,7 @@ def test_http_api(config_data, tmp_path):
 def test_missing_api(config_data, tmp_path):
     ctx, aws, _ = run(config_data, tmp_path, rest_answers(**{"apigateway get-rest-api": NOT_FOUND}), REST)
     assert by_summary(ctx, "API abc123 was not found")
+    assert ctx.evidence.errors == []
     assert aws.called("apigateway", "get-stages") == []
 
 
@@ -171,3 +172,16 @@ def test_usage_plans_and_api_keys_are_never_read(config_data, tmp_path):
         _, aws, _ = run(config_data, tmp_path, answers, targets)
         operations = {argv[2] for argv in aws.calls}
         assert not {op for op in operations if "usage-plan" in op or "api-key" in op}
+
+
+def test_newest_five_in_window_deployments_are_picked_in_code(config_data, tmp_path):
+    old = [{"id": f"old{n}", "createdDate": OUTSIDE} for n in range(10)]
+    recent = [{"id": f"new{n}", "createdDate": f"2026-10-04T10:{10 + n:02d}:00+00:00"} for n in range(7)]
+    ctx, _, _ = run(config_data, tmp_path, rest_answers(**{"apigateway get-deployments": {"items": old + recent}}), REST)
+    found = [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+    assert [f.summary.split()[1] for f in found] == ["new6", "new5", "new4", "new3", "new2"]
+
+
+def test_unknown_stage_is_stated(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, rest_answers(), {**REST, "stage": "nope"})
+    assert by_summary(ctx, "Stage nope was not found")

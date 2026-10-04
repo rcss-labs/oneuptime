@@ -5,14 +5,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from triage.collectors import Collector
-from triage.collectors.common import in_window, parse_iso
+from triage.collectors.common import in_window, newest_in_window, parse_iso, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, INCIDENT_TIME
 from triage.metrics import MetricSpec, add_metric_facts
 from triage.window import format_time
 
-MAX_DEPLOYMENTS = "5"
-NOT_FOUND = "NotFoundException"
+FETCH_DEPLOYMENTS = "50"
+MAX_DEPLOYMENTS = 5
+NOT_FOUND = ("NotFoundException",)
 REST_ERRORS = ("5XXError", "4XXError")
 HTTP_ERRORS = ("5xx", "4xx")
 
@@ -83,15 +84,13 @@ def _http_deployment(raw: dict) -> Deployment:
 
 def _get_api_name(ctx: CollectContext, api_id: str, http: bool) -> tuple[str | None, bool]:
     """Return the API name (None when it could not be read) and whether the API does not exist."""
-    errors_before = len(ctx.evidence.errors)
     if http:
-        reply = ctx.aws("apigatewayv2", "get-api", ["--api-id", api_id])
+        reply = ctx.aws("apigatewayv2", "get-api", ["--api-id", api_id], not_found=NOT_FOUND)
         name = (reply or {}).get("Name")
     else:
-        reply = ctx.aws("apigateway", "get-rest-api", ["--rest-api-id", api_id])
+        reply = ctx.aws("apigateway", "get-rest-api", ["--rest-api-id", api_id], not_found=NOT_FOUND)
         name = (reply or {}).get("name")
-    missing = reply is None and len(ctx.evidence.errors) > errors_before and ctx.evidence.errors[-1]["code"] == NOT_FOUND
-    return name, missing
+    return name, reply is None and was_not_found(ctx, NOT_FOUND)
 
 
 def _add_stage(ctx: CollectContext, resource: str, stage: Stage) -> None:
@@ -108,12 +107,11 @@ def _add_stage(ctx: CollectContext, resource: str, stage: Stage) -> None:
 
 
 def _add_deployments(ctx: CollectContext, resource: str, deployments: list[Deployment]) -> None:
-    for deployment in deployments:
-        if in_window(ctx.window, deployment.created):
-            ctx.evidence.add(
-                kind=INCIDENT_TIME, resource=resource, time=deployment.created, command=ctx.last_command,
-                summary=f"Deployment {deployment.id} was created", excerpt=deployment.note,
-            )
+    for deployment in newest_in_window(ctx.window, deployments, lambda d: d.created, MAX_DEPLOYMENTS):
+        ctx.evidence.add(
+            kind=INCIDENT_TIME, resource=resource, time=deployment.created, command=ctx.last_command,
+            summary=f"Deployment {deployment.id} was created", excerpt=deployment.note,
+        )
 
 
 def _metric_specs(stage: str, dimensions: dict[str, str], error_names: tuple[str, str]) -> list[MetricSpec]:
@@ -139,7 +137,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         stages_reply = ctx.aws("apigatewayv2", "get-stages", ["--api-id", api_id])
         stages = [_http_stage(s) for s in (stages_reply or {}).get("Items", [])]
         stage_command = ctx.last_command
-        deployments_reply = ctx.aws("apigatewayv2", "get-deployments", ["--api-id", api_id, "--max-items", MAX_DEPLOYMENTS])
+        deployments_reply = ctx.aws("apigatewayv2", "get-deployments", ["--api-id", api_id, "--max-items", FETCH_DEPLOYMENTS])
         deployments = [_http_deployment(d) for d in (deployments_reply or {}).get("Items", [])]
         dimensions, error_names = {"ApiId": api_id}, HTTP_ERRORS
     else:
@@ -147,13 +145,18 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         stages = [_rest_stage(s) for s in (stages_reply or {}).get("item", [])]
         stage_command = ctx.last_command
         deployments_reply = ctx.aws(
-            "apigateway", "get-deployments", ["--rest-api-id", api_id, "--max-items", MAX_DEPLOYMENTS],
+            "apigateway", "get-deployments", ["--rest-api-id", api_id, "--max-items", FETCH_DEPLOYMENTS],
         )
         deployments = [_rest_deployment(d) for d in (deployments_reply or {}).get("items", [])]
         dimensions, error_names = {"ApiName": name or ""}, REST_ERRORS
     deployments_command = ctx.last_command
     if targets.get("stage"):
         stages = [stage for stage in stages if stage.name == targets["stage"]]
+        if not stages:
+            ctx.evidence.add(
+                kind=CURRENT, resource=resource, command=stage_command,
+                summary=f"Stage {targets['stage']} was not found on API {api_id}",
+            )
     ctx.last_command = stage_command
     for stage in stages:
         _add_stage(ctx, resource, stage)
