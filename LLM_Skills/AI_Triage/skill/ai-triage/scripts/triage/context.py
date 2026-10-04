@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from triage.awscli import BAD_OUTPUT, SSO_EXPIRED, Runner, run_aws, subprocess_runner
+from triage.awscli import BAD_OUTPUT, REFUSED, SSO_EXPIRED, SSO_EXPIRED_MARKERS, Runner, run_aws, subprocess_runner
 from triage.config import Account, TriageConfig
 from triage.evidence import Evidence
 from triage.guard import KUBECONFIG_NAME
@@ -36,18 +36,32 @@ class CollectContext:
     runner: Runner = subprocess_runner
     kube_runner: Runner = subprocess_runner
     last_command: str = field(default="", init=False)
+    last_error: tuple[str, str] | None = field(default=None, init=False)
 
-    def aws(self, service: str, operation: str, args: Sequence[str] = (), *, region: str | None = None) -> Any | None:
+    def aws(
+        self,
+        service: str,
+        operation: str,
+        args: Sequence[str] = (),
+        *,
+        region: str | None = None,
+        not_found: Sequence[str] = (),
+    ) -> Any | None:
+        """Run one AWS read. Failures with a code in not_found are not recorded as evidence errors."""
         result = run_aws(
             service, operation, args,
             profile=self.account.profile, region=region or self.region, runner=self.runner,
         )
         self.last_command = shlex.join(result.argv)
         if result.ok:
+            self.last_error = None
             return result.data
         if result.error_code == SSO_EXPIRED:
             raise SignInExpired(self.account.profile)
-        self.evidence.add_error(self.last_command, result.error_code or "Unknown", result.error_message or "")
+        code = result.error_code or "Unknown"
+        self.last_error = (code, result.error_message or "")
+        if code not in not_found:
+            self.evidence.add_error(self.last_command, code, result.error_message or "")
         return None
 
     def kubectl(
@@ -60,18 +74,25 @@ class CollectContext:
     ) -> str | None:
         if cluster not in self.config.eks_clusters:
             raise KeyError(f"unknown EKS cluster: {cluster}")
+        eks_cluster = self.config.eks_clusters[cluster]
         result = run_kubectl(
             args,
             kubeconfig=self.skill_dir / "config" / KUBECONFIG_NAME,
-            context=self.config.eks_clusters[cluster].context,
+            context=eks_cluster.context,
             namespace=namespace,
             all_namespaces=all_namespaces,
             runner=self.kube_runner,
         )
         self.last_command = shlex.join(result.argv)
         if result.ok:
+            self.last_error = None
             return result.stdout
-        self.evidence.add_error(self.last_command, KUBECTL_ERROR, result.error_message or "")
+        message = result.error_message or ""
+        if any(marker in message for marker in SSO_EXPIRED_MARKERS):
+            raise SignInExpired(self.config.accounts[eks_cluster.account].profile)
+        code = REFUSED if message.startswith(REFUSED) else KUBECTL_ERROR
+        self.last_error = (code, message)
+        self.evidence.add_error(self.last_command, code, message)
         return None
 
     def kubectl_json(
@@ -88,5 +109,6 @@ class CollectContext:
         try:
             return json.loads(output)
         except json.JSONDecodeError:
+            self.last_error = (BAD_OUTPUT, "kubectl did not print JSON")
             self.evidence.add_error(self.last_command, BAD_OUTPUT, "kubectl did not print JSON")
             return None

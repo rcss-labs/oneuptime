@@ -16,6 +16,8 @@ class Collector:
     required: tuple[str, ...]
     optional: tuple[str, ...]
     run: Callable[[CollectContext, dict[str, str]], None]
+    # Optional target keys of which at least one must be given.
+    one_of: tuple[str, ...] = ()
 
 
 def all_collectors() -> dict[str, Collector]:

@@ -108,3 +108,42 @@ def test_kubectl_json_bad_output(tmp_path, config_data):
     ctx = make_ctx(tmp_path, config_data, kube=KubeRunner(stdout="not json"))
     assert ctx.kubectl_json("platform-prod", ["get", "pods"], namespace="web") is None
     assert ctx.evidence.errors[0]["code"] == "UnreadableOutput"
+
+
+def test_kubectl_sign_in_expiry_raises(tmp_path, config_data):
+    stderr = "Unable to connect: Error when retrieving token from sso: Token has expired and refresh failed"
+    ctx = make_ctx(tmp_path, config_data, kube=KubeRunner(code=1, stderr=stderr))
+    with pytest.raises(SignInExpired) as raised:
+        ctx.kubectl("platform-prod", ["get", "pods"], namespace="web")
+    assert raised.value.profile == "triage-prod-main"
+    assert ctx.evidence.errors == []
+
+
+def test_not_found_code_records_no_error(tmp_path, config_data):
+    reply = (254, "An error occurred (ClusterNotFoundException) when calling the DescribeClusters operation: nope")
+    ctx = make_ctx(tmp_path, config_data, FakeAws({"ecs list-clusters": reply}))
+    assert ctx.aws("ecs", "list-clusters", not_found=["ClusterNotFoundException"]) is None
+    assert ctx.evidence.errors == []
+    assert ctx.last_error[0] == "ClusterNotFoundException"
+
+
+def test_other_codes_still_record_with_not_found_given(tmp_path, config_data):
+    ctx = make_ctx(tmp_path, config_data, FakeAws({"ecs list-clusters": access_denied("ListClusters")}))
+    assert ctx.aws("ecs", "list-clusters", not_found=["ClusterNotFoundException"]) is None
+    assert len(ctx.evidence.errors) == 1
+
+
+def test_last_error_is_none_after_success_and_set_after_failure(tmp_path, config_data):
+    ctx = make_ctx(tmp_path, config_data, FakeAws({"ecs list-clusters": access_denied("ListClusters")}))
+    assert ctx.last_error is None
+    ctx.aws("ecs", "list-clusters")
+    code, message = ctx.last_error
+    assert code == "AccessDeniedException" and "not authorized" in message
+    ctx.aws("ecs", "list-services")
+    assert ctx.last_error is None
+
+
+def test_last_error_after_kubectl_failure(tmp_path, config_data):
+    ctx = make_ctx(tmp_path, config_data, kube=KubeRunner(code=1, stderr="forbidden"))
+    ctx.kubectl("platform-prod", ["get", "pods"], namespace="web")
+    assert ctx.last_error == ("KubectlError", "forbidden")

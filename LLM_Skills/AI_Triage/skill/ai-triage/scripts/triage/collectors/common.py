@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import urlsplit
 
+from triage.context import CollectContext
 from triage.redact import looks_secret_key
 from triage.window import Window, WindowError, parse_time
 
@@ -108,3 +109,13 @@ def env_changes(old: dict[str, str], new: dict[str, str], raw_changed: set[str])
         elif name in raw_changed:
             sentences.append(f"{name} may have changed (values hidden)")
     return sentences
+
+
+def was_not_found(ctx: CollectContext, codes: Sequence[str]) -> bool:
+    """True when the last call failed with one of the given error codes."""
+    return ctx.last_error is not None and ctx.last_error[0] in codes
+
+
+def split_csv(value: str | None) -> list[str]:
+    """Split on commas, strip each part, and drop empty parts."""
+    return [part.strip() for part in (value or "").split(",") if part.strip()]

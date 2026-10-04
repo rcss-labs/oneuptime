@@ -22,7 +22,8 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 
 def _list_line(collector: Collector) -> str:
     keys = ",".join(collector.required) or "-"
-    return f"{collector.name}  {keys}  {collector.description}"
+    one_of = f"  one of: {', '.join(collector.one_of)}" if collector.one_of else ""
+    return f"{collector.name}  {keys}{one_of}  {collector.description}"
 
 
 def _parse_targets(pairs: list[str]) -> dict[str, str] | None:
@@ -41,6 +42,8 @@ def _target_problem(collector: Collector, targets: dict[str, str]) -> str | None
     unknown = [key for key in targets if key not in collector.required + collector.optional]
     if missing:
         return f"{collector.name} needs target {', '.join(missing)} ({keys})"
+    if collector.one_of and not any(targets.get(key) for key in collector.one_of):
+        return f"{collector.name} needs at least one of these targets: {', '.join(collector.one_of)} ({keys})"
     if unknown:
         return f"{collector.name} has no target {', '.join(unknown)} ({keys})"
     return None

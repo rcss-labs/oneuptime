@@ -1,9 +1,12 @@
 import pytest
 
+from helpers import make_context
 from triage.collectors.common import (
     env_changes,
     env_summary,
     shown_env_value,
+    split_csv,
+    was_not_found,
 )
 
 HIDDEN = "<hidden: {} characters>"
@@ -109,3 +112,22 @@ def test_env_changes_same_shown_but_raw_differs():
     shown = {"HOST": "https://a.example.com"}
     assert env_changes(shown, dict(shown), {"HOST"}) == ["HOST may have changed (values hidden)"]
     assert env_changes(shown, dict(shown), set()) == []
+
+
+def test_was_not_found(config_data, tmp_path):
+    reply = (254, "An error occurred (NoSuchThing) when calling the Op operation: gone")
+    ctx, _, _ = make_context(config_data, tmp_path, {"ecs list-clusters": reply})
+    assert not was_not_found(ctx, ["NoSuchThing"])
+    ctx.aws("ecs", "list-clusters", not_found=["NoSuchThing"])
+    assert was_not_found(ctx, ["NoSuchThing", "Other"])
+    assert not was_not_found(ctx, ["Other"])
+    ctx.aws("ecs", "list-services")
+    assert not was_not_found(ctx, ["NoSuchThing"])
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [(None, []), ("", []), ("a", ["a"]), (" a , b,, c ,", ["a", "b", "c"]), (",,", [])],
+)
+def test_split_csv(value, expected):
+    assert split_csv(value) == expected

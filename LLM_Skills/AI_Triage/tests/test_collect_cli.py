@@ -210,3 +210,32 @@ def test_a_bad_fixture_directory_exits_2_and_never_runs_the_real_tool(skill_dir,
     monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path / "nowhere"))
     assert collect.main(args(skill_dir, "--target", "thing=x")) == 2
     assert "not a directory" in capsys.readouterr().err
+
+
+@pytest.fixture
+def one_of_collector(monkeypatch):
+    entry = Collector("pick", "Needs one", (), ("a", "b", "c"), lambda ctx, targets: None, one_of=("a", "b"))
+    monkeypatch.setattr(collect, "all_collectors", lambda: {"pick": entry})
+
+
+def test_one_of_defaults_to_empty():
+    assert Collector("x", "d", (), (), lambda ctx, targets: None).one_of == ()
+
+
+def test_one_of_missing_exits_4(skill_dir, one_of_collector, capsys):
+    assert collect.main(args(skill_dir, name="pick")) == 4
+    err = capsys.readouterr().err
+    assert "a" in err and "b" in err and "one of" in err
+
+
+def test_one_of_empty_value_counts_as_missing(skill_dir, one_of_collector):
+    assert collect.main(args(skill_dir, "--target", "a=", name="pick")) == 4
+
+
+def test_one_of_satisfied(skill_dir, one_of_collector):
+    assert collect.main(args(skill_dir, "--target", "b=x", name="pick"), runner=FakeAws({})) == 0
+
+
+def test_list_shows_one_of(one_of_collector, capsys):
+    assert collect.main(["--list"]) == 0
+    assert "one of: a, b" in capsys.readouterr().out
