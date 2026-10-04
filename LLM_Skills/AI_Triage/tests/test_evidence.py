@@ -145,3 +145,15 @@ def test_write_path_cannot_leave_the_evidence_folder(tmp_path):
     window = make_window("2026-10-04T10:00:00Z", "2026-10-04T12:00:00Z", 6)
     path = Evidence("ecs", "prod-main", "/../../escaped", window).write(tmp_path)
     assert path.parent == tmp_path / "evidence"
+
+
+def test_summary_is_cut_to_500_characters():
+    fact = add_simple(make_evidence(), summary="s" * 900)
+    assert len(fact.summary) == 500 and fact.summary.endswith("…")
+
+
+def test_every_string_in_data_is_cut_at_any_depth():
+    fact = add_simple(make_evidence(), data={"a": "x" * 900, "b": [{"c": "y" * 900}], "d": 5, "e": "short"})
+    assert len(fact.data["a"]) == 500 and fact.data["a"].endswith("…")
+    assert len(fact.data["b"][0]["c"]) == 500
+    assert fact.data["d"] == 5 and fact.data["e"] == "short"

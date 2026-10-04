@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -35,6 +36,7 @@ class CollectContext:
     skill_dir: Path
     runner: Runner = subprocess_runner
     kube_runner: Runner = subprocess_runner
+    now: datetime | None = None
     last_command: str = field(default="", init=False)
     last_error: tuple[str, str] | None = field(default=None, init=False)
 
@@ -60,7 +62,7 @@ class CollectContext:
             raise SignInExpired(self.account.profile)
         code = result.error_code or "Unknown"
         self.last_error = (code, result.error_message or "")
-        if code not in not_found:
+        if code == REFUSED or code not in not_found:
             self.evidence.add_error(self.last_command, code, result.error_message or "")
         return None
 

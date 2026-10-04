@@ -147,3 +147,13 @@ def test_last_error_after_kubectl_failure(tmp_path, config_data):
     ctx = make_ctx(tmp_path, config_data, kube=KubeRunner(code=1, stderr="forbidden"))
     ctx.kubectl("platform-prod", ["get", "pods"], namespace="web")
     assert ctx.last_error == ("KubectlError", "forbidden")
+
+
+def test_refusals_are_never_treated_as_not_found(tmp_path, config_data):
+    ctx = make_ctx(tmp_path, config_data)
+    assert ctx.aws("ec2", "terminate-instances", ["--instance-ids", "i-1"], not_found=["RefusedByGuard"]) is None
+    assert ctx.evidence.errors[0]["code"] == "RefusedByGuard"
+
+
+def test_now_defaults_to_none(tmp_path, config_data):
+    assert make_ctx(tmp_path, config_data).now is None

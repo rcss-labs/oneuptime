@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from decimal import Decimal
 from datetime import timedelta
 from typing import Sequence
 
@@ -113,6 +114,11 @@ def fetch(
     return _fetch(ctx, specs, period, region)[0]
 
 
+def _num(value: float) -> str:
+    """Three significant figures, never in exponent form."""
+    return format(Decimal(f"{value:.3g}"), "f")
+
+
 def _ratio_words(summary: MetricSummary) -> str:
     ratio = summary.change_ratio
     if ratio is None:
@@ -120,20 +126,20 @@ def _ratio_words(summary: MetricSummary) -> str:
     if SAME_RANGE[0] <= ratio <= SAME_RANGE[1]:
         return "about the same"
     if ratio > SAME_RANGE[1]:
-        return f"{ratio:.1f} times higher"
+        return f"{_num(ratio)} times higher"
     if summary.window_avg == 0:
         return "down to zero"
-    return f"{1 / ratio:.1f} times lower"
+    return f"{_num(1 / ratio)} times lower"
 
 
 def _summary_text(summary: MetricSummary) -> str:
-    head = f"{summary.label} ({summary.stat}): peak {summary.window_max:.1f} at {summary.peak_time}; "
+    head = f"{summary.label} ({summary.stat}): peak {_num(summary.window_max)} at {summary.peak_time}; "
     if summary.baseline_avg is None:
-        return head + f"window average {summary.window_avg:.1f}; no comparable baseline"
-    earlier = "zero" if summary.baseline_avg == 0 else f"{summary.baseline_avg:.1f}"
+        return head + f"window average {_num(summary.window_avg)}; no comparable baseline"
+    earlier = "zero" if summary.baseline_avg == 0 else _num(summary.baseline_avg)
     return (
         head
-        + f"window average {summary.window_avg:.1f} against {earlier} one week earlier "
+        + f"window average {_num(summary.window_avg)} against {earlier} one week earlier "
         + f"({_ratio_words(summary)})"
     )
 

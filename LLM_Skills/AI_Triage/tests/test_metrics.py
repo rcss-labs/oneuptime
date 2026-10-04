@@ -130,7 +130,7 @@ def test_summary_wording_higher(tmp_path, config_data):
     facts, _ = facts_for(tmp_path, config_data, [46.0, 96.2], [23.5])
     assert facts[0].summary == (
         "CPUUtilization (Average): peak 96.2 at 2026-10-04T10:41:00Z; "
-        "window average 71.1 against 23.5 one week earlier (3.0 times higher)"
+        "window average 71.1 against 23.5 one week earlier (3.03 times higher)"
     )
     assert facts[0].kind == INCIDENT_TIME
     assert facts[0].time == "2026-10-04T10:41:00Z"
@@ -145,7 +145,7 @@ def test_summary_wording_about_the_same(tmp_path, config_data):
 
 def test_summary_wording_lower(tmp_path, config_data):
     facts, _ = facts_for(tmp_path, config_data, [10.0], [40.0])
-    assert "(4.0 times lower)" in facts[0].summary
+    assert "(4 times lower)" in facts[0].summary
 
 
 def test_summary_wording_no_baseline(tmp_path, config_data):
@@ -177,7 +177,7 @@ def test_window_average_zero_with_baseline_does_not_crash(tmp_path, config_data)
     facts, summaries = facts_for(tmp_path, config_data, [0.0, 0.0], [5.0])
     assert summaries[0].change_ratio == 0.0
     assert "down to zero" in facts[0].summary
-    assert "against 5.0 one week earlier" in facts[0].summary
+    assert "against 5 one week earlier" in facts[0].summary
 
 
 def test_zero_baseline_with_activity(tmp_path, config_data):
@@ -219,3 +219,12 @@ def test_failed_read_says_so(tmp_path, config_data):
     ctx, _ = make_ctx(tmp_path, config_data, {"cloudwatch get-metric-data": (254, "An error occurred (AccessDeniedException) x")})
     add_metric_facts(ctx, "service/x", [CPU])
     assert "could not be read" in ctx.evidence.facts[0].summary
+
+
+def test_numbers_have_three_significant_figures(tmp_path, config_data):
+    facts, _ = facts_for(tmp_path, config_data, [0.000000001], [5.0])
+    assert "window average 0.000000001" in facts[0].summary
+    assert "5000000000" not in facts[0].summary or "times lower" in facts[0].summary
+    facts, _ = facts_for(tmp_path, config_data, [12345.6], [100.0])
+    assert "peak 12300 at" in facts[0].summary
+    assert "e+" not in facts[0].summary
