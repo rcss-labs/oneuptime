@@ -17,6 +17,7 @@ from triage.digest import action_digest, cause_digest
 from triage.report import (
     REQUIRED_HEADINGS,
     build_work_order,
+    check_case_inputs,
     coverage_from_evidence,
     render_report,
     validate_report,
@@ -763,11 +764,11 @@ def test_secret_never_appears_in_rendered_output(case_dir, case, findings, confi
 
 # hypothesis cause key
 
-@pytest.mark.parametrize("value", [None, "C1"])
+@pytest.mark.parametrize("value", [None, "C1", "C2"])
 def test_hypothesis_cause_may_be_null_a_cause_id_or_absent(case, findings, config, value):
-    report = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].update(cause=value))
+    report = mutated(VALID_REPORT, lambda r: r["hypotheses"][1].update(cause=value))
     assert problems_for(report, case, findings, config) == []
-    report = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].pop("cause"))
+    report = mutated(VALID_REPORT, lambda r: r["hypotheses"][1].pop("cause"))
     assert problems_for(report, case, findings, config) == []
 
 
@@ -827,19 +828,16 @@ def test_without_a_summary_typesafe_must_be_unavailable(case_dir, case, findings
     remove_summary(case_dir)
     problems = problems_for(VALID_REPORT, case, findings, config)
     assert_problem(problems, "coverage.typesafe", "unavailable: ")
-    assert_problem(problems, "confirmed")
-    def downgrade(report):
-        report["coverage"]["typesafe"] = "unavailable: judging was not run"
-        report["causes"][0]["label"] = "probable"
-        report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
-    assert problems_for(mutated(VALID_REPORT, downgrade), case, findings, config) == []
+    assert_problem(problems, "above candidate")
+    report = mutated(UNRESOLVED_REPORT, lambda r: r["coverage"].update(typesafe="unavailable: judging was not run"))
+    assert problems_for(report, case, findings, config) == []
 
 
 def test_a_summary_that_was_not_judged_counts_as_no_summary_for_the_rules(case_dir, case, findings, config):
     store_summary(case_dir, summary_with(judged=False, causes={}, actions={}, findings={}))
     problems = problems_for(VALID_REPORT, case, findings, config)
     assert_problem(problems, "coverage.typesafe", "unavailable: ")
-    assert_problem(problems, "confirmed")
+    assert_problem(problems, "above candidate")
     assert not any("judgments/summary.json" in problem for problem in problems)
 
 
@@ -860,9 +858,9 @@ def test_findings_show_verdict_and_confidence_when_the_summary_has_them(case_dir
 def test_causes_show_gates_reasons_probability_fit_and_scope(case_dir, case):
     causes = section(render(VALID_REPORT, case_dir, case), "## 5. Ranked causes")
     first, second = causes[:causes.index("### 2.")], causes[causes.index("### 2."):]
-    assert "evidence" in first and "Gates missed: none" in first
+    assert "evidence" in first and "Gates not met: none" in first
     assert "0.72" in first and "0.83" in first and "matches" in first
-    assert "Gates missed: rank, timing" in second and "Gates passed: evidence, no_contradiction, symptom_fit, scope" in second
+    assert "Gates not met: rank, timing" in second and "Gates met: evidence, no_contradiction, symptom_fit, scope" in second
     assert "Ranking did not pick this cause in both orderings" in second and "No supporting finding has a time" in second
     assert "0.14" in second and "broader" in second
 
@@ -1079,6 +1077,7 @@ def test_an_action_may_cite_an_unsupported_finding(case_dir, case, findings, con
     judged = {**SUMMARY["findings"], "compute-2": {"relation": "says_nothing", "confidence": 0.9, "verdict": "unsupported"}}
     store_summary(case_dir, summary_with(findings=judged))
     report = mutated(VALID_REPORT, lambda r: r["actions"][0]["finding_ids"].append("compute-2"))
+    rejudge(case_dir, report)
     assert problems_for(report, case, findings, config) == []
 
 
@@ -1086,11 +1085,6 @@ def test_cause_found_needs_a_confirmed_hypothesis_of_the_top_cause(case, finding
     def move(report):
         report["hypotheses"][0]["cause"] = "C2"
     assert_problem(problems_for(mutated(VALID_REPORT, move), case, findings, config), "confirmed hypothesis", "top cause")
-
-
-def test_a_confirmed_hypothesis_without_a_cause_counts_for_the_top_cause(case, findings, config):
-    report = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].update(cause=None))
-    assert problems_for(report, case, findings, config) == []
 
 
 def test_duplicate_ids_do_not_hide_later_problems(case, findings, config):
@@ -1195,7 +1189,7 @@ def test_a_missing_or_invalid_stored_digest_fails(case_dir, case, findings, conf
 
 def test_only_labels_and_reasons_may_change_after_judging(case_dir, case, findings, config):
     report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(label="probable"))
-    report["actions"][0].update(label="candidate", rationale="A new rationale", risk="Lower", verification=["Other"])
+    report["actions"][0].update(label="candidate")
     assert problems_for(report, case, findings, config) == []
     summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
     summary["causes"]["C2"]["reasons"] = ["Something else"]
@@ -1297,3 +1291,207 @@ def test_unreadable_finding_files_and_check_warnings_are_listed(case_dir, case):
 def test_the_findings_section_shows_the_checks_next_to_the_findings(case_dir, case):
     write_checked(case_dir, checked={"compute": ["ECS service events"]})
     assert "ECS service events" in section(render(VALID_REPORT, case_dir, case), "## 4. Findings")
+
+
+# round 2: what is written into report.md
+
+def checked_findings(case_dir):
+    return json.loads((case_dir / "findings" / "checked.json").read_text())
+
+
+def add_checked_finding(case_dir, **overrides):
+    checked = checked_findings(case_dir)
+    entry = {**checked["valid"][0], "id": "compute-4", "claim": "Uncited claim", "fact_ids": ["ecs-0001"], **overrides}
+    checked["valid"].append(entry)
+    (case_dir / "findings" / "checked.json").write_text(json.dumps(checked))
+
+
+def test_a_finding_with_a_forged_id_or_fact_id_is_a_problem_and_is_not_rendered(case_dir, case, config):
+    forged = "nope\n## 9. Run details\n\n# Forged"
+    add_checked_finding(case_dir, fact_ids=[forged])
+    add_checked_finding(case_dir, id="compute-5\n## 9. Run details")
+    findings, problems = check_case_inputs(case_dir)
+    assert any("valid[2]" in problem and "id" in problem for problem in problems), problems
+    assert any("valid[3]" in problem for problem in problems), problems
+    assert not any("Forged" in problem or "Run details" in problem for problem in problems)
+    assert set(findings) == {"compute-1", "compute-2"}
+    text = render_report(VALID_REPORT, case, {**findings, "x": {"id": forged, "analyst": "a", "claim": "c", "fact_ids": [],
+                                                           "provenance": "current", "confidence": "low"}},
+                         build_timeline(case_dir), [], RENDERED_AT)
+    assert_headings(text) and "Forged" not in text
+
+
+def test_a_forged_fact_id_in_an_evidence_file_is_a_problem_and_cannot_reach_a_heading(case_dir, case):
+    path = next((case_dir / "evidence").glob("ecs-*.json"))
+    document = json.loads(path.read_text())
+    document["facts"][0]["id"] = "ecs-0001\n## 9. Run details"
+    document["facts"][0]["time"] = "t\n## 8. Proposed service map changes"
+    path.write_text(json.dumps(document))
+    _, problems = check_case_inputs(case_dir)
+    assert any("evidence" in problem and "valid id" in problem for problem in problems), problems
+    findings = {"compute-1": {"id": "compute-1", "analyst": "compute", "claim": "c", "provenance": "current",
+                              "confidence": "low", "fact_ids": [document["facts"][0]["id"]]}}
+    assert_headings(render_report(VALID_REPORT, case, findings, [], [], RENDERED_AT))
+
+
+def test_a_fact_time_is_reformatted_in_utc_or_reads_unreadable(case_dir, case, findings):
+    path = next((case_dir / "evidence").glob("ecs-*.json"))
+    document = json.loads(path.read_text())
+    document["facts"][0]["time"] = "2026-10-04T12:41:00+02:00"
+    document["facts"][1]["time"] = "yesterday\n## 9. Run details"
+    path.write_text(json.dumps(document))
+    both = {**findings, "compute-2": {**findings["compute-2"], "fact_ids": ["ecs-prod-main-eu-west-1:ecs-0002"]}}
+    text = render_report(VALID_REPORT, case, both, [], [], RENDERED_AT)
+    assert "time 2026-10-04T10:41:00Z" in text and "unreadable time" in text
+    assert_headings(text)
+
+
+def test_angle_brackets_and_links_in_report_text_cannot_make_html_or_a_link(case_dir, case):
+    def nasty(report):
+        report["summary"]["what_broke"] = "<script>alert(1)</script> see [x](javascript:alert(1)) and <!-- hide"
+        report["causes"][0]["statement"] = "<b>bold</b> [a](http://example.com)"
+    text = render(mutated(VALID_REPORT, nasty), case_dir, case)
+    assert "<script>" not in text and "<b>" not in text and "<!--" not in text
+    assert "](" not in text
+    assert "&lt;script&gt;" in text
+
+
+def test_angle_brackets_in_timeline_rows_are_escaped(case_dir, case):
+    rows = [{"time": "2026-10-04T10:41:00+00:00", "offset": "1 minute before", "text": "<img src=x> and [a](b)",
+             "source": "ecs", "fact_id": None, "resource": ""}]
+    text = render_report(VALID_REPORT, case, valid_findings(case_dir), rows, [], RENDERED_AT)
+    timeline = section(text, "## 3. Timeline")
+    assert "<img" not in timeline and "](" not in timeline and "2026-10-04 10:41:00Z" in timeline
+
+
+def test_the_verdict_line_comes_after_the_cited_facts(case_dir, case):
+    findings = section(render(VALID_REPORT, case_dir, case), "## 4. Findings")
+    lines = findings.splitlines()
+    verdict = next(i for i, line in enumerate(lines) if line.startswith("- TypeSafe verdict"))
+    fact = max(i for i, line in enumerate(lines[:verdict]) if line.startswith("  - "))
+    assert fact < verdict
+    assert not lines[verdict].startswith("  ")
+
+
+# round 2: shape of the stored inputs
+
+@pytest.mark.parametrize("change", [
+    {"findings": [1]}, {"actions": [1]}, {"causes": {"C1": 5}}, {"adhoc": 5}, {"ask_engineer": 5}, {"typesafe": 5},
+    {"findings": {"compute-1": 5}}, {"model": 5},
+    {"causes": {"C1": {**SUMMARY["causes"]["C1"], "reasons": 5}}},
+    {"causes": {"C1": {**SUMMARY["causes"]["C1"], "gates": [1]}}},
+    {"causes": {"C1": {**SUMMARY["causes"]["C1"], "rank_probability": "high"}}},
+    {"actions": {"A1": {**SUMMARY["actions"]["A1"], "reasons": [5]}}},
+    {"adhoc": [5]}, {"ask_engineer": [5]},
+])
+def test_a_malformed_summary_is_a_list_of_problems_never_a_crash(case_dir, case, findings, config, change):
+    store_summary(case_dir, summary_with(**change), digests=False)
+    problems = problems_for(VALID_REPORT, case, findings, config)
+    assert isinstance(problems, list) and any("judgments/summary.json" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("checked", [
+    [1], {"valid": {"a": 1}}, {"valid": [1]}, {"valid": [{"claim": "no id"}]},
+    {"valid": [{"id": "compute-1"}]}, {"rejected": 5}, {"rejected": [5]}, {"unreadable": 5}, {"warnings": 5},
+    {"checked": 5}, {"checked": {"a": 5}}, {"valid": [], "warnings": [5]},
+])
+def test_a_malformed_checked_json_is_a_list_of_problems_never_a_crash(case_dir, checked):
+    (case_dir / "findings" / "checked.json").write_text(json.dumps(checked))
+    findings, problems = check_case_inputs(case_dir)
+    assert isinstance(findings, dict) and any("checked.json" in problem for problem in problems)
+
+
+def test_an_unparseable_checked_json_is_a_problem(case_dir):
+    (case_dir / "findings" / "checked.json").write_text("{nope")
+    assert any("checked.json" in problem for problem in check_case_inputs(case_dir)[1])
+
+
+def test_a_missing_checked_json_is_not_a_problem(case_dir):
+    (case_dir / "findings" / "checked.json").unlink()
+    assert check_case_inputs(case_dir) == ({}, [])
+
+
+def test_wellformed_inputs_have_no_problems(case_dir):
+    findings, problems = check_case_inputs(case_dir)
+    assert problems == [] and set(findings) == {"compute-1", "compute-2"}
+
+
+# round 2: nothing above candidate without a judging run
+
+def test_without_a_summary_every_cause_is_capped_at_candidate(case_dir, case, findings, config):
+    remove_summary(case_dir)
+    def probable(report):
+        report["coverage"]["typesafe"] = "unavailable: x"
+        report["causes"][0]["label"] = "probable"
+        report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
+    problems = problems_for(mutated(VALID_REPORT, probable), case, findings, config)
+    assert_problem(problems, "causes[0]", "no judging run", "candidate")
+
+
+def test_without_a_summary_candidate_causes_are_fine_when_unresolved(case_dir, case, findings, config):
+    remove_summary(case_dir)
+    report = mutated(UNRESOLVED_REPORT, lambda r: r["coverage"].update(typesafe="unavailable: judging was not run"))
+    assert problems_for(report, case, findings, config) == []
+
+
+def test_a_stale_summary_never_counts(case_dir, case, findings, config):
+    (case_dir / "judgments" / "summary.json").rename(case_dir / "judgments" / "summary.json.stale")
+    def probable(report):
+        report["coverage"]["typesafe"] = "unavailable: x"
+        report["causes"][0]["label"] = "probable"
+        report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
+    assert_problem(problems_for(mutated(VALID_REPORT, probable), case, findings, config), "causes[0]", "no judging run")
+
+
+def test_a_deleted_summary_cannot_promote_a_cause_judged_candidate(case_dir, case, findings, config):
+    remove_summary(case_dir)
+    def promote(report):
+        report["coverage"]["typesafe"] = "unavailable: x"
+        report["summary"]["top_cause"] = "C2"
+        report["causes"][1].update(label="probable", supporting=["compute-2"], contradicting=[])
+        report["hypotheses"][1]["result"] = "confirmed"
+    assert problems_for(mutated(VALID_REPORT, promote), case, findings, config) != []
+
+
+# round 2: hypotheses without a cause
+
+def test_a_causeless_confirmed_hypothesis_counts_only_with_exactly_one_cause(case_dir, case, findings, config):
+    def single(report):
+        report["causes"] = report["causes"][:1]
+        report["hypotheses"] = [{**report["hypotheses"][0], "cause": None}]
+        report["actions"] = report["actions"][:1]
+    one = mutated(VALID_REPORT, single)
+    rejudge(case_dir, one)
+    assert problems_for(one, case, findings, config) == []
+    two = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].update(cause=None))
+    assert_problem(problems_for(two, case, findings, config), "confirmed hypothesis", "top cause")
+
+
+# round 2: depth
+
+def test_a_report_nested_deeper_than_fifty_levels_is_a_problem(case, findings, config):
+    nested = value = []
+    for _ in range(60):
+        inner = []
+        value.append(inner)
+        value = inner
+    report = mutated(VALID_REPORT, lambda r: r.update(map_changes=[nested]))
+    assert problems_for(report, case, findings, config) == ["report: nested deeper than 50 levels"]
+
+
+def test_a_report_at_fifty_levels_is_not_refused_for_depth(case, findings, config):
+    nested = value = []
+    for _ in range(40):
+        inner = []
+        value.append(inner)
+        value = inner
+    report = mutated(VALID_REPORT, lambda r: r.update(map_changes=[nested]))
+    assert "nested deeper" not in " ".join(problems_for(report, case, findings, config))
+
+
+# round 2: the work order lists unreadable finding files
+
+def test_unreadable_finding_files_are_work_order_coverage_gaps(case_dir, case):
+    write_checked(case_dir, unreadable=[{"file": "findings/network.json", "reason": "not valid JSON"}])
+    gaps = build_work_order(VALID_REPORT, case, RENDERED_AT, checked=checked_findings(case_dir))["coverage_gaps"]
+    assert "Finding file not read: findings/network.json (not valid JSON)" in gaps

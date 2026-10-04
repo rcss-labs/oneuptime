@@ -156,13 +156,21 @@ def test_a_missing_report_json_also_marks_the_outputs_stale(skill_dir, case_dir)
     assert (case_dir / "report.md.stale").is_file() and not (case_dir / "report.md").exists()
 
 
-def test_validate_does_not_touch_the_outputs(skill_dir, case_dir):
+def test_a_failed_validate_also_marks_the_outputs_stale(skill_dir, case_dir):
     write_report(case_dir, VALID_REPORT)
     render_ok(skill_dir, case_dir)
     broken = copy.deepcopy(VALID_REPORT)
     broken["summary"]["impact"] = ""
     write_report(case_dir, broken)
-    assert run(skill_dir, "validate", "--case-dir", str(case_dir)).returncode == 1
+    result = run(skill_dir, "validate", "--case-dir", str(case_dir))
+    assert result.returncode == 1 and "report.md.stale" in result.stderr
+    assert not (case_dir / "report.md").exists() and (case_dir / "report.md.stale").is_file()
+
+
+def test_a_successful_validate_leaves_the_outputs_alone(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    assert run(skill_dir, "validate", "--case-dir", str(case_dir)).returncode == 0
     assert (case_dir / "report.md").is_file() and not (case_dir / "report.md.stale").exists()
 
 
@@ -198,3 +206,100 @@ def test_an_invalid_work_order_writes_neither_output(skill_dir, case_dir, monkey
     assert command.main(["render", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir), "--now", NOW]) == 1
     assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
     assert "cause.label: broken" in capsys.readouterr().err
+
+
+# round 2
+
+def summary_path(case_dir):
+    return case_dir / "judgments" / "summary.json"
+
+
+def test_a_malformed_summary_makes_validate_exit_one_with_problems_not_a_traceback(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    summary = json.loads(summary_path(case_dir).read_text())
+    summary["findings"] = [1]
+    summary_path(case_dir).write_text(json.dumps(summary))
+    result = run(skill_dir, "validate", "--case-dir", str(case_dir))
+    assert result.returncode == 1 and "Traceback" not in result.stderr and "judgments/summary.json" in result.stderr
+
+
+def test_a_malformed_checked_json_makes_validate_exit_one_with_problems(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    (case_dir / "findings" / "checked.json").write_text(json.dumps({"valid": [1]}))
+    result = run(skill_dir, "validate", "--case-dir", str(case_dir))
+    assert result.returncode == 1 and "Traceback" not in result.stderr and "checked.json" in result.stderr
+
+
+def test_a_render_that_raises_is_a_failed_render_with_stale_outputs(skill_dir, case_dir, monkeypatch, capsys):
+    command = load_command()
+    write_report(case_dir, VALID_REPORT)
+    assert command.main(["render", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir), "--now", NOW]) == 0
+    capsys.readouterr()
+
+    def boom(*args, **kwargs):
+        raise KeyError("claim")
+
+    monkeypatch.setattr(command, "render_report", boom)
+    assert command.main(["render", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir), "--now", NOW]) == 1
+    err = capsys.readouterr().err
+    assert len(err.strip().splitlines()) <= 3 and "Traceback" not in err and "stale" in err
+    assert not (case_dir / "report.md").exists() and (case_dir / "report.md.stale").is_file()
+
+
+def test_validate_that_raises_unexpectedly_exits_one_without_a_traceback(skill_dir, case_dir, monkeypatch, capsys):
+    command = load_command()
+    write_report(case_dir, VALID_REPORT)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(command, "validate_report", boom)
+    assert command.main(["validate", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir)]) == 1
+    err = capsys.readouterr().err
+    assert "RuntimeError" in err and "secret detail" not in err
+
+
+def test_a_very_deeply_nested_report_is_a_problem_not_a_recursion_error(skill_dir, case_dir):
+    (case_dir / "report.json").write_text('{"a":' * 20000 + "1" + "}" * 20000)
+    result = run(skill_dir, "validate", "--case-dir", str(case_dir))
+    assert result.returncode == 1 and "Traceback" not in result.stderr and "nested" in result.stderr
+
+
+def test_a_failure_while_moving_a_file_marks_every_output_stale(skill_dir, case_dir, monkeypatch):
+    command = load_command()
+    write_report(case_dir, VALID_REPORT)
+    assert command.main(["render", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir), "--now", NOW]) == 0
+    real_replace, count = command.os.replace, {"n": 0}
+
+    def flaky(source, target):
+        if str(target).endswith(("report.md", "work-order.json")) and not str(source).endswith(".stale"):
+            count["n"] += 1
+            if count["n"] == 2:
+                raise OSError("disk full")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(command.os, "replace", flaky)
+    code = command.main(["render", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir), "--now", NOW])
+    assert code == 2
+    assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
+    assert (case_dir / "report.md.stale").is_file() and (case_dir / "work-order.json.stale").is_file()
+
+
+def test_a_blocked_temporary_name_still_marks_the_old_outputs_stale(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    (case_dir / "work-order.json.tmp").mkdir()
+    result = run(skill_dir, "render", "--case-dir", str(case_dir), "--now", NOW)
+    assert result.returncode == 2
+    assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
+    assert (case_dir / "work-order.json.stale").is_file()
+
+
+def test_unreadable_finding_files_reach_the_work_order(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    checked = json.loads((case_dir / "findings" / "checked.json").read_text())
+    checked["unreadable"] = [{"file": "findings/network.json", "reason": "not valid JSON"}]
+    (case_dir / "findings" / "checked.json").write_text(json.dumps(checked))
+    render_ok(skill_dir, case_dir)
+    order = json.loads((case_dir / "work-order.json").read_text())
+    assert "Finding file not read: findings/network.json (not valid JSON)" in order["coverage_gaps"]

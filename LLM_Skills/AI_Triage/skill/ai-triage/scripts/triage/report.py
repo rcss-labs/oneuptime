@@ -307,9 +307,11 @@ def _check_status(report: dict, parts: dict, problems: list[str]) -> None:
         else:
             if causes[top].get("label") not in ("confirmed", "probable"):
                 problems.append("summary.top_cause: the top cause must be labelled confirmed or probable")
-            if not any(h.get("result") == "confirmed" and h.get("cause") in (None, top) for _, h in parts["hypotheses"]):
+            only_cause = len(parts["causes"]) == 1
+            if not any(h.get("result") == "confirmed" and (h.get("cause") == top or (h.get("cause") is None and only_cause))
+                       for _, h in parts["hypotheses"]):
                 problems.append("status is cause_found but no confirmed hypothesis belongs to the top cause "
-                                "(a hypothesis with no cause counts as belonging to it)")
+                                "(a hypothesis with no cause counts only when the report has exactly one cause)")
     if results.count("rejected") >= 3 and "confirmed" not in results and status != "unresolved":
         problems.append("status: three or more hypotheses were rejected and none confirmed, so status must be unresolved")
     if status == "unresolved":
@@ -369,6 +371,72 @@ def load_summary(case: dict) -> tuple[dict | None, str | None]:
     if not isinstance(summary, dict) or not isinstance(summary.get("causes"), dict):
         return None, f"judgments/{SUMMARY_NAME}: cannot be read as a judgments summary, so labels cannot be checked"
     return summary, None
+
+
+def _is_number_or_none(value: Any) -> bool:
+    return value is None or _is_number(value)
+
+
+def _text_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _summary_shape_problems(summary: dict) -> list[str]:
+    """Wrong types anywhere in the stored judgments summary, as paths. Keys are never echoed."""
+    where, problems = f"judgments/{SUMMARY_NAME}", []
+
+    def table(name: str) -> list[dict]:
+        value = summary.get(name)
+        if value is None:
+            return []
+        if not isinstance(value, dict):
+            problems.append(f"{where} {name}: must be an object")
+            return []
+        entries = []
+        for position, entry in enumerate(value.values()):
+            if isinstance(entry, dict):
+                entries.append((position, entry))
+            else:
+                problems.append(f"{where} {name} entry {position}: must be an object")
+        return entries
+
+    if not isinstance(summary.get("typesafe"), str):
+        problems.append(f"{where} typesafe: must be text")
+    if summary.get("model") is not None and not isinstance(summary["model"], str):
+        problems.append(f"{where} model: must be text or null")
+    for position, entry in table("findings"):
+        for key in ("relation", "verdict"):
+            if entry.get(key) is not None and not isinstance(entry[key], str):
+                problems.append(f"{where} findings entry {position}.{key}: must be text")
+        if not _is_number_or_none(entry.get("confidence")):
+            problems.append(f"{where} findings entry {position}.confidence: must be a number")
+    for position, entry in table("causes"):
+        name = f"{where} causes entry {position}"
+        if "gates" in entry and not (isinstance(entry["gates"], dict) and all(isinstance(v, bool) for v in entry["gates"].values())):
+            problems.append(f"{name}.gates: must be an object of true or false")
+        if "reasons" in entry and not _text_list(entry["reasons"]):
+            problems.append(f"{name}.reasons: must be a list of text")
+        for key in ("rank_probability", "symptom_fit"):
+            if not _is_number_or_none(entry.get(key)):
+                problems.append(f"{name}.{key}: must be a number")
+        if entry.get("scope") is not None and not isinstance(entry["scope"], str):
+            problems.append(f"{name}.scope: must be text")
+    for position, entry in table("actions"):
+        name = f"{where} actions entry {position}"
+        if "reasons" in entry and not _text_list(entry["reasons"]):
+            problems.append(f"{name}.reasons: must be a list of text")
+        for key in ("target_confidence", "specific"):
+            if not _is_number_or_none(entry.get(key)):
+                problems.append(f"{name}.{key}: must be a number")
+        if entry.get("target") is not None and not isinstance(entry["target"], str):
+            problems.append(f"{name}.target: must be text")
+    if "ask_engineer" in summary and not _text_list(summary["ask_engineer"]):
+        problems.append(f"{where} ask_engineer: must be a list of text")
+    adhoc = summary.get("adhoc")
+    if adhoc is not None and not (isinstance(adhoc, list) and all(
+            isinstance(item, dict) and isinstance(item.get("id"), str) and isinstance(item.get("reason"), str) for item in adhoc)):
+        problems.append(f"{where} adhoc: must be a list of objects with text id and reason")
+    return problems
 
 
 def _judged(summary: dict | None) -> dict | None:
@@ -482,14 +550,19 @@ def _check_judgments(report: dict, case: dict, parts: dict, findings: dict[str, 
     if unreadable:
         problems.append(unreadable)
         return
+    shape = _summary_shape_problems(raw) if raw is not None else []
+    if shape:
+        problems.extend(shape)
+        return
     summary = _judged(raw)
     _check_typesafe_against_summary(report, summary, problems)
     coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
     already_barred = str(coverage.get("typesafe")).startswith(TYPESAFE_UNAVAILABLE_PREFIX)
-    if summary is None and not already_barred:
+    if summary is None:
         for index, cause in parts["causes"]:
-            if cause.get("label") == "confirmed":
-                problems.append(f"causes[{index}]: no judging run is stored, so no cause may be labelled confirmed")
+            label = cause.get("label")
+            if label == "probable" or (label == "confirmed" and not already_barred):
+                problems.append(f"causes[{index}]: no judging run is stored, so no cause may be labelled above candidate")
     if summary is not None:
         edited_causes, edited_actions = _edited_entries(summary, parts, findings, problems)
         _check_causes_against_summary(summary, parts, edited_causes, problems)
@@ -521,6 +594,22 @@ def _check_secrets(report: dict, problems: list[str]) -> None:
             problems.append(f"{path}: contains what looks like a secret ({', '.join(categories)}); remove it")
 
 
+MAX_DEPTH = 50
+
+
+def _too_deep(value: Any) -> bool:
+    """True when containers are nested deeper than MAX_DEPTH. Iterative, so depth cannot cause recursion."""
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, (dict, list)):
+            if depth > MAX_DEPTH:
+                return True
+            children = item.values() if isinstance(item, dict) else item
+            stack.extend((child, depth + 1) for child in children)
+    return False
+
+
 def validate_report(report: Any, case: dict, findings: dict[str, dict], config: TriageConfig) -> list[str]:
     """Every problem that stops the report from being rendered. An empty list means it may be rendered.
 
@@ -528,6 +617,8 @@ def validate_report(report: Any, case: dict, findings: dict[str, dict], config: 
     """
     if not isinstance(report, dict):
         return ["report: must be a JSON object"]
+    if _too_deep(report):
+        return [f"report: nested deeper than {MAX_DEPTH} levels"]
     problems: list[str] = []
     parts = _check_shape(report, problems)
     _check_finding_ids(parts["causes"], "causes", ("supporting", "contradicting"), findings, problems)
@@ -543,6 +634,89 @@ def validate_report(report: Any, case: dict, findings: dict[str, dict], config: 
     return problems
 
 
+# --- the stored inputs: checked.json and the evidence facts --------------------------------
+
+FINDING_TEXT_KEYS = ("id", "claim", "excerpt", "provenance", "confidence", "analyst")
+
+
+def load_checked(case_dir: Path) -> tuple[dict, list[str]]:
+    """findings/checked.json as a dict, plus a problem for each wrong type at any level.
+
+    Nothing is returned that a reader would have to type-check again. A missing file is no problem.
+    """
+    path = Path(case_dir) / "findings" / "checked.json"
+    where = "findings/checked.json"
+    if not path.is_file():
+        return {}, []
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError, RecursionError):
+        return {}, [f"{where}: cannot be read as JSON"]
+    if not isinstance(data, dict):
+        return {}, [f"{where}: must be a JSON object"]
+    problems: list[str] = []
+    checked: dict = {}
+    valid = []
+    if data.get("valid") is not None and not isinstance(data["valid"], list):
+        problems.append(f"{where} valid: must be a list")
+    for index, entry in enumerate(data["valid"] if isinstance(data.get("valid"), list) else []):
+        entry_problems = _finding_entry_problems(entry, f"{where} valid[{index}]")
+        problems += entry_problems
+        if not entry_problems:
+            valid.append(entry)
+    checked["valid"] = valid
+    for key in ("rejected", "unreadable"):
+        value = data.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            problems.append(f"{where} {key}: must be a list of objects")
+        else:
+            checked[key] = value
+    if data.get("warnings") is not None:
+        if _text_list(data["warnings"]):
+            checked["warnings"] = data["warnings"]
+        else:
+            problems.append(f"{where} warnings: must be a list of text")
+    if data.get("checked") is not None:
+        value = data["checked"]
+        if isinstance(value, dict) and all(_text_list(item) for item in value.values()):
+            checked["checked"] = value
+        else:
+            problems.append(f"{where} checked: must be an object of lists of text")
+    return checked, problems
+
+
+def _finding_entry_problems(entry: Any, where: str) -> list[str]:
+    if not isinstance(entry, dict):
+        return [f"{where}: must be an object"]
+    problems = []
+    for key in FINDING_TEXT_KEYS:
+        if not isinstance(entry.get(key), str):
+            problems.append(f"{where}.{key}: must be text")
+    if isinstance(entry.get("id"), str) and not ID_RE.fullmatch(entry["id"]):
+        problems.append(f"{where}.id: not a valid id")
+    fact_ids = entry.get("fact_ids")
+    if not _text_list(fact_ids):
+        problems.append(f"{where}.fact_ids: must be a list of text")
+    else:
+        problems += [f"{where}.fact_ids[{i}]: not a valid id" for i, item in enumerate(fact_ids) if not ID_RE.fullmatch(item)]
+    return problems
+
+
+def check_case_inputs(case_dir: Path) -> tuple[dict[str, dict], list[str]]:
+    """The usable findings of the case (id to finding) and every problem with checked.json and the evidence facts.
+
+    A finding with a wrong type, or an id or fact id that fails the id pattern, is a problem and is left out.
+    """
+    checked, problems = load_checked(case_dir)
+    findings = {item["id"]: item for item in checked.get("valid", [])}
+    for position, (key, fact) in enumerate(load_facts(Path(case_dir)).items()):
+        if not ID_RE.fullmatch(key) or not isinstance(fact.get("id"), str) or not ID_RE.fullmatch(fact["id"]):
+            problems.append(f"evidence fact {position}: its id is not a valid id")
+    return findings, problems
+
+
 # --- work order ---------------------------------------------------------------------------
 
 def _top_cause(report: dict) -> dict | None:
@@ -550,7 +724,7 @@ def _top_cause(report: dict) -> dict | None:
     return next((cause for cause in report["causes"] if cause["id"] == top), None) if top else None
 
 
-def build_work_order(report: dict, case: dict, now: datetime) -> dict:
+def build_work_order(report: dict, case: dict, now: datetime, checked: dict | None = None) -> dict:
     """The machine-readable work order for an agent that never saw the investigation."""
     incident = case["incident"]
     top = _top_cause(report)
@@ -562,6 +736,9 @@ def build_work_order(report: dict, case: dict, now: datetime) -> dict:
     typesafe = report["coverage"]["typesafe"]
     if typesafe.startswith(TYPESAFE_UNAVAILABLE_PREFIX):
         gaps.append(f"TypeSafe {typesafe}")
+    for item in (checked or {}).get("unreadable") or []:
+        if isinstance(item, dict):
+            gaps.append(f"Finding file not read: {item.get('file')} ({item.get('reason')})")
     return {
         "incident": {"number": incident["number"], "title": incident["title"], "url": incident.get("url") or ""},
         "generated_at": format_time(now),
@@ -645,8 +822,20 @@ def coverage_from_evidence(case_dir: Path) -> list[dict]:
 # --- rendering ----------------------------------------------------------------------------
 
 def _inline(value: Any) -> str:
-    """One line of text: whitespace collapsed so a field cannot start a heading or break a list."""
-    return " ".join(str(value).split())
+    """One line of safe text: whitespace collapsed so a field cannot start a heading or break a list, angle
+    brackets written as entities so it cannot make HTML, and "](" broken so it cannot make a link."""
+    text = " ".join(str(value).split()).replace("<", "&lt;").replace(">", "&gt;")
+    return text.replace("](", "] (").replace("`", "'")
+
+
+def _time_text(value: Any) -> str:
+    """A timestamp re-formatted in UTC, or "unreadable time". An empty value reads "-"."""
+    if value in (None, ""):
+        return "-"
+    try:
+        return format_time(parse_time(value))
+    except (WindowError, TypeError, ValueError, OverflowError):
+        return "unreadable time"
 
 
 def _cell(value: Any) -> str:
@@ -726,34 +915,59 @@ def _finding_verdict_lines(finding_id: str, summary: dict | None) -> list[str]:
     return [_field("TypeSafe verdict", f"{entry.get('verdict', '-')} ({detail})" if detail else entry.get("verdict"))]
 
 
+def _renderable(finding: Any) -> bool:
+    """A finding is rendered only when its id and cited fact ids are plain, pattern-matching text."""
+    return (isinstance(finding, dict) and isinstance(finding.get("id"), str) and ID_RE.fullmatch(finding["id"]) is not None
+            and _text_list(finding.get("fact_ids")) and all(ID_RE.fullmatch(f) for f in finding["fact_ids"]))
+
+
+def _fact_line(fact_id: str, fact: dict | None) -> str:
+    if fact is None or not isinstance(fact.get("id"), str) or not ID_RE.fullmatch(fact["id"]):
+        return f"  - {_inline(fact_id)}: fact not available"
+    return (f"  - {_inline(fact_id)}: command `{_inline(fact.get('command') or '-')}`, "
+            f"resource {_inline(fact.get('resource') or '-')}, time {_time_text(fact.get('time'))}, "
+            f"excerpt: {_inline(fact.get('excerpt') or fact.get('summary') or '-')}")
+
+
+def _safe_rows(rows: list[dict]) -> list[dict]:
+    """Timeline rows with every text passed through the same escaping, and times re-formatted or marked unreadable."""
+    safe = []
+    for row in rows:
+        row = row if isinstance(row, dict) else {}
+        fact_id = row.get("fact_id")
+        safe.append({
+            "time": _time_text(row.get("time")) if row.get("time") else "",
+            "offset": _inline(row.get("offset", "")),
+            "text": _inline(row.get("text", "")),
+            "source": _inline(row.get("source", "")),
+            "fact_id": _inline(fact_id) if isinstance(fact_id, str) and ID_RE.fullmatch(fact_id) else None,
+            "resource": _inline(row.get("resource", "")),
+        })
+    return safe
+
+
 def _render_findings(findings: dict[str, dict], facts: dict[str, dict], summary: dict | None, checked: dict) -> list[str]:
     lines = ["## 4. Findings", ""]
-    if not findings:
+    shown = [finding for finding in findings.values() if _renderable(finding)]
+    if not shown:
         return lines + _none(checked)
     by_analyst: dict[str, list[dict]] = {}
-    for finding in findings.values():
-        by_analyst.setdefault(finding.get("analyst", "unknown"), []).append(finding)
+    for finding in shown:
+        by_analyst.setdefault(str(finding.get("analyst", "unknown")), []).append(finding)
     for analyst in sorted(by_analyst):
         lines += [f"### {_inline(analyst)}", ""]
         for finding in by_analyst[analyst]:
-            lines += [f"**{_inline(finding['id'])}**: {_inline(finding['claim'])}", "",
-                      _field("Provenance", finding["provenance"]), _field("Confidence", finding["confidence"]),
+            lines += [f"**{_inline(finding['id'])}**: {_inline(finding.get('claim', '-'))}", "",
+                      _field("Provenance", finding.get("provenance")), _field("Confidence", finding.get("confidence")),
                       _field("Cited facts", ", ".join(finding["fact_ids"]))]
+            lines += [_fact_line(fact_id, facts.get(fact_id)) for fact_id in finding["fact_ids"]]
             lines += _finding_verdict_lines(finding["id"], summary)
-            for fact_id in finding["fact_ids"]:
-                fact = facts.get(fact_id)
-                if fact is None:
-                    lines.append(f"  - {fact_id}: fact not found")
-                    continue
-                lines.append(f"  - {fact_id}: command `{_inline(fact.get('command') or '-')}`, resource {_inline(fact.get('resource') or '-')}, "
-                             f"time {fact.get('time') or '-'}, excerpt: {_inline(fact.get('excerpt') or fact.get('summary') or '-')}")
             lines.append("")
         lines.pop()
     checks = _checks_recorded(checked)
     if checks:
         lines += ["", "**Checks recorded by the analysts**", ""] + [f"- {line}" for line in checks]
     return lines
-
 
 
 def _hypothesis_table(hypotheses: list[dict]) -> list[str]:
@@ -775,8 +989,8 @@ def _judgment_lines(cause_id: str, summary: dict | None) -> list[str]:
     gates = entry.get("gates") if isinstance(entry.get("gates"), dict) else {}
     passed = [name for name, ok in gates.items() if ok]
     missed = [name for name, ok in gates.items() if not ok]
-    lines = [_field("Gates passed", ", ".join(passed) or "none") if gates else _field("Gates", "none were evaluated"),
-             _field("Gates missed", ", ".join(missed) or "none") if gates else None,
+    lines = [_field("Gates met", ", ".join(passed) or "none") if gates else _field("Gates", "none were evaluated"),
+             _field("Gates not met", ", ".join(missed) or "none") if gates else None,
              _field("Ranking probability", _numeric(entry.get("rank_probability"))),
              _field("Symptom fit", _numeric(entry.get("symptom_fit"))),
              _field("Scope", entry.get("scope"))]
@@ -913,7 +1127,7 @@ def render_report(report: dict, case: dict, findings: dict[str, dict], timeline_
         [f"{REQUIRED_HEADINGS[0]} {_inline(incident['number'])} {_inline(incident['title'])}"],
         _render_summary(report),
         _render_incident(case),
-        ["## 3. Timeline", "", render_rows(timeline_rows) if timeline_rows else "\n".join(_none(checked))],
+        ["## 3. Timeline", "", render_rows(_safe_rows(timeline_rows)) if timeline_rows else "\n".join(_none(checked))],
         _render_findings(findings, facts, summary, checked),
         _render_causes(report, summary, checked),
         _render_actions(report, summary, checked),
