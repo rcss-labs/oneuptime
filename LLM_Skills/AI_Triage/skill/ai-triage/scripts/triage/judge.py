@@ -178,14 +178,17 @@ def rank_causes(
         verified = [findings[finding_id]["claim"] for finding_id in cause.get("supporting", [])
                     if finding_id in findings and verdicts.get(finding_id, {}).get("verdict") == "verified"]
         candidates[cause["id"]] = {"statement": cause["statement"], "supporting_evidence": verified}
-    state = {"symptoms": symptoms, "candidates": candidates}
     options = {cause["id"]: cause["statement"] for cause in causes}
     first = list(options)
     rng.shuffle(first)
     orders = [first, first[::-1]]
     answers = []
     for position, order in enumerate(orders, start=1):
-        asked = {"cause_rank": session.prepare_options(build_choice(questions["cause_rank"], options, order))}
+        state = {"symptoms": symptoms, "candidates": {cause_id: candidates[cause_id] for cause_id in order}}
+        question = build_choice(questions["cause_rank"], options, first)
+        if position == 2:  # the whole option list is reversed, so the fallback comes first
+            question["criteria"] = dict(reversed(list(question["criteria"].items())))
+        asked = {"cause_rank": session.prepare_options(question)}
         answers.append(session.ask("ranking", f"order {position}", state, asked).answers["cause_rank"])
     return {"orders": orders, "answers": answers, "choices": [answer["choice"] for answer in answers]}
 

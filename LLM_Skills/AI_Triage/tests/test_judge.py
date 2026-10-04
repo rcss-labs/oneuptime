@@ -295,7 +295,8 @@ def test_ranking_is_asked_twice_in_reversed_order_with_the_fallback_last(tmp_pat
         "C2": {"statement": STATEMENT_2, "supporting_evidence": []},
     }}
     orders = [list(call[1]["cause_rank"]["criteria"]) for call in judge.calls]
-    assert orders == [expected + ["insufficient_evidence"], expected[::-1] + ["insufficient_evidence"]]
+    assert orders == [expected + ["insufficient_evidence"], ["insufficient_evidence"] + expected[::-1]]
+    assert [list(state["candidates"]) for state in states] == [expected, expected[::-1]]
     assert all(list(call[1]) == ["cause_rank"] for call in judge.calls)
     assert call_option_text(judge.calls[0]) == {"C1": STATEMENT_1, "C2": STATEMENT_2}
     assert result["choices"] == ["C1", "C1"]
@@ -338,7 +339,7 @@ def test_a_single_cause_is_still_ranked_against_the_fallback(tmp_path, config):
     judge = FakeJudge(make_responder())
     causes = [{"id": "C1", "statement": STATEMENT_1, "supporting": []}]
     rank_causes(session_for(tmp_path, config, judge), QUESTIONS, causes, SYMPTOMS, {}, {}, random.Random(1))
-    assert [list(call[1]["cause_rank"]["criteria"]) for call in judge.calls] == [["C1", "insufficient_evidence"]] * 2
+    assert [list(call[1]["cause_rank"]["criteria"]) for call in judge.calls] == [["C1", "insufficient_evidence"], ["insufficient_evidence", "C1"]]
 
 
 def test_actions_ask_target_and_specificity_in_one_request(tmp_path, config):
