@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from triage.collectors import Collector
-from triage.collectors.common import parse_iso
+from triage.collectors.common import parse_iso, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED
 from triage.metrics import MetricSpec, add_metric_facts
@@ -12,6 +12,9 @@ from triage.window import describe_offset, format_time
 
 MAX_LISTENERS = 5
 MAX_TARGET_GROUPS = 10
+MAX_UNHEALTHY_FACTS = 20
+LOAD_BALANCER_NOT_FOUND = ("LoadBalancerNotFound",)
+ADDRESS_RECORD_TYPES = ("A", "AAAA", "CNAME")
 CERTIFICATE_WARNING = timedelta(days=30)
 LOAD_BALANCER_METRICS = (
     ("HTTPCode_ELB_5XX_Count", "Sum"),
@@ -29,10 +32,10 @@ def _last_segment(arn: str) -> str:
 
 
 def _describe_load_balancer(ctx: CollectContext, name: str) -> dict | None:
-    reply = ctx.aws("elbv2", "describe-load-balancers", ["--names", name])
-    if reply is None:
+    reply = ctx.aws("elbv2", "describe-load-balancers", ["--names", name], not_found=LOAD_BALANCER_NOT_FOUND)
+    if reply is None and not was_not_found(ctx, LOAD_BALANCER_NOT_FOUND):
         return None
-    balancers = reply.get("LoadBalancers", [])
+    balancers = (reply or {}).get("LoadBalancers", [])
     if not balancers:
         ctx.evidence.add(
             kind=CURRENT, resource=f"loadbalancer/{name}", command=ctx.last_command,
@@ -63,7 +66,8 @@ def _add_listeners(ctx: CollectContext, resource: str, balancer_arn: str, group_
     certificates: list[str] = []
     for listener in (reply or {}).get("Listeners", []):
         arns = [c.get("CertificateArn", "") for c in listener.get("Certificates", [])]
-        certificates += [arn for arn in arns if arn and arn not in certificates]
+        # IAM server certificates are not ACM certificates and acm describe-certificate rejects them.
+        certificates += [arn for arn in arns if ":acm:" in arn and arn not in certificates]
         shown = ", ".join(_last_segment(arn) for arn in arns) or "none"
         ctx.evidence.add(
             kind=CURRENT, resource=resource, command=ctx.last_command,
@@ -90,7 +94,7 @@ def _add_rules(ctx: CollectContext, resource: str, listener: dict, group_names: 
     names: list[str] = []
     for rule in rules:
         for arn in _forwarded_groups(rule):
-            name = group_names.get(arn) or arn.split("/")[1] if "/" in arn else arn
+            name = (group_names.get(arn) or arn.split("/")[1]) if "/" in arn else arn
             if name not in names:
                 names.append(name)
     ctx.evidence.add(
@@ -104,18 +108,30 @@ def _describe_target_groups(ctx: CollectContext, balancer_arn: str) -> list[dict
     return (reply or {}).get("TargetGroups", [])
 
 
-def _add_target_group(ctx: CollectContext, resource: str, group: dict) -> None:
+def _add_target_group(ctx: CollectContext, resource: str, group: dict, command: str) -> None:
+    pieces = []
+    if group.get("HealthCheckPath"):
+        pieces.append(f"path {group['HealthCheckPath']}")
+    if group.get("HealthCheckPort"):
+        pieces.append(f"on port {group['HealthCheckPort']}")
+    if group.get("HealthCheckIntervalSeconds") is not None:
+        pieces.append(f"every {group['HealthCheckIntervalSeconds']} seconds")
+    thresholds = [
+        f"{label} threshold {group[key]}"
+        for label, key in (("healthy", "HealthyThresholdCount"), ("unhealthy", "UnhealthyThresholdCount"))
+        if group.get(key) is not None
+    ]
+    detail = ", ".join(part for part in (" ".join(pieces), ", ".join(thresholds)) if part)
     ctx.evidence.add(
-        kind=CURRENT, resource=resource, command=ctx.last_command,
-        summary=(
-            f"Target group {group.get('TargetGroupName')} health check path {group.get('HealthCheckPath')} "
-            f"on port {group.get('HealthCheckPort')} every {group.get('HealthCheckIntervalSeconds')} seconds, "
-            f"healthy threshold {group.get('HealthyThresholdCount')}, unhealthy threshold {group.get('UnhealthyThresholdCount')}"
-        ),
+        kind=CURRENT, resource=resource, command=command,
+        summary=f"Target group {group.get('TargetGroupName')} health check {detail or 'settings are not reported'}",
     )
 
 
-def _add_target_health(ctx: CollectContext, resource: str, group: dict) -> None:
+def _add_target_health(
+    ctx: CollectContext, resource: str, group: dict, unhealthy: list[tuple[str, str]]
+) -> None:
+    """Add the count fact; collect the unhealthy targets as (summary, command) so the caller can cap them."""
     reply = ctx.aws("elbv2", "describe-target-health", ["--target-group-arn", group.get("TargetGroupArn", "")])
     if reply is None:
         return
@@ -135,11 +151,22 @@ def _add_target_health(ctx: CollectContext, resource: str, group: dict) -> None:
         if health.get("State") == "healthy":
             continue
         target = description.get("Target", {})
+        unhealthy.append((
+            f"Target {target.get('Id')}:{target.get('Port')} in target group {name} is {health.get('State')} "
+            f"({health.get('Reason')}): {health.get('Description')}",
+            ctx.last_command,
+        ))
+
+
+def _add_unhealthy_targets(ctx: CollectContext, resource: str, unhealthy: list[tuple[str, str]]) -> None:
+    for summary, command in unhealthy[:MAX_UNHEALTHY_FACTS]:
+        ctx.evidence.add(kind=CURRENT, resource=resource, command=command, summary=summary)
+    if len(unhealthy) > MAX_UNHEALTHY_FACTS:
         ctx.evidence.add(
-            kind=CURRENT, resource=resource, command=ctx.last_command,
+            kind=DERIVED, resource=resource, command=unhealthy[0][1],
             summary=(
-                f"Target {target.get('Id')}:{target.get('Port')} in target group {name} is {health.get('State')} "
-                f"({health.get('Reason')}): {health.get('Description')}"
+                f"{len(unhealthy)} targets are unhealthy in total; "
+                f"only the first {MAX_UNHEALTHY_FACTS} are listed"
             ),
         )
 
@@ -149,13 +176,19 @@ def _add_group_attributes(ctx: CollectContext, resource: str, group: dict) -> No
     if reply is None:
         return
     values = {a.get("Key"): a.get("Value") for a in reply.get("Attributes", [])}
+    pieces = [
+        f"{label} {values[key]} seconds"
+        for label, key in (
+            ("deregistration delay", "deregistration_delay.timeout_seconds"),
+            ("slow start", "slow_start.duration_seconds"),
+        )
+        if values.get(key) is not None
+    ]
+    if not pieces:
+        return
     ctx.evidence.add(
         kind=CURRENT, resource=resource, command=ctx.last_command,
-        summary=(
-            f"Target group {group.get('TargetGroupName')} deregistration delay "
-            f"{values.get('deregistration_delay.timeout_seconds')} seconds, "
-            f"slow start {values.get('slow_start.duration_seconds')} seconds"
-        ),
+        summary=f"Target group {group.get('TargetGroupName')} {', '.join(pieces)}",
     )
 
 
@@ -175,7 +208,9 @@ def _add_certificate(ctx: CollectContext, resource: str, arn: str) -> None:
         return
     end = ctx.window.end
     offset = describe_offset(not_after, end)
-    if not_after <= end:
+    if ctx.window.contains(not_after):
+        text = f"Certificate {name} expired at {format_time(not_after)}, inside the incident window"
+    elif not_after <= end:
         text = f"Certificate {name} expired {offset} the window end"
     elif not_after - end <= CERTIFICATE_WARNING:
         text = f"Certificate {name} expires {offset} the window end"
@@ -223,33 +258,39 @@ def _add_dns_record(ctx: CollectContext, hostname: str, dns_name: str) -> None:
     if reply is None:
         return
     resource = f"dns/{hostname}"
-    records = [r for r in reply.get("ResourceRecordSets", []) if _normal_name(r.get("Name", "")) == hostname]
+    records = [
+        r for r in reply.get("ResourceRecordSets", [])
+        if _normal_name(r.get("Name", "")) == hostname and r.get("Type") in ADDRESS_RECORD_TYPES
+    ]
     if not records:
         ctx.evidence.add(
             kind=CURRENT, resource=resource, command=ctx.last_command,
-            summary=f"No record named {hostname} exists in hosted zone {zone_id}",
+            summary=(
+                f"No A, AAAA, or CNAME record named {hostname} exists in hosted zone {zone_id} "
+                "(a wildcard record may apply)"
+            ),
         )
         return
     for record in records:
-        targets = _record_targets(record)
-        shown = ", ".join(targets) or "no value"
-        ctx.evidence.add(
-            kind=CURRENT, resource=resource, command=ctx.last_command,
-            summary=f"{hostname} is a {record.get('Type')} record pointing at {shown}",
-        )
-        if not any(_normal_name(target) == _normal_name(dns_name) for target in targets):
+        if any(_normal_name(target) == _normal_name(dns_name) for target in _record_targets(record)):
             ctx.evidence.add(
-                kind=DERIVED, resource=resource, command=ctx.last_command,
-                summary=f"{hostname} does not point at this load balancer ({dns_name}); it points at {shown}",
+                kind=CURRENT, resource=resource, command=ctx.last_command,
+                summary=f"{hostname} has an {record.get('Type')} record pointing at {dns_name}, this load balancer",
             )
+            return
+    shown = "; ".join(f"{r.get('Type')} record to {', '.join(_record_targets(r)) or 'no value'}" for r in records)
+    ctx.evidence.add(
+        kind=DERIVED, resource=resource, command=ctx.last_command,
+        summary=f"{hostname} does not point at this load balancer ({dns_name}); its records point at: {shown}",
+    )
 
 
 def _add_metrics(ctx: CollectContext, resource: str, balancer: dict, groups: list[dict]) -> None:
     arn = balancer.get("LoadBalancerArn", "")
     suffix = arn.split("loadbalancer/", 1)[-1]
-    network = balancer.get("Type") == "network"
-    namespace = "AWS/NetworkELB" if network else "AWS/ApplicationELB"
-    specs = [] if network else [
+    kind = balancer.get("Type")
+    namespace = {"network": "AWS/NetworkELB", "gateway": "AWS/GatewayELB"}.get(kind, "AWS/ApplicationELB")
+    specs = [] if kind in ("network", "gateway") else [
         MetricSpec(metric, namespace, metric, {"LoadBalancer": suffix}, stat) for metric, stat in LOAD_BALANCER_METRICS
     ]
     for group in groups[:MAX_TARGET_GROUPS]:
@@ -270,13 +311,22 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     arn = balancer.get("LoadBalancerArn", "")
     _add_load_balancer(ctx, resource, balancer)
     groups = _describe_target_groups(ctx, arn)
+    groups_command = ctx.last_command
     group_names = {g.get("TargetGroupArn", ""): g.get("TargetGroupName", "") for g in groups}
     certificates = _add_listeners(ctx, resource, arn, group_names)
-    for group in groups:
-        _add_target_group(ctx, resource, group)
-    for group in groups[:MAX_TARGET_GROUPS]:
-        _add_target_health(ctx, resource, group)
+    listed = groups[:MAX_TARGET_GROUPS]
+    for group in listed:
+        _add_target_group(ctx, resource, group, groups_command)
+    if len(groups) > len(listed):
+        ctx.evidence.add(
+            kind=DERIVED, resource=resource, command=groups_command,
+            summary=f"{len(groups)} target groups exist; only the first {MAX_TARGET_GROUPS} were read",
+        )
+    unhealthy: list[tuple[str, str]] = []
+    for group in listed:
+        _add_target_health(ctx, resource, group, unhealthy)
         _add_group_attributes(ctx, resource, group)
+    _add_unhealthy_targets(ctx, resource, unhealthy)
     for certificate in certificates:
         _add_certificate(ctx, resource, certificate)
     if targets.get("hostname"):
