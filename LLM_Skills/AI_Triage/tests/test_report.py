@@ -178,7 +178,7 @@ def case_dir(config, tmp_path):
         {"id": "compute-1", "claim": "Containers exit with code 137", "fact_ids": ["ecs-0001"],
          "excerpt": "exit code 137", "provenance": "incident_time", "confidence": "high"},
         {"id": "compute-2", "claim": "Service is down now", "fact_ids": ["ecs-0002"],
-         "excerpt": "running 0", "provenance": "current", "confidence": "medium"},
+         "excerpt": "desired 2, running 0", "provenance": "current", "confidence": "medium"},
         {"id": "compute-3", "claim": "Bad", "fact_ids": ["ecs-0099"],
          "excerpt": "x", "provenance": "current", "confidence": "low"},
     ])
@@ -266,7 +266,7 @@ def test_symptoms_need_one_real_entry(case, findings, config):
 
 def test_top_cause_must_be_a_cause_id(case, findings, config):
     report = mutated(VALID_REPORT, lambda r: r["summary"].update(top_cause="C9"))
-    assert_problem(problems_for(report, case, findings, config), "top_cause", "C9")
+    assert_problem(problems_for(report, case, findings, config), "top_cause", "known cause id")
 
 
 def test_unresolved_top_cause_must_be_empty(case, findings, config):
@@ -286,10 +286,11 @@ def test_unknown_and_rejected_finding_ids_are_named_everywhere(case, findings, c
         report["hypotheses"][0]["finding_ids"].append("ghost-2")
         report["actions"][0]["finding_ids"].append("ghost-3")
     problems = problems_for(mutated(VALID_REPORT, break_ids), case, findings, config)
-    assert_problem(problems, "causes[0].supporting", "compute-3")
-    assert_problem(problems, "causes[1].contradicting", "ghost-1")
-    assert_problem(problems, "hypotheses[0].finding_ids", "ghost-2")
-    assert_problem(problems, "actions[0].finding_ids", "ghost-3")
+    assert_problem(problems, "causes[0].supporting[1]", "not a valid finding")
+    assert_problem(problems, "causes[1].contradicting[1]", "not a valid finding")
+    assert_problem(problems, "hypotheses[0].finding_ids[1]", "not a valid finding")
+    assert_problem(problems, "actions[0].finding_ids[1]", "not a valid finding")
+    assert not any(name in problem for problem in problems for name in ("compute-3", "ghost-1", "ghost-2", "ghost-3"))
 
 
 @pytest.mark.parametrize("label", ["confirmed", "probable"])
@@ -297,17 +298,17 @@ def test_strong_cause_needs_supporting_finding(case, findings, config, label):
     def strip(report):
         report["causes"][1].update(label=label, supporting=[], contradicting=[])
         report["actions"] = report["actions"][:1]
-    assert_problem(problems_for(mutated(VALID_REPORT, strip), case, findings, config), "C2", "supporting")
+    assert_problem(problems_for(mutated(VALID_REPORT, strip), case, findings, config), "causes[1]", "supporting")
 
 
 def test_confirmed_cause_cannot_have_contradicting_finding(case, findings, config):
     report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(contradicting=["compute-2"]))
-    assert_problem(problems_for(report, case, findings, config), "C1", "contradicting")
+    assert_problem(problems_for(report, case, findings, config), "causes[0]", "contradicting")
 
 
 def test_confirmed_cause_needs_incident_time_support(case, findings, config):
     report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(supporting=["compute-2"]))
-    assert_problem(problems_for(report, case, findings, config), "C1", "incident_time")
+    assert_problem(problems_for(report, case, findings, config), "causes[0]", "incident_time")
 
 
 def test_probable_cause_does_not_need_incident_time_support(case, findings, config):
@@ -355,12 +356,12 @@ def test_action_text_fields_must_not_be_empty(case, findings, config, field):
 
 def test_action_cause_must_exist(case, findings, config):
     report = mutated(VALID_REPORT, lambda r: r["actions"][0].update(cause="C9"))
-    assert_problem(problems_for(report, case, findings, config), "actions[0].cause", "C9")
+    assert_problem(problems_for(report, case, findings, config), "actions[0].cause", "known cause id")
 
 
 def test_action_target_account_must_be_in_config(case, findings, config):
     report = mutated(VALID_REPORT, lambda r: r["actions"][0]["target"].update(account_alias="nowhere"))
-    assert_problem(problems_for(report, case, findings, config), "actions[0].target.account_alias", "nowhere")
+    assert_problem(problems_for(report, case, findings, config), "actions[0].target.account_alias", "account in the config")
 
 
 @pytest.mark.parametrize("field", ["region", "service", "resource_id"])
@@ -429,7 +430,7 @@ def remove_summary(case_dir):
 def test_cause_cannot_exceed_the_judged_label(case_dir, case, findings, config):
     write_summary(case_dir, {"C1": {"label": "probable"}, "C2": {"label": "candidate"}})
     problems = problems_for(VALID_REPORT, case, findings, config)
-    assert_problem(problems, "C1", "confirmed", "probable")
+    assert_problem(problems, "causes[0]", "confirmed", "probable")
 
 
 def test_cause_may_equal_or_undercut_the_judged_label(case_dir, case, findings, config):
@@ -440,8 +441,8 @@ def test_cause_may_equal_or_undercut_the_judged_label(case_dir, case, findings, 
 def test_cause_missing_from_summary_is_at_most_candidate(case_dir, case, findings, config):
     write_summary(case_dir, {"C2": {"label": "candidate"}})
     problems = problems_for(VALID_REPORT, case, findings, config)
-    assert_problem(problems, "C1", "not in", "candidate")
-    assert not any("C2" in problem for problem in problems)
+    assert_problem(problems, "causes[0]", "not in", "candidate")
+    assert not any("causes[1]" in problem for problem in problems)
 
 
 def test_unreadable_summary_is_a_problem(case_dir, case, findings, config):
@@ -730,7 +731,7 @@ def test_secret_never_appears_in_rendered_output(case_dir, case, findings, confi
 
 # hypothesis cause key
 
-@pytest.mark.parametrize("value", [None, "C1", "C2"])
+@pytest.mark.parametrize("value", [None, "C1"])
 def test_hypothesis_cause_may_be_null_a_cause_id_or_absent(case, findings, config, value):
     report = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].update(cause=value))
     assert problems_for(report, case, findings, config) == []
@@ -740,7 +741,7 @@ def test_hypothesis_cause_may_be_null_a_cause_id_or_absent(case, findings, confi
 
 def test_hypothesis_cause_must_be_a_cause_id(case, findings, config):
     report = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].update(cause="C9"))
-    assert_problem(problems_for(report, case, findings, config), "hypotheses[0].cause", "C9")
+    assert_problem(problems_for(report, case, findings, config), "hypotheses[0].cause", "known cause id")
     report = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].update(cause=3))
     assert_problem(problems_for(report, case, findings, config), "hypotheses[0].cause", "text or null")
 
@@ -750,12 +751,12 @@ def test_hypothesis_cause_must_be_a_cause_id(case, findings, config):
 def test_recommended_action_needs_the_summary_to_recommend_it(case_dir, case, findings, config):
     actions = {**SUMMARY["actions"], "A1": {**SUMMARY["actions"]["A1"], "label": "candidate"}}
     store_summary(case_dir, summary_with(actions=actions))
-    assert_problem(problems_for(VALID_REPORT, case, findings, config), "actions[0]", "A1", "recommended", "summary")
+    assert_problem(problems_for(VALID_REPORT, case, findings, config), "actions[0]", "recommended", "summary")
 
 
 def test_recommended_action_missing_from_the_summary_is_a_problem(case_dir, case, findings, config):
     store_summary(case_dir, summary_with(actions={"A2": SUMMARY["actions"]["A2"]}))
-    assert_problem(problems_for(VALID_REPORT, case, findings, config), "actions[0]", "A1", "not in")
+    assert_problem(problems_for(VALID_REPORT, case, findings, config), "actions[0]", "not in")
 
 
 def test_candidate_action_may_be_recommended_by_the_summary_without_a_problem(case_dir, case, findings, config):
@@ -769,7 +770,7 @@ def test_typesafe_must_equal_the_summary_value(case_dir, case, findings, config)
         "C1": {**SUMMARY["causes"]["C1"], "label": "probable"}}))
     report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(label="probable"))
     report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
-    assert_problem(problems_for(report, case, findings, config), "coverage.typesafe", "unavailable: the connection failed")
+    assert_problem(problems_for(report, case, findings, config), "coverage.typesafe", "must equal")
     report["coverage"]["typesafe"] = "unavailable: the connection failed"
     assert problems_for(report, case, findings, config) == []
 
@@ -781,7 +782,7 @@ def test_finding_judged_against_the_claim_cannot_support_a_cause(case_dir, case,
     def support(report):
         report["causes"][1].update(supporting=["compute-2"], contradicting=[])
     problems = problems_for(mutated(VALID_REPORT, support), case, findings, config)
-    assert_problem(problems, "causes[1].supporting", "compute-2", verdict)
+    assert_problem(problems, "causes[1].supporting[0]", verdict)
 
 
 def test_a_contradicted_finding_may_still_be_listed_as_contradicting(case_dir, case, findings, config):
@@ -875,3 +876,216 @@ def test_adhoc_entries_of_an_unjudged_summary_are_still_rendered(case_dir, case)
     assert "No fixed question covers deploy timing" in section(text, "## 7. Coverage notes")
     assert "Gates" not in text and "verified" not in text
     assert "TypeSafe: unavailable: judging was not run" in section(text, "## 7. Coverage notes")
+
+
+# fail closed on a malformed judgments summary
+
+@pytest.mark.parametrize("break_label", [
+    lambda entry: entry.pop("label"),
+    lambda entry: entry.update(label=None),
+    lambda entry: entry.update(label="Confirmed"),
+    lambda entry: entry.update(label=["confirmed"]),
+], ids=["missing", "null", "case", "list"])
+def test_a_cause_entry_with_a_bad_label_counts_as_candidate_and_is_a_problem(case_dir, case, findings, config, break_label):
+    summary = copy.deepcopy(SUMMARY)
+    break_label(summary["causes"]["C1"])
+    store_summary(case_dir, summary)
+    problems = problems_for(VALID_REPORT, case, findings, config)
+    assert_problem(problems, "causes[0]", "missing or invalid label")
+    assert_problem(problems, "causes[0]", "stronger than the judged label candidate")
+
+
+def test_a_recommended_action_whose_summary_label_is_invalid_is_a_problem(case_dir, case, findings, config):
+    summary = copy.deepcopy(SUMMARY)
+    summary["actions"]["A1"]["label"] = "Recommended"
+    store_summary(case_dir, summary)
+    assert_problem(problems_for(VALID_REPORT, case, findings, config), "actions[0]", "missing or invalid label")
+
+
+def test_a_cited_finding_with_an_invalid_verdict_is_a_problem(case_dir, case, findings, config):
+    summary = copy.deepcopy(SUMMARY)
+    summary["findings"]["compute-1"]["verdict"] = "Verified"
+    store_summary(case_dir, summary)
+    assert_problem(problems_for(VALID_REPORT, case, findings, config), "causes[0].supporting[0]", "verdict")
+
+
+# validation never raises
+
+WRONG_TYPES = [["C1"], {"a": 1}, None, 5, True]
+POSITIONS = [
+    lambda r, v: r["causes"][0].update(id=v),
+    lambda r, v: r["causes"][0].update(label=v),
+    lambda r, v: r["summary"].update(top_cause=v),
+    lambda r, v: r["actions"][0].update(cause=v),
+    lambda r, v: r["actions"][0].update(id=v),
+    lambda r, v: r["actions"][0].update(finding_ids=[v]),
+    lambda r, v: r["actions"][0]["target"].update(account_alias=v),
+    lambda r, v: r["causes"][0].update(supporting=[v]),
+    lambda r, v: r["causes"][1].update(contradicting=[v]),
+    lambda r, v: r["hypotheses"][0].update(finding_ids=[v]),
+    lambda r, v: r["hypotheses"][0].update(cause=v),
+    lambda r, v: r["hypotheses"][0].update(id=v),
+    lambda r, v: r["hypotheses"][0].update(result=v),
+    lambda r, v: r.update(status=v),
+    lambda r, v: r["coverage"].update(typesafe=v),
+    lambda r, v: r["coverage"].update(not_checked=[v]),
+]
+
+
+@pytest.mark.parametrize("value", WRONG_TYPES, ids=["list", "dict", "null", "number", "bool"])
+@pytest.mark.parametrize("position", range(len(POSITIONS)))
+def test_a_wrong_type_is_reported_and_never_raises(case, findings, config, position, value):
+    report = copy.deepcopy(VALID_REPORT)
+    POSITIONS[position](report, value)
+    problems = problems_for(report, case, findings, config)
+    assert isinstance(problems, list)
+    assert problems or (position == 10 and value is None)  # a null hypothesis cause is valid
+    assert all(isinstance(problem, str) for problem in problems)
+
+
+@pytest.mark.parametrize("value", WRONG_TYPES, ids=["list", "dict", "null", "number", "bool"])
+def test_wrong_types_with_a_summary_and_unresolved_status_never_raise(case, findings, config, value):
+    for position in range(len(POSITIONS)):
+        report = copy.deepcopy(UNRESOLVED_REPORT)
+        try:
+            POSITIONS[position](report, value)
+        except (KeyError, IndexError):
+            continue
+        assert isinstance(problems_for(report, case, findings, config), list)
+
+
+# problems never repeat a report value
+
+def aws_key():
+    return "".join(["AKIA", "IOSFODNN7", "EXAMPLE"])
+
+
+@pytest.mark.parametrize("position", [
+    lambda r, v: r["summary"].update(top_cause=v),
+    lambda r, v: r["actions"][0].update(cause=v),
+    lambda r, v: r["actions"][0]["target"].update(account_alias=v),
+    lambda r, v: r["causes"][0]["supporting"].append(v),
+    lambda r, v: r["hypotheses"][0].update(cause=v),
+    lambda r, v: r["causes"].append({**copy.deepcopy(r["causes"][1]), "id": "C1", "statement": v}),
+    lambda r, v: r["coverage"].update(typesafe=v),
+    lambda r, v: r["causes"][0].update(id=v),
+    lambda r, v: r["actions"][0].update(finding_ids=[v]),
+    lambda r, v: r.update(map_changes=[{v: v}]),
+    lambda r, v: r.update(unexpected={v: [v]}),
+], ids=["top_cause", "action_cause", "alias", "supporting", "hyp_cause", "duplicate", "typesafe", "cause_id",
+        "action_finding", "map_key", "unknown_key"])
+def test_problems_never_echo_a_value_from_the_report(case, findings, config, position):
+    secret = aws_key()
+    report = copy.deepcopy(VALID_REPORT)
+    position(report, secret)
+    problems = problems_for(report, case, findings, config)
+    assert problems
+    assert not any(secret in problem for problem in problems), problems
+
+
+def test_a_secret_dict_key_is_reported_by_its_parent_not_its_value(case, findings, config):
+    report = mutated(VALID_REPORT, lambda r: r.update(map_changes=[{aws_key(): "x"}]))
+    problems = problems_for(report, case, findings, config)
+    assert_problem(problems, "a key under map_changes[0]", "secret")
+    assert not any(aws_key() in problem for problem in problems)
+
+
+def test_a_very_long_value_is_not_echoed(case, findings, config):
+    report = mutated(VALID_REPORT, lambda r: r["summary"].update(top_cause="X" * 5000))
+    assert all(len(problem) < 300 for problem in problems_for(report, case, findings, config))
+
+
+# ids
+
+@pytest.mark.parametrize("bad", ["C 1", "C1\n## 9. Run details", "", "-C1", "a" * 129, "C1|x", "../C1"])
+@pytest.mark.parametrize("where", [
+    lambda r, v: r["causes"][1].update(id=v),
+    lambda r, v: r["actions"][1].update(id=v),
+    lambda r, v: r["hypotheses"][1].update(id=v),
+    lambda r, v: r["causes"][0]["supporting"].append(v),
+    lambda r, v: r["actions"][0]["finding_ids"].append(v),
+])
+def test_ids_must_match_the_pattern(case, findings, config, bad, where):
+    report = copy.deepcopy(VALID_REPORT)
+    where(report, bad)
+    assert any("not a valid id" in problem for problem in problems_for(report, case, findings, config))
+
+
+@pytest.mark.parametrize("good", ["a", "ecs-prod-main-eu-west-1:ecs-0001", "A_1.2", "0abc"])
+def test_valid_ids_are_accepted(case, findings, config, good):
+    report = mutated(VALID_REPORT, lambda r: r["causes"][1].update(id=good))
+    report["hypotheses"][1]["cause"] = good
+    assert problems_for(report, case, findings, config) == []
+
+
+def test_a_finding_id_with_a_newline_cannot_inject_a_heading(case_dir, case):
+    findings = {"compute-9\n## 9. Run details": {"id": "compute-9\n## 9. Run details", "analyst": "compute",
+                                                  "claim": "c", "fact_ids": [], "provenance": "current",
+                                                  "confidence": "low"}}
+    text = render_report(UNRESOLVED_REPORT, case, findings, [], [], RENDERED_AT)
+    assert_headings(text)
+
+
+def test_ids_are_collapsed_when_rendering_even_without_validation(case_dir, case):
+    def nasty(report):
+        report["causes"][1]["id"] = "C2\n## 9. Run details"
+        report["actions"][1]["id"] = "A2\n## 8. Proposed service map changes"
+        report["summary"]["top_cause"] = "C1\n## 1. Summary"
+    assert_headings(render(mutated(VALID_REPORT, nasty), case_dir, case))
+
+
+# minor rules
+
+def test_an_action_may_not_cite_a_contradicted_finding(case_dir, case, findings, config):
+    judged = {**SUMMARY["findings"], "compute-2": {"relation": "contradicts", "confidence": 0.9, "verdict": "contradicted"}}
+    store_summary(case_dir, summary_with(findings=judged))
+    report = mutated(VALID_REPORT, lambda r: r["actions"][0]["finding_ids"].append("compute-2"))
+    assert_problem(problems_for(report, case, findings, config), "actions[0].finding_ids[1]", "contradicted")
+
+
+def test_an_action_may_cite_an_unsupported_finding(case_dir, case, findings, config):
+    judged = {**SUMMARY["findings"], "compute-2": {"relation": "says_nothing", "confidence": 0.9, "verdict": "unsupported"}}
+    store_summary(case_dir, summary_with(findings=judged))
+    report = mutated(VALID_REPORT, lambda r: r["actions"][0]["finding_ids"].append("compute-2"))
+    assert problems_for(report, case, findings, config) == []
+
+
+def test_cause_found_needs_a_confirmed_hypothesis_of_the_top_cause(case, findings, config):
+    def move(report):
+        report["hypotheses"][0]["cause"] = "C2"
+    assert_problem(problems_for(mutated(VALID_REPORT, move), case, findings, config), "confirmed hypothesis", "top cause")
+
+
+def test_a_confirmed_hypothesis_without_a_cause_counts_for_the_top_cause(case, findings, config):
+    report = mutated(VALID_REPORT, lambda r: r["hypotheses"][0].update(cause=None))
+    assert problems_for(report, case, findings, config) == []
+
+
+def test_duplicate_ids_do_not_hide_later_problems(case, findings, config):
+    def duplicate(report):
+        report["causes"].append({**report["causes"][1], "id": "C1", "label": "confirmed", "supporting": []})
+    problems = problems_for(mutated(VALID_REPORT, duplicate), case, findings, config)
+    assert_problem(problems, "causes[2].id", "duplicate")
+    assert_problem(problems, "causes[2]", "no supporting finding")
+
+
+def test_work_order_rejects_keys_outside_the_contract(case):
+    order = build_work_order(VALID_REPORT, case, RENDERED_AT)
+    cases = [
+        lambda o: o.update(extra=1),
+        lambda o: o["incident"].update(extra=1),
+        lambda o: o["cause"].update(extra=1),
+        lambda o: o["actions"][0].update(extra=1),
+        lambda o: o["actions"][0].update(cause="C1"),
+        lambda o: o["actions"][0]["target"].update(extra=1),
+    ]
+    for break_it in cases:
+        broken = copy.deepcopy(order)
+        break_it(broken)
+        assert_problem(validate_work_order(broken), "not in the work order contract")
+
+
+def test_build_work_order_copies_only_contract_keys_of_an_action(case):
+    report = mutated(VALID_REPORT, lambda r: r["actions"][0].update(notes="x"))
+    order = build_work_order(report, case, RENDERED_AT)
+    assert "notes" not in order["actions"][0] and validate_work_order(order) == []

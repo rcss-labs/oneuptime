@@ -98,5 +98,5 @@ def test_invalid_report_is_not_rendered(skill_dir, case_dir):
     report["causes"][0]["supporting"] = ["ghost-1"]
     write_report(case_dir, report)
     result = run(skill_dir, "render", "--case-dir", str(case_dir), "--now", NOW)
-    assert result.returncode == 1 and "ghost-1" in result.stderr
+    assert result.returncode == 1 and "causes[0].supporting[0]" in result.stderr
     assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
