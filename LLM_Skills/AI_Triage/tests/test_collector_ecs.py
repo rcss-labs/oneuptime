@@ -277,3 +277,32 @@ def test_fake_kubectl_records_calls_and_keys_by_verb(config_data, tmp_path):
     ctx, _, kube = make_context(config_data, tmp_path, {}, kube_answers={"get pods": {"items": [1]}})
     assert ctx.kubectl_json("platform-prod", ["get", "pods"], namespace="web") == {"items": [1]}
     assert len(kube.calls) == 1
+
+
+def test_harmless_named_values_never_reach_the_document(config_data, tmp_path):
+    dsn_secret = "a1b2" * 8
+    hook_secret = "x" * 24
+    env = {
+        "SENTRY_DSN": f"https://{dsn_secret}@o1.ingest.example.com/1",
+        "SLACK_WEBHOOK_URL": f"https://hooks.example.com/services/T0/B0/{hook_secret}",
+        "CONN": "postgres://app:" + "pw" + "5" * 8 + "@db.example.com:5432/orders",
+    }
+    answers = healthy_answers(**{"ecs describe-task-definition": task_definition(1, env=env)})
+    ctx, _, _ = run(config_data, tmp_path, answers)
+    document = ctx.evidence.to_json()
+    for secret in (dsn_secret, hook_secret, "pw" + "5" * 8):
+        assert secret not in document
+    assert "https://o1.ingest.example.com" in document
+    assert "postgres://db.example.com:5432" in document
+
+
+def test_diff_reports_a_changed_host(config_data, tmp_path):
+    current = {"taskDefinition": {"family": "checkout-api", "revision": 42, "containerDefinitions": [
+        container(env={"DB_HOST": "https://b.example.com/x"})]}}
+    previous = {"taskDefinition": {"family": "checkout-api", "revision": 41, "containerDefinitions": [
+        container(env={"DB_HOST": "https://a.example.com/y"})]}}
+    ctx, _, _ = make_context(config_data, tmp_path, healthy_answers(), collector="ecs")
+    ctx.runner = RevisionAws(healthy_answers(), current, previous)
+    COLLECTOR.run(ctx, dict(TARGETS))
+    diff = next(f for f in ctx.evidence.facts if "compared with" in f.summary)
+    assert "DB_HOST changed from https://a.example.com to https://b.example.com" in diff.summary

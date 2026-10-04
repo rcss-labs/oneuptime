@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from triage.collectors import Collector
-from triage.collectors.common import in_window, newest_in_window
+from triage.collectors.common import env_changes, env_summary, in_window, newest_in_window
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
 from triage.metrics import MetricSpec, add_metric_facts
@@ -102,15 +102,15 @@ def _describe_task_definition(ctx: CollectContext, reference: str) -> dict | Non
 
 def _add_task_definition(ctx: CollectContext, resource: str, reference: str, definition: dict) -> None:
     for container in definition.get("containerDefinitions", []):
-        environment = container.get("environment", [])
-        names = ", ".join(entry.get("name", "") for entry in environment) or "none"
+        environment = env_summary(_environment(container).items())
+        names = ", ".join(environment) or "none"
         ctx.evidence.add(
             kind=CURRENT, resource=resource, command=ctx.last_command,
             summary=(
                 f"Task definition {reference} container {container.get('name')}: image {container.get('image')}, "
                 f"cpu {container.get('cpu')}, memory {container.get('memory')}, environment variables {names}"
             ),
-            data={"environment": environment},
+            data={"container": container.get("name"), "environment": environment},
         )
 
 
@@ -128,13 +128,9 @@ def _container_changes(name: str, old: dict, new: dict) -> list[str]:
         if old.get(field) != new.get(field):
             changes.append(f"container {name} {field} {old.get(field)} -> {new.get(field)}")
     old_env, new_env = _environment(old), _environment(new)
-    for label, names in (
-        ("added", sorted(new_env.keys() - old_env.keys())),
-        ("removed", sorted(old_env.keys() - new_env.keys())),
-        ("value changed", sorted(k for k in old_env.keys() & new_env.keys() if old_env[k] != new_env[k])),
-    ):
-        if names:
-            changes.append(f"container {name} environment variables {label}: {', '.join(names)}")
+    raw_changed = {key for key in old_env.keys() & new_env.keys() if old_env[key] != new_env[key]}
+    for sentence in env_changes(env_summary(old_env.items()), env_summary(new_env.items()), raw_changed):
+        changes.append(f"container {name}: {sentence}")
     return changes
 
 
