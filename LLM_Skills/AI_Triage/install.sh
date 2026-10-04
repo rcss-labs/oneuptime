@@ -111,8 +111,15 @@ backup_config() {
   [[ -d "${dest_dir}/config" ]] || return 0
   local backup_dir
   backup_dir="${backup_root}/$(date +%Y%m%d-%H%M%S)-$$"
+  # Resolve the folder itself, then copy with cp -R so links inside it stay links.
+  local physical_config
+  physical_config="$(cd "${dest_dir}/config" && pwd -P)" ||
+    fail "${EXIT_FAILURE}" "could not back up your config folder: ${dest_dir}/config"
   run mkdir -p "${backup_dir}"
-  run cp -RL "${dest_dir}/config" "${backup_dir}/config"
+  if ! run cp -R "${physical_config}" "${backup_dir}/config"; then
+    rm -rf "${backup_dir:?}"
+    fail "${EXIT_FAILURE}" "could not back up your config folder: ${dest_dir}/config"
+  fi
   announce "back up your config to ${backup_dir}" "Backed up your config to ${backup_dir}"
 }
 

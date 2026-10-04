@@ -253,3 +253,38 @@ def test_a_linked_config_folder_is_backed_up_as_files(sandbox, tmp_path):
     assert saved.is_dir() and not saved.is_symlink()
     assert (saved / "triage-config.yaml").read_text() == "mine: true\n"
     assert not (saved / "triage-config.yaml").is_symlink()
+
+
+def test_links_inside_the_config_folder_are_backed_up_as_links(sandbox, tmp_path):
+    assert install(sandbox).returncode == 0
+    config = dest(sandbox) / "config"
+    big = tmp_path / "big-folder"
+    big.mkdir()
+    (big / "huge.bin").write_text("x")
+    (config / "kubeconfig").symlink_to("/nonexistent/kubeconfig-gone")
+    (config / "loop").symlink_to("..")
+    (config / "certs").symlink_to(big)
+
+    result = install(sandbox)
+
+    assert result.returncode == 0, result.stderr
+    (backup,) = (sandbox[0] / ".ai-triage" / "backups").iterdir()
+    for name in ("kubeconfig", "loop", "certs"):
+        assert (backup / "config" / name).is_symlink()
+    assert (backup / "config" / "certs").readlink() == big
+
+
+def test_failed_config_backup_stops_before_anything_is_replaced(sandbox):
+    assert install(sandbox).returncode == 0
+    target = dest(sandbox)
+    (target / "scripts" / "stale.py").write_text("# old\n")
+    secret = target / "config" / "triage-config.yaml"
+    secret.chmod(0o000)
+    try:
+        result = install(sandbox)
+    finally:
+        secret.chmod(0o644)
+
+    assert result.returncode == 1
+    assert f"could not back up your config folder: {target / 'config'}" in result.stderr
+    assert (target / "scripts" / "stale.py").exists()
