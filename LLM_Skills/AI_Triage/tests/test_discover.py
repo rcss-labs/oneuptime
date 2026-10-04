@@ -211,7 +211,7 @@ def test_nothing_found(config):
     assert found.account is None and found.region is None
     assert found.notes
     with pytest.raises(ValueError):
-        found.proposed_entry("shop")
+        found.proposed_entry()
 
 
 def test_denied_call_adds_a_note_and_the_walk_continues(config):
@@ -239,7 +239,7 @@ def test_expired_sign_in_raises(config):
 
 def test_environment_values_never_appear_in_the_output(config):
     found = discover_hostname(HOSTNAME, config, runner=FakeAws(full_walk()))
-    text = json.dumps(found.to_dict()) + json.dumps(found.proposed_entry("shop"))
+    text = json.dumps(found.to_dict()) + json.dumps(found.proposed_entry())
     assert PASSWORD not in text
     assert "t" + "k" * 12 not in text
     assert "postgres://" not in text
@@ -259,7 +259,7 @@ def test_proposed_entry_is_accepted_by_parse_map(config, config_data):
     answers["ecs describe-task-definition"] = task_definition([
         {"name": "DATABASE_URL", "value": f"postgres://app:{PASSWORD}@{DB_HOST}:5432/app"}])
     found = discover_hostname(HOSTNAME, config, runner=FakeAws(answers))
-    entry = found.proposed_entry("shop", monitors=["Shop API"], today=date(2026, 10, 4))
+    entry = found.proposed_entry(monitors=["Shop API"], today=date(2026, 10, 4))
     assert entry == {
         "match": {"hostnames": [HOSTNAME], "monitors": ["Shop API"]},
         "environments": {"discovered": {"account": "prod-main", "region": "eu-west-1",
@@ -273,12 +273,12 @@ def test_proposed_entry_is_accepted_by_parse_map(config, config_data):
 
 def test_proposed_entry_defaults_to_todays_utc_date(config):
     found = discover_hostname(HOSTNAME, config, runner=FakeAws({**dns_answers(), **lb_answers()}))
-    assert date.fromisoformat(found.proposed_entry("shop")["last_verified"])
+    assert date.fromisoformat(found.proposed_entry()["last_verified"])
 
 
 def test_proposed_entry_without_account_raises():
     with pytest.raises(ValueError):
-        Discovery(HOSTNAME, [], None, None, {}, []).proposed_entry("shop")
+        Discovery(HOSTNAME, [], None, None, {}, []).proposed_entry()
 
 
 def test_to_dict_shape(config):
@@ -308,3 +308,86 @@ def test_list_calls_are_bounded(config):
                                ("rds", "describe-db-instances")):
         for argv in fake.called(service, operation):
             assert "--max-items" in argv
+
+
+def cluster_arns(count):
+    return [f"arn:aws:ecs:eu-west-1:111111111111:cluster/c{i:02d}" for i in range(count)]
+
+
+def test_cluster_cap_is_recorded(config):
+    answers = {**dns_answers(), **lb_answers(), "ecs list-clusters": {"clusterArns": cluster_arns(12)},
+               "ecs list-services": {"serviceArns": []}}
+    fake = FakeAws(answers)
+    found = discover_hostname(HOSTNAME, config, runner=fake)
+    assert "Searched the first 10 of 12 ECS clusters" in found.notes
+    assert len(fake.called("ecs", "list-services")) == 10
+
+
+def test_target_group_cap_is_recorded(config):
+    groups = [{"TargetGroupArn": f"{TG_ARN}{i}"} for i in range(12)]
+    answers = {**dns_answers(), **lb_answers(), "elbv2 describe-target-groups": {"TargetGroups": groups},
+               "ecs list-clusters": {"clusterArns": []}}
+    found = discover_hostname(HOSTNAME, config, runner=FakeAws(answers))
+    assert "Searched the first 10 of 12 target groups" in found.notes
+
+
+def test_truncated_list_calls_are_recorded(config):
+    answers = full_walk(**{
+        "ecs list-clusters": {"clusterArns": [CLUSTER_ARN], "NextToken": "t"},
+        "ecs list-services": {"serviceArns": [SERVICE_ARN], "NextToken": "t"},
+        "rds describe-db-instances": {"DBInstances": [], "NextToken": "t"},
+    })
+    notes = "\n".join(discover_hostname(HOSTNAME, config, runner=FakeAws(answers)).notes)
+    for expected in ("ECS clusters", "ECS services in cluster shop", "database instances"):
+        assert expected in notes
+
+
+def test_missing_load_balancer_error_means_not_found_here(config):
+    answers = {**full_walk(), "eu-west-1 elbv2 describe-load-balancers": (254, "An error occurred (LoadBalancerNotFound) when calling the DescribeLoadBalancers operation: gone")}
+    answers["us-east-1 elbv2 describe-load-balancers"] = lb_answers()["elbv2 describe-load-balancers"]
+    found = discover_hostname(HOSTNAME, config, runner=RegionalAws(answers), accounts=["prod-main"])
+    assert found.region == "us-east-1"
+    assert any("LoadBalancerNotFound" in note for note in found.notes)
+
+
+def cname_chain_runner(chain):
+    """Answers record lookups from {name: record} and everything else from the full walk."""
+    base = RegionalAws({**full_walk(), "route53 list-hosted-zones": {"HostedZones": [
+        {"Id": "/hostedzone/ZEXAMPLE", "Name": "example.com."}]}})
+    lookups = []
+
+    def runner(argv, timeout):
+        if argv[1:3] == ["route53", "list-resource-record-sets"]:
+            name = argv[argv.index("--start-record-name") + 1]
+            lookups.append(name)
+            return 0, json.dumps({"ResourceRecordSets": [chain[name]] if name in chain else []}), ""
+        return base(argv, timeout)
+
+    runner.lookups = lookups
+    return runner
+
+
+def cname(name, target):
+    return {"Name": name + ".", "Type": "CNAME", "ResourceRecords": [{"Value": target}]}
+
+
+def test_dns_follows_up_to_three_cname_hops(config):
+    runner = cname_chain_runner({
+        HOSTNAME: cname(HOSTNAME, "a.example.com"),
+        "a.example.com": cname("a.example.com", "b.example.com."),
+        "b.example.com": {"Name": "b.example.com.", "Type": "A", "AliasTarget": {"DNSName": ALB_DNS}},
+    })
+    found = discover_hostname(HOSTNAME, config, runner=runner)
+    assert runner.lookups == [HOSTNAME, "a.example.com", "b.example.com"]
+    assert found.resources["load_balancer"] == "shop-alb"
+    assert sum("list-resource-record-sets" in step.command for step in found.steps) == 3
+
+
+def test_dns_stops_after_three_follow_ups(config):
+    chain = {HOSTNAME: cname(HOSTNAME, "h1.example.com")}
+    for number in range(1, 8):
+        chain[f"h{number}.example.com"] = cname(f"h{number}.example.com", f"h{number + 1}.example.com")
+    runner = cname_chain_runner(chain)
+    found = discover_hostname(HOSTNAME, config, runner=runner)
+    assert runner.lookups == [HOSTNAME, "h1.example.com", "h2.example.com", "h3.example.com"]
+    assert any("3 hops" in note for note in found.notes)

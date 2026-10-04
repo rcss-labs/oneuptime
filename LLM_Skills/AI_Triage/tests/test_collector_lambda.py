@@ -145,7 +145,7 @@ def test_values_under_innocent_names_never_reach_the_document(config_data, tmp_p
         "SIGNING_SALT": "q9Zr7Lm2" + "Xc4Vb8Nt",
         "STRIPE_KEY": "rk_prod_" + "a1b2c3d4e5f6",
         "UPSTREAM_HEADER": "Basic " + "dXNlcjpwYXNz",
-        "HMAC": "f00dface" + "cafe1234",
+        "HMAC": "F00dFace" + "Cafe1234",
     }
     variables = {**values, "LOG_LEVEL": "info", "QUEUE_URL": "https://sqs.example.com/orders?x=" + "z" * 12}
     ctx, _, _ = run(config_data, tmp_path, answers(**{

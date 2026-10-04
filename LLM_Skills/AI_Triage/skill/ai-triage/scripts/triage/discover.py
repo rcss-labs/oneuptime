@@ -14,6 +14,7 @@ from triage.context import SignInExpired
 from triage.redact import Redactor
 
 MAX_TARGET_GROUPS = 10
+MAX_DNS_FOLLOWS = 3
 MAX_CLUSTERS = 10
 SERVICE_BATCH = 10
 HOSTNAME_RE = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:\d{1,5})?")
@@ -46,10 +47,10 @@ class Discovery:
             "notes": self.notes,
         }
 
-    def proposed_entry(self, service_name: str, monitors: Sequence[str] = (), today: date | None = None) -> dict[str, Any]:
-        """A service map entry for this discovery. The caller keys it by `service_name`."""
+    def proposed_entry(self, monitors: Sequence[str] = (), today: date | None = None) -> dict[str, Any]:
+        """A service map entry for this discovery. The caller keys it by a service name."""
         if not self.account or not self.region:
-            raise ValueError(f"no account and region were found for {service_name}; nothing to propose")
+            raise ValueError(f"no account and region were found for {self.hostname}; nothing to propose")
         return {
             "match": {"hostnames": [self.hostname], "monitors": list(monitors)},
             "environments": {
@@ -95,6 +96,15 @@ class _Walk:
         self.discovery.notes.append(f"{command}: {result.error_code}")
         return None, command
 
+    def note_if_more(self, data: Any, what: str, limit: int) -> None:
+        """A list call that hit its --max-items cap returns a NextToken; say so."""
+        if isinstance(data, dict) and data.get("NextToken"):
+            self.discovery.notes.append(f"Searched only the first {limit} {what}; more exist")
+
+    def note_cut(self, what: str, kept: int, total: int) -> None:
+        if total > kept:
+            self.discovery.notes.append(f"Searched the first {kept} of {total} {what}")
+
     def step(self, account: Account, region: str, command: str, found: str) -> None:
         self.discovery.steps.append(Step(account.alias, region, command, found))
 
@@ -104,17 +114,15 @@ class _Walk:
         for account in accounts:
             region = account.regions[0]
             zones, command = self.call(account, region, "route53", "list-hosted-zones", ["--max-items", "100"])
-            zone = _best_zone(hostname, (zones or {}).get("HostedZones", []))
+            self.note_if_more(zones, "hosted zones", 100)
+            zone_list = (zones or {}).get("HostedZones", [])
+            zone = _best_zone(hostname, zone_list)
             if zone is None:
                 continue
             zone_seen = True
-            zone_id = zone["Id"].rsplit("/", 1)[-1]
-            self.step(account, region, command, f"hosted zone {zone['Name'].rstrip('.')} ({zone_id})")
-            records, command = self.call(account, region, "route53", "list-resource-record-sets", [
-                "--hosted-zone-id", zone_id, "--start-record-name", hostname, "--max-items", "5"])
-            target = _record_target(hostname, (records or {}).get("ResourceRecordSets", []))
+            self.step(account, region, command, f"hosted zone {zone['Name'].rstrip('.')} ({zone['Id'].rsplit('/', 1)[-1]})")
+            target = self._follow_records(account, region, zone_list, hostname)
             if target:
-                self.step(account, region, command, f"{hostname} points at {target}")
                 return target
         if zone_seen:
             self.discovery.notes.append(f"no alias or CNAME record for {hostname} was found; using the hostname itself")
@@ -122,11 +130,37 @@ class _Walk:
             self.discovery.notes.append(f"no hosted zone matches {hostname}; using the hostname itself")
         return hostname
 
+    def _follow_records(self, account: Account, region: str, zone_list: list[dict], hostname: str) -> str | None:
+        """Look up the record, then follow CNAMEs that land in a zone of the same account."""
+        name, target = hostname, None
+        for follow in range(MAX_DNS_FOLLOWS + 1):
+            zone = _best_zone(name, zone_list)
+            if zone is None:
+                break
+            zone_id = zone["Id"].rsplit("/", 1)[-1]
+            records, command = self.call(account, region, "route53", "list-resource-record-sets", [
+                "--hosted-zone-id", zone_id, "--start-record-name", name, "--max-items", "5"])
+            found = _record_target(name, (records or {}).get("ResourceRecordSets", []))
+            if found is None:
+                break
+            next_name, is_cname = found
+            self.step(account, region, command, f"{name} points at {next_name}")
+            target = next_name
+            if not is_cname:
+                break
+            if follow == MAX_DNS_FOLLOWS:
+                self.discovery.notes.append(
+                    f"Stopped following DNS records after {MAX_DNS_FOLLOWS} hops; {next_name} was not looked up")
+                break
+            name = next_name
+        return target
+
     def find_load_balancer(self, accounts: list[Account], dns_name: str) -> tuple[Account, str, dict] | None:
         wanted = normalise_dns(dns_name)
         for account in accounts:
             for region in account.regions:
                 data, command = self.call(account, region, "elbv2", "describe-load-balancers", ["--max-items", "100"])
+                self.note_if_more(data, "load balancers", 100)
                 for balancer in (data or {}).get("LoadBalancers", []):
                     if normalise_dns(balancer.get("DNSName", "")) == wanted:
                         name = balancer["LoadBalancerName"]
@@ -137,16 +171,22 @@ class _Walk:
     def target_groups(self, account: Account, region: str, balancer: dict) -> set[str]:
         data, command = self.call(account, region, "elbv2", "describe-target-groups",
                                   ["--load-balancer-arn", balancer["LoadBalancerArn"]])
-        arns = [group["TargetGroupArn"] for group in (data or {}).get("TargetGroups", [])][:MAX_TARGET_GROUPS]
+        all_arns = [group["TargetGroupArn"] for group in (data or {}).get("TargetGroups", [])]
+        self.note_cut("target groups", MAX_TARGET_GROUPS, len(all_arns))
+        arns = all_arns[:MAX_TARGET_GROUPS]
         if arns:
             self.step(account, region, command, f"{len(arns)} target group(s)")
         return set(arns)
 
     def find_ecs_service(self, account: Account, region: str, groups: set[str]) -> dict | None:
         clusters, command = self.call(account, region, "ecs", "list-clusters", ["--max-items", "50"])
-        for cluster_arn in (clusters or {}).get("clusterArns", [])[:MAX_CLUSTERS]:
+        self.note_if_more(clusters, "ECS clusters", 50)
+        cluster_arns = (clusters or {}).get("clusterArns", [])
+        self.note_cut("ECS clusters", MAX_CLUSTERS, len(cluster_arns))
+        for cluster_arn in cluster_arns[:MAX_CLUSTERS]:
             cluster = cluster_arn.rsplit("/", 1)[-1]
             listing, _ = self.call(account, region, "ecs", "list-services", ["--cluster", cluster, "--max-items", "100"])
+            self.note_if_more(listing, f"ECS services in cluster {cluster}", 100)
             arns = (listing or {}).get("serviceArns", [])
             for start in range(0, len(arns), SERVICE_BATCH):
                 described, command = self.call(account, region, "ecs", "describe-services", [
@@ -160,6 +200,7 @@ class _Walk:
 
     def find_auto_scaling_group(self, account: Account, region: str, groups: set[str]) -> str | None:
         data, command = self.call(account, region, "autoscaling", "describe-auto-scaling-groups", ["--max-items", "50"])
+        self.note_if_more(data, "Auto Scaling groups", 50)
         for group in (data or {}).get("AutoScalingGroups", []):
             if groups & set(group.get("TargetGroupARNs", [])):
                 self.step(account, region, command, f"Auto Scaling group {group['AutoScalingGroupName']}")
@@ -188,11 +229,12 @@ class _Walk:
         self._match_elasticache(account, region, hosts)
 
     def _match_rds(self, account: Account, region: str, hosts: set[str]) -> None:
-        for operation, key, id_key, endpoint_keys in (
-            ("describe-db-instances", "DBInstances", "DBInstanceIdentifier", ("Endpoint",)),
-            ("describe-db-clusters", "DBClusters", "DBClusterIdentifier", ("Endpoint", "ReaderEndpoint")),
+        for operation, key, id_key, what in (
+            ("describe-db-instances", "DBInstances", "DBInstanceIdentifier", "database instances"),
+            ("describe-db-clusters", "DBClusters", "DBClusterIdentifier", "database clusters"),
         ):
             data, command = self.call(account, region, "rds", operation, ["--max-items", "100"])
+            self.note_if_more(data, what, 100)
             for item in (data or {}).get(key, []):
                 addresses = [item.get("Endpoint", {}).get("Address")] if operation == "describe-db-instances" else [
                     item.get("Endpoint"), item.get("ReaderEndpoint")]
@@ -203,6 +245,7 @@ class _Walk:
 
     def _match_elasticache(self, account: Account, region: str, hosts: set[str]) -> None:
         data, command = self.call(account, region, "elasticache", "describe-replication-groups", ["--max-items", "100"])
+        self.note_if_more(data, "cache replication groups", 100)
         for group in (data or {}).get("ReplicationGroups", []):
             endpoints = [group.get("ConfigurationEndpoint") or {}]
             endpoints += [node.get("PrimaryEndpoint") or {} for node in group.get("NodeGroups", [])]
@@ -218,15 +261,16 @@ def _best_zone(hostname: str, zones: list[dict]) -> dict | None:
     return max(matching, key=lambda z: len(z["Name"]), default=None)
 
 
-def _record_target(hostname: str, records: list[dict]) -> str | None:
+def _record_target(hostname: str, records: list[dict]) -> tuple[str, bool] | None:
+    """The next DNS name for the record called `hostname`, and whether it came from a CNAME."""
     for record in records:
         if record.get("Name", "").rstrip(".").lower() != hostname:
             continue
         alias = (record.get("AliasTarget") or {}).get("DNSName")
         if alias:
-            return alias.rstrip(".")
+            return alias.rstrip("."), False
         if record.get("Type") == "CNAME" and record.get("ResourceRecords"):
-            return record["ResourceRecords"][0]["Value"].rstrip(".")
+            return record["ResourceRecords"][0]["Value"].rstrip(".").lower(), True
     return None
 
 
