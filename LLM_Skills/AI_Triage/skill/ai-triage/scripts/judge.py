@@ -2,7 +2,8 @@
 """Check Claude's conclusions with TypeSafe: judge the report draft, locate a service, or ask one ad hoc question.
 
 Exit codes: 0 done (also when TypeSafe is unavailable; the summary records it),
-1 the report draft, the case input, or a question file is unusable, 2 usage, config, or case error.
+1 the report draft, the case input, or a question file is unusable, 2 usage, config, or case error, or a report draft that breaks a rule
+(duplicate ids, a reserved id, supporting or contradicting that is not a list).
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from pathlib import Path
 from triage.case import CaseError, load_case
 from triage.config import ConfigError, default_config_path, load_config
 from triage.judge import (
+    DraftRuleError,
     JudgeSession,
     JudgmentError,
     JudgmentStore,
@@ -109,6 +111,8 @@ def main(argv: list[str] | None = None, judge: Judge | None = None) -> int:
         return _fail("\n".join(error.errors), 2)
     except WindowError as error:
         return _fail(str(error), 2)
+    except DraftRuleError as error:
+        return _fail("\n".join(error.errors), 2)
     except (JudgmentError, QuestionError) as error:
         return _fail("\n".join(error.errors), 1)
 

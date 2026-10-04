@@ -39,6 +39,10 @@ class JudgmentError(Exception):
         super().__init__("; ".join(self.errors))
 
 
+class DraftRuleError(JudgmentError):
+    """The report draft breaks a rule that must hold before anything is sent. The command exits 2."""
+
+
 # --- what is sent -----------------------------------------------------------------------
 
 def _replace_accounts(value: Any, aliases: dict[str, str]) -> Any:
@@ -256,7 +260,7 @@ def incident_state(case_dir: Path) -> dict:
 
 # --- the report draft and the summary ---------------------------------------------------
 
-def load_report_draft(case_dir: Path) -> dict:
+def load_report_draft(case_dir: Path, reserved_ids: frozenset[str] = frozenset()) -> dict:
     path = Path(case_dir) / "report.json"
     try:
         report = json.loads(path.read_text())
@@ -285,7 +289,28 @@ def load_report_draft(case_dir: Path) -> dict:
         errors.append("report.json: every action needs an id")
     if errors:
         raise JudgmentError(errors)
+    rule_errors = _draft_rule_errors(report, reserved_ids)
+    if rule_errors:
+        raise DraftRuleError(rule_errors)
     return report
+
+
+def _draft_rule_errors(report: dict, reserved_ids: frozenset[str]) -> list[str]:
+    errors = []
+    for kind, entries in (("cause", report["causes"]), ("action", report.get("actions", []))):
+        seen: set[str] = set()
+        for entry in entries:
+            if entry["id"] in seen:
+                errors.append(f"report.json: duplicate {kind} id {entry['id']}")
+            seen.add(entry["id"])
+    for cause in report["causes"]:
+        if cause["id"] in reserved_ids:
+            errors.append(f"report.json: the cause id {cause['id']} is reserved for a question option; rename the cause")
+        for name in ("supporting", "contradicting"):
+            listed = cause.get(name, [])
+            if not isinstance(listed, list) or not all(isinstance(item, str) for item in listed):
+                errors.append(f"report.json: {name} of cause {cause['id']} must be a list of finding ids")
+    return errors
 
 
 def _finding_order(causes: list[dict]) -> list[str]:
@@ -428,11 +453,16 @@ def write_summary(case_dir: Path, summary: dict) -> Path:
     return path
 
 
+def _reserved_ids(questions: dict[str, dict]) -> frozenset[str]:
+    """Option names the code adds itself, which no cause id may use."""
+    return frozenset(name for question_id in ("cause_rank", "resource_match") for name in questions[question_id].get("fallback", {}))
+
+
 def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions: dict[str, dict], rng: random.Random) -> dict:
     """Ask every fixed question about the report draft, store the exchanges, and write judgments/summary.json."""
     case_dir = Path(case_dir)
     case = load_case(case_dir)
-    report = load_report_draft(case_dir)
+    report = load_report_draft(case_dir, _reserved_ids(questions))
     adhoc = _minimal_adhoc_entries(case_dir)
     findings = valid_findings(case_dir)
     session = JudgeSession(judge, JudgmentStore(case_dir), config, Redactor())

@@ -10,6 +10,7 @@ from triage.config import parse_config
 from triage.evidence import CURRENT, INCIDENT_TIME, Evidence
 from triage.findings import check_findings
 from triage.judge import (
+    DraftRuleError,
     JudgeSession,
     JudgmentStore,
     judge_actions,
@@ -382,6 +383,38 @@ def test_every_request_and_reply_is_stored_in_order(tmp_path, config):
     stored = json.loads((case_dir / "judgments" / "004-cause.json").read_text())
     assert stored["subject"] == "C1" and set(stored["answers"]) == {"symptom_fit", "scope_fit"}
     assert stored["model"] == "jev-test" and stored["request_id"] == "req-004" and stored["usage"]["output_tokens"] == 2
+
+
+# the draft is checked before any paid call
+
+def edit_report(case_dir, change):
+    report = json.loads((case_dir / "report.json").read_text())
+    change(report)
+    (case_dir / "report.json").write_text(json.dumps(report))
+
+
+@pytest.mark.parametrize("change, fragment", [
+    (lambda r: r["causes"].append(dict(r["causes"][0])), "duplicate cause id C1"),
+    (lambda r: r["actions"].append(dict(r["actions"][0])), "duplicate action id A1"),
+    (lambda r: r["causes"][0].update(id="insufficient_evidence"), "insufficient_evidence"),
+    (lambda r: r["causes"][0].update(supporting=None), "supporting"),
+    (lambda r: r["causes"][0].update(contradicting="compute-3"), "contradicting"),
+    (lambda r: r["causes"][0].update(supporting=[3]), "supporting"),
+])
+def test_a_draft_that_breaks_a_rule_is_refused_before_any_call(tmp_path, config, change, fragment):
+    case_dir = build_case(tmp_path, config)
+    edit_report(case_dir, change)
+    judge = FakeJudge(make_responder())
+    with pytest.raises(DraftRuleError) as raised:
+        run(case_dir, config, judge)
+    assert fragment in str(raised.value) and judge.calls == []
+
+
+def test_the_resource_match_fallback_name_is_also_reserved(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    edit_report(case_dir, lambda r: r["causes"][0].update(id="none_match"))
+    with pytest.raises(DraftRuleError):
+        run(case_dir, config, FakeJudge(make_responder()))
 
 
 # digests

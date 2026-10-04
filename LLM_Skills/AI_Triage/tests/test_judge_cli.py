@@ -243,3 +243,12 @@ def test_adhoc_question_text_and_options_are_redacted_before_sending(command, sk
     stored = (case_dir / "judgments" / "001-adhoc.json").read_text()
     for text in (json.dumps(judge.calls), stored):
         assert account_id not in text and secret not in text
+
+
+def test_run_with_a_draft_that_breaks_a_rule_exits_2_and_asks_nothing(command, skill_dir, case_dir, capsys):
+    report = json.loads((case_dir / "report.json").read_text())
+    report["causes"].append(dict(report["causes"][0]))
+    (case_dir / "report.json").write_text(json.dumps(report))
+    judge = FakeJudge(make_responder())
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 2
+    assert "duplicate cause id C1" in capsys.readouterr().err and judge.calls == []
