@@ -201,7 +201,8 @@ class _Scanner:
                 raise Unparseable("contains an unquoted < (input redirect or zsh numeric glob)")
             elif char in "&|>":
                 index = self.scan_operator(index)
-            elif char == "=" and not self.in_word:
+            elif char == "=" and not self.chars:
+                # zsh ignores empty quotes here, so ''=ls is expanded just like =ls
                 raise Unparseable("a word starting with = is expanded by zsh")
             elif char in WORD_CHARS:
                 self.chars.append(char)
@@ -225,17 +226,19 @@ def split_command(command: str) -> list[Segment]:
 
     segments: list[Segment] = []
     words: list[_Word] = []
-    writes_file = False
+    writes_file = has_redirect = False
     preceded_by = ""
 
     def flush(next_separator: str) -> None:
-        nonlocal words, writes_file, preceded_by
+        nonlocal words, writes_file, has_redirect, preceded_by
+        if (next_separator or preceded_by) and not (words or has_redirect):
+            raise Unparseable(f"nothing on one side of {next_separator or preceded_by}")
         env: list[str] = []
         while words and _is_assignment(words[0]):
             env.append(words.pop(0).text)
         if words or env or writes_file:
             segments.append(Segment(tuple(w.text for w in words), tuple(env), writes_file, preceded_by))
-        words, writes_file, preceded_by = [], False, next_separator
+        words, writes_file, has_redirect, preceded_by = [], False, False, next_separator
 
     index = 0
     while index < len(tokens):
@@ -250,6 +253,7 @@ def split_command(command: str) -> list[Segment]:
             if index + 1 >= len(tokens) or not isinstance(tokens[index + 1], _Word):
                 raise Unparseable("redirect without a target")
             target = tokens[index + 1].text
+            has_redirect = True
             if token == ">&":
                 if target not in ("1", "2"):
                     raise Unparseable("only >&1 and >&2 are accepted")

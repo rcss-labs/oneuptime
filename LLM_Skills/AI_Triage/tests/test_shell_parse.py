@@ -412,3 +412,27 @@ def test_an_unquoted_braced_home_is_unparseable_but_a_double_quoted_one_is_fine(
 def test_an_unquoted_tilde_is_unparseable(command, home):
     with pytest.raises(Unparseable):
         split_command(command)
+
+
+# ---- fix round 4: mismatches found by the zsh differential test ---------------
+
+
+@pytest.mark.parametrize("command", ["aws ''=ls", 'aws ""=ls', "aws ''\"\"=word", "''=ls a"])
+def test_an_equals_after_only_empty_quotes_is_unparseable(command):
+    # zsh drops the empty quotes and then expands =ls to the path of ls
+    with pytest.raises(Unparseable):
+        split_command(command)
+
+
+def test_an_equals_after_quoted_text_or_escaped_stays_literal():
+    assert split_command("aws 'a'=ls \\=ls x=ls")[0].argv == ("aws", "a=ls", "=ls", "x=ls")
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["aws a |", "| aws a", "aws a &&", "&& aws a", "aws | | kubectl", "aws && && kubectl", "aws | && kubectl",
+     "aws a | \t", "aws a |\\\n", "aws a|"],
+)
+def test_a_separator_needs_a_command_on_both_sides(command):
+    with pytest.raises(Unparseable):
+        split_command(command)
