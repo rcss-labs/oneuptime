@@ -236,3 +236,35 @@ def test_parse_time_rejects_non_ascii_digits_and_bad_offset_minutes(text):
 
 def test_parse_time_accepts_offset_minutes_up_to_59():
     assert parse_time("2026-10-04T10:00:00+0059") == at(9, 1)
+
+
+@pytest.mark.parametrize("text", ["0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00", "0001-01-01T00:00:00+0100"])
+def test_parse_time_at_the_calendar_edge_is_a_window_error(text):
+    with pytest.raises(WindowError, match="cannot parse time"):
+        parse_time(text)
+
+
+def test_calendar_edge_times_that_fit_in_utc_still_parse():
+    assert parse_time("0001-01-01T00:00:00Z").year == 1
+    assert parse_time("9999-12-31T23:59:59Z").year == 9999
+    assert parse_time("0001-01-01T01:00:00+01:00") == datetime(1, 1, 1, tzinfo=UTC)
+
+
+def test_format_time_and_window_around_do_not_leak_overflow():
+    with pytest.raises(WindowError):
+        window_around("0001-01-01T00:00:00Z", None, now=at(12), max_hours=6)
+    with pytest.raises(WindowError):
+        format_time(datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1))))
+
+
+@pytest.mark.parametrize("text", ["2026-10-04T10:00:00+0000", "2026-10-04T10:00:00+00:00", "2026-10-04T10:00:00Z"])
+def test_offset_forms_parse_without_fromisoformat(text, monkeypatch):
+    import triage.window as window_module
+
+    class NoIso(datetime):
+        @classmethod
+        def fromisoformat(cls, value):
+            raise AssertionError("must not call fromisoformat")
+
+    monkeypatch.setattr(window_module, "datetime", NoIso)
+    assert parse_time(text) == at(10)

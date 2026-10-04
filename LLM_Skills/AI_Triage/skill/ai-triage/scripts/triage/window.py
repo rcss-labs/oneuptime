@@ -59,9 +59,9 @@ def parse_time(text: str) -> datetime:
     microsecond = int((match.group("fraction") or "").ljust(6, "0")[:6] or 0)
     try:
         moment = datetime(year, month, day, hour, minute, second, microsecond, tzinfo=_zone(match.group("zone")))
-    except ValueError as error:
+        return moment.astimezone(timezone.utc)
+    except (ValueError, OverflowError, OSError) as error:  # includes times that do not fit in UTC
         raise WindowError(f"cannot parse time: {text}") from error
-    return moment.astimezone(timezone.utc)
 
 
 def _zone(zone: str) -> timezone:
@@ -83,7 +83,10 @@ def _require_aware(moment: datetime, label: str) -> None:
 
 def format_time(moment: datetime) -> str:
     _require_aware(moment, "time")
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, OverflowError, OSError) as error:
+        raise WindowError(f"cannot format time: {moment!r}") from error
 
 
 def _check_max_hours(max_hours: int) -> None:
@@ -117,17 +120,26 @@ def window_around(
     _check_max_hours(max_hours)
     _require_aware(now, "now")
     incident_begin = parse_time(incident_start)
-    start = incident_begin - timedelta(minutes=lead_minutes)
+    try:
+        start = incident_begin - timedelta(minutes=lead_minutes)
+    except OverflowError as error:
+        raise WindowError(f"incident start is too close to the calendar edge: {incident_start}") from error
     if incident_end is None:
         end = now
     else:
         incident_finish = parse_time(incident_end)
         if incident_finish < incident_begin:
             raise WindowError("incident end is before its start")
-        end = min(incident_finish + timedelta(minutes=tail_minutes), now)
+        try:
+            end = min(incident_finish + timedelta(minutes=tail_minutes), now)
+        except OverflowError:
+            end = now  # an end at the calendar edge: the window simply ends now
     if end <= start:
         raise WindowError("window end must be after its start")
-    end = min(end, start + timedelta(hours=max_hours))
+    try:
+        end = min(end, start + timedelta(hours=max_hours))
+    except OverflowError:
+        pass  # start is so late that the cap cannot be added: keep the end as it is
     return Window(start, end)
 
 
