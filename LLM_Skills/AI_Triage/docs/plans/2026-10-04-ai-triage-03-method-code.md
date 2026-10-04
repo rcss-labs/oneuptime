@@ -129,7 +129,8 @@ Required: `number`, `title`, `declared_at`. Everything else is optional and defa
 ```json
 {
   "status": "cause_found",
-  "summary": {"what_broke": "", "impact": "", "top_cause": "C1"},
+  "summary": {"what_broke": "", "impact": "", "scope": "", "top_cause": "C1"},
+  "symptoms": ["The health check of checkout.example.com returns 502"],
   "causes": [
     {"id": "C1", "statement": "", "label": "confirmed",
      "supporting": ["compute-1"], "contradicting": []}
@@ -152,6 +153,7 @@ Required: `number`, `title`, `declared_at`. Everything else is optional and defa
 ```
 
 - `status`: `cause_found` or `unresolved`.
+- `symptoms`: at least one plain statement of what was observed to be wrong. `summary.scope`: one sentence on what was and was not affected. Stage 4 judges causes against both.
 - Cause `label`: `confirmed`, `probable`, or `candidate`.
 - Hypothesis `result`: `confirmed`, `rejected`, or `inconclusive`.
 - Action `type`: `mitigation` or `permanent_fix`. Action `label`: `recommended` or `candidate`.
@@ -385,7 +387,7 @@ Each row gains `"offset"`: `describe_offset(row time, incident_start)` followed 
 `validate_report` returns every problem. An empty list means the report may be rendered.
 
 - Shape: every key of the `report.json` contract is present with the right type and allowed values. Ids are unique within causes, hypotheses, and actions.
-- `summary.what_broke` and `summary.impact` are non-empty. `summary.top_cause` is a cause id when `status` is `cause_found`, and `null` or empty when `unresolved`.
+- `summary.what_broke`, `summary.impact`, and `summary.scope` are non-empty, and `symptoms` has at least one non-empty string. `summary.top_cause` is a cause id when `status` is `cause_found`, and `null` or empty when `unresolved`.
 - Every finding id in `supporting`, `contradicting`, hypothesis `finding_ids`, and action `finding_ids` is a valid finding. An unknown id is named in the problem.
 - A cause labelled `confirmed` or `probable` has at least one supporting finding. A cause labelled `confirmed` has no contradicting finding and at least one supporting finding whose provenance is `incident_time`.
 - When `status` is `cause_found`: the top cause is labelled `confirmed` or `probable`, and at least one hypothesis has the result `confirmed`.
@@ -414,7 +416,7 @@ Each row gains `"offset"`: `describe_offset(row time, incident_start)` followed 
 ## 9. Run details
 ```
 
-- Summary: what broke, the impact, and the top cause with its label, or a statement that no cause was established.
+- Summary: what broke, the impact, the scope, the symptoms as a list, and the top cause with its label, or a statement that no cause was established.
 - Incident and window: number, title, link, severity, state, the three incident times, the window, and the target with how it was found.
 - Timeline: the table from `render_rows`.
 - Findings: one block per valid finding, grouped by analyst: id, claim, provenance, confidence, the cited fact ids, and for each cited fact its command, resource, time, and excerpt.
