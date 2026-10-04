@@ -417,6 +417,40 @@ def test_the_resource_match_fallback_name_is_also_reserved(tmp_path, config):
         run(case_dir, config, FakeJudge(make_responder()))
 
 
+# a failed run leaves no summary that could vouch for the draft
+
+def test_a_run_that_fails_retires_the_previous_summary(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    first = run(case_dir, config, FakeJudge(make_responder()))
+    assert first["causes"]["C1"]["label"] == "confirmed"
+    broken = FakeJudge(lambda state, questions: {})
+    with pytest.raises(KeyError):
+        run(case_dir, config, broken)
+    judgments = case_dir / "judgments"
+    assert not (judgments / "summary.json").exists()
+    assert json.loads((judgments / "summary.json.stale").read_text()) == first
+
+
+def test_a_draft_refused_before_any_call_also_retires_the_previous_summary(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    run(case_dir, config, FakeJudge(make_responder()))
+    edit_report(case_dir, lambda r: r["causes"].append(dict(r["causes"][0])))
+    with pytest.raises(DraftRuleError):
+        run(case_dir, config, FakeJudge(make_responder()))
+    assert not (case_dir / "judgments" / "summary.json").exists()
+    assert (case_dir / "judgments" / "summary.json.stale").is_file()
+
+
+def test_a_run_that_succeeds_leaves_no_stale_file(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    run(case_dir, config, FakeJudge(make_responder()))
+    with pytest.raises(KeyError):
+        run(case_dir, config, FakeJudge(lambda state, questions: {}))
+    run(case_dir, config, FakeJudge(make_responder()))
+    assert (case_dir / "judgments" / "summary.json").is_file()
+    assert not (case_dir / "judgments" / "summary.json.stale").exists()
+
+
 # digests
 
 def test_the_summary_stores_a_digest_beside_each_cause_and_action(tmp_path, config):

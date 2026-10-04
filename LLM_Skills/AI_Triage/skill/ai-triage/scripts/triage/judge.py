@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 import re
 from pathlib import Path
@@ -461,9 +462,13 @@ def _reserved_ids(questions: dict[str, dict]) -> frozenset[str]:
 def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions: dict[str, dict], rng: random.Random) -> dict:
     """Ask every fixed question about the report draft, store the exchanges, and write judgments/summary.json."""
     case_dir = Path(case_dir)
+    adhoc = _minimal_adhoc_entries(case_dir)
+    summary_path = case_dir / "judgments" / SUMMARY_NAME
+    stale_path = summary_path.with_name(SUMMARY_NAME + ".stale")
+    if summary_path.is_file():  # a run that fails must not leave an older summary that still vouches for labels
+        os.replace(summary_path, stale_path)
     case = load_case(case_dir)
     report = load_report_draft(case_dir, _reserved_ids(questions))
-    adhoc = _minimal_adhoc_entries(case_dir)
     findings = valid_findings(case_dir)
     session = JudgeSession(judge, JudgmentStore(case_dir), config, Redactor())
     causes, actions = report["causes"], report.get("actions", [])
@@ -479,6 +484,7 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
                                    verdicts, cause_answers, rank, action_answers)
     summary["adhoc"] = adhoc
     write_summary(case_dir, summary)
+    stale_path.unlink(missing_ok=True)
     return summary
 
 
