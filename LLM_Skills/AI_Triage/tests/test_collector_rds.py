@@ -228,27 +228,37 @@ def test_data_values_never_reach_a_log_fact(config_data, tmp_path):
     ctx, _ = run(config_data, tmp_path, log_answers(files, data))
     document = ctx.evidence.to_json()
     assert phone not in document and name not in document
-    assert "violates unique constraint" in document and "users_phone_key" not in document and "Key (phone)=(<value>)" in document
+    assert "violates unique constraint \"users_phone_key\"" not in document and "users_phone_key" in document and "Key (phone)=(<value>)" in document
 
 
-def test_mask_values_hides_single_quoted_strings_with_both_escapes():
+BACKSLASH = "\\"
+
+
+def test_mask_values_hides_single_quoted_strings():
     assert _mask_values("ERROR: INSERT INTO t (a, b) VALUES ('x y', 'it''s') failed") == "ERROR: INSERT INTO t (a, b) VALUES (<value>, <value>) failed"
-    line = "ERROR: Duplicate entry 'O" + "\\'" + "Brien-" + "5550" + "199' for key 'users.name'"
-    assert _mask_values(line) == "ERROR: Duplicate entry <value> for key <value>"
+
+
+def test_a_backslash_escape_masks_the_rest_of_the_line_after_the_span_starts():
+    mysql = "ERROR: Duplicate entry 'O" + BACKSLASH + "'Brien-" + "5550" + "199' for key 'users.name'"
+    assert _mask_values(mysql) == "ERROR: Duplicate entry <value>"
+    name = "Ada" + " Lovelace"
+    standard = "ERROR: VALUES ('C:" + BACKSLASH + "dir" + BACKSLASH + "', '" + name + "', 'z')"
+    masked = _mask_values(standard)
+    assert name not in masked and masked == "ERROR: VALUES (<value>"
 
 
 def test_mask_values_hides_the_escape_string_form():
-    line = "ERROR: bad literal E'123-45-" + "\\'" + "67" + "89' near"
-    assert _mask_values(line) == "ERROR: bad literal <value> near"
+    line = "ERROR: bad literal E'123-45-" + BACKSLASH + "'67" + "89' near"
+    assert _mask_values(line) == "ERROR: bad literal <value>"
 
 
 def test_mask_values_hides_double_quoted_values():
     assert _mask_values('ERROR:  invalid input syntax for type integer: "' + "4111" * 4 + '"') == "ERROR:  invalid input syntax for type integer: <value>"
-    assert _mask_values('ERROR: value "a ""quoted"" one" and "b' + "\\" + '"c" end') == "ERROR: value <value> and <value> end"
+    assert _mask_values('ERROR: value "a ""quoted"" one" and "c" end') == "ERROR: value <value> and <value> end"
 
 
 def test_mask_values_hides_backtick_quoted_text():
-    assert _mask_values("ERROR: unknown column `secret col` in table") == "ERROR: unknown column <value> in table"
+    assert _mask_values("ERROR: unknown thing `secret col` in table") == "ERROR: unknown thing <value> in table"
 
 
 def test_mask_values_hides_dollar_quoted_strings():
@@ -262,6 +272,23 @@ def test_mask_values_masks_an_unterminated_quote_to_the_end_of_the_line():
     assert _mask_values('ERROR: near "secret value') == "ERROR: near <value>"
 
 
+def test_identifier_shaped_names_after_a_keyword_are_kept():
+    assert _mask_values('ERROR:  duplicate key value violates unique constraint "users_phone_key"') == \
+        'ERROR:  duplicate key value violates unique constraint "users_phone_key"'
+    assert _mask_values('ERROR:  relation "public.orders" does not exist') == 'ERROR:  relation "public.orders" does not exist'
+    assert _mask_values('ERROR:  column "amount" of relation "orders" does not exist') == 'ERROR:  column "amount" of relation "orders" does not exist'
+    assert _mask_values("ERROR 1062 (23000): Duplicate entry for key 'users.name'") == "ERROR 1062 (23000): Duplicate entry for key 'users.name'"
+    assert _mask_values("ERROR: Unknown column `amount` here") == "ERROR: Unknown column `amount` here"
+
+
+def test_other_quoted_spans_are_masked_even_when_identifier_shaped():
+    assert _mask_values('ERROR:  role "ada" does not exist') == "ERROR:  role <value> does not exist"
+    assert _mask_values("ERROR: user 'ada' denied") == "ERROR: user <value> denied"
+    assert _mask_values('ERROR:  relation "has space" does not exist') == "ERROR:  relation <value> does not exist"
+    assert _mask_values('ERROR:  value "orders" bad') == "ERROR:  value <value> bad"
+    assert _mask_values('ERROR:  table  "' + "x" * 70 + '" gone') == "ERROR:  table  <value> gone"
+
+
 def test_mask_values_hides_the_row_in_a_detail_line_but_keeps_the_column_list():
     phone = "+44 7700 900" + "123"
     assert _mask_values(f"DETAIL:  Key (phone)=({phone}) already exists.") == "DETAIL:  Key (phone)=(<value>) already exists."
@@ -273,15 +300,51 @@ def test_mask_values_hides_nested_parentheses_in_a_key_group():
     assert _mask_values(line) == "ERROR: Key (name)=(<value>) already exists"
 
 
-def test_mask_values_hides_long_digit_runs_but_keeps_the_leading_timestamp():
-    assert _mask_values("2026-10-04 10:42:11.123456 UTC ERROR: user " + "12345678" + " missing, retry 3 of 4") == \
-        "2026-10-04 10:42:11.123456 UTC ERROR: user <value> missing, retry 3 of 4"
-    assert not re.search(r"\d{5}", _mask_values("ERROR: ref 4111-1111 9999 and 55501999 and +1 555 0199"))
+def test_runs_of_three_or_more_digits_become_n_but_the_leading_timestamp_stays():
+    assert _mask_values("2026-10-04 10:42:11.123456 UTC ERROR: user " + "12345678" + " missing, retry 3 of 4, port " + "5432") == \
+        "2026-10-04 10:42:11.123456 UTC ERROR: user <n> missing, retry 3 of 4, port <n>"
+
+
+def test_engine_error_codes_are_kept():
+    for line in ("[ERROR] [MY-" + "010000] [Server] x", "ERROR: failed SQLSTATE " + "23505", "ERROR 1062 (23000): Duplicate",
+                 "Error: 18456, Severity: 14, State: 8.", "ORA-" + "00942: table or view does not exist"):
+        assert _mask_values(line) == line
+
+
+def test_phone_and_card_shapes_with_any_separator_leave_no_digits():
+    shapes = [
+        "(" + "555" + ") " + "123" + "-" + "4567", "555" + "-" + "0199", "+44 7700 900" + "123", "+44 77 00 12 34",
+        "4111" + "." + "1111" + "." + "1111" + "." + "1111", "_".join(["4111"] * 4), "\u00a0".join(["4111"] * 4),
+        "-".join(["4111"] * 4), " ".join(["4111"] * 4), "123" + "-" + "45" + "-" + "6789",
+    ]
+    for shape in shapes:
+        masked = _mask_values(f"ERROR: customer rejected {shape} today")
+        assert not re.search(r"\d", masked), (shape, masked)
+
+
+def test_the_user_role_and_usename_values_in_a_prefix_are_masked_but_db_app_client_are_kept():
+    line = "2026-10-04 10:42:11 UTC:user=Ada,db=shop,app=psql,client=10.0.0.5 ERROR: x"
+    assert _mask_values(line) == "2026-10-04 10:42:11 UTC:user=<value>,db=shop,app=psql,client=10.0.0.5 ERROR: x"
+    assert _mask_values("ERROR: role=ada usename=bob end") == "ERROR: role=<value> usename=<value> end"
 
 
 def test_mask_values_leaves_a_line_without_values_alone():
-    line = "2026-10-04 10:42:11 UTC ERROR: too many connections for role app, limit 100"
+    line = "2026-10-04 10:42:11 UTC ERROR: too many connections for role app, limit 5"
     assert _mask_values(line) == line
+
+
+def test_a_detail_line_directly_after_a_kept_line_is_included_after_masking(config_data, tmp_path):
+    phone = "+44 7700 900" + "123"
+    data = "\n".join([
+        "2026-10-04 10:05:00 UTC::@:[1]:ERROR:  duplicate key value violates unique constraint \"users_phone_key\"",
+        f"2026-10-04 10:05:00 UTC::@:[1]:DETAIL:  Key (phone)=({phone}) already exists.",
+        "2026-10-04 10:06:00 UTC::@:[1]:LOG:  checkpoint",
+        "2026-10-04 10:06:01 UTC::@:[1]:DETAIL:  not attached to a kept line (secret-ish)",
+    ])
+    ctx, _ = run(config_data, tmp_path, log_answers([error_file("error/e.log", 1000)], data))
+    detail = [f for f in ctx.evidence.facts if "DETAIL" in f.excerpt]
+    assert len(detail) == 1 and "Key (phone)=(<value>) already exists." in detail[0].excerpt
+    assert phone not in ctx.evidence.to_json()
 
 
 def test_secret_in_log_line_never_reaches_the_document(config_data, tmp_path):

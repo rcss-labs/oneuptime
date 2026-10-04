@@ -1,4 +1,10 @@
-"""RDS collector: instance or cluster state, events, error log lines, metrics, Performance Insights."""
+"""RDS collector: instance or cluster state, events, error log lines, metrics, Performance Insights.
+
+Log lines are masked before they enter a fact: quoted spans, row values, user names in a prefix and every run of
+three or more digits are hidden. A quoted span is kept only when it is identifier-shaped and directly follows a word
+such as relation, constraint, or column. Known limit: free text that an application raised inside the database
+(a custom error message with a name in it, unquoted) is shown as written apart from numbers.
+"""
 from __future__ import annotations
 
 import json
@@ -27,8 +33,19 @@ MAX_LOG_FILES_READ = 3
 LEADING_TIMESTAMP = re.compile(r"\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?")
 FILE_HOUR = re.compile(r"(\d{4}-\d{2}-\d{2})[-.](\d{2})(?!\d)")
 DOLLAR_TAG = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
-PHONE_SHAPE = re.compile(r"\+?\d{1,4}(?:[ -]\d{2,4}){2,}")
-LONG_DIGITS = re.compile(r"\d{5,}")
+PHONE_SHAPE = re.compile(r"\+?\d+(?:[\s._()-]+\d{2,}){2,}")
+LONG_DIGITS = re.compile(r"\d{3,}")
+NUMBER_MASK = "<n>"
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.$]{0,62}")
+IDENTIFIER_WORDS = (
+    "relation", "table", "column", "constraint", "index", "schema", "database", "function", "type", "sequence",
+    "view", "trigger", "key", "extension", "parameter",
+)
+PRECEDING_WORD = re.compile(r"([A-Za-z]+)\s*$")
+ACCOUNT_VALUE = re.compile(r"\b(user|role|usename)=[^\s,)]+")
+ENGINE_CODE = re.compile(
+    r"MY-\d{6}|SQLSTATE[ :=\[]*\w{5}|ERROR \d{4} \(\w{5}\)|Error: \d+, Severity: \d+, State: \d+|ORA-\d{5}"
+)
 LOG_TIMESTAMP = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})")
 METRICS = (
     ("CPUUtilization", "Average"), ("DatabaseConnections", "Maximum"), ("FreeStorageSpace", "Minimum"),
@@ -81,20 +98,27 @@ def _add_events(ctx: CollectContext, name: str, source_type: str, noun: str) -> 
         )
 
 
-def _quoted_end(line: str, start: int) -> int | None:
-    """Index just past the quoted span that opens at line[start], or None when it is never closed."""
-    quote, index = line[start], start + 1
+def _quoted_end(line: str, start: int) -> tuple[int | None, bool]:
+    """Index just past the quoted span that opens at line[start] (None when never closed), and whether a backslash escape was used."""
+    quote, index, escaped = line[start], start + 1, False
     while index < len(line):
         if line[index] == "\\" and quote != "`":
+            escaped = True
             index += 2
         elif line[index] == quote:
             if line[index + 1:index + 2] == quote:
                 index += 2
             else:
-                return index + 1
+                return index + 1, escaped
         else:
             index += 1
-    return None
+    return None, escaped
+
+
+def _keeps_identifier(before: str, span: str) -> bool:
+    """True for an identifier-shaped quoted name that directly follows a word like relation or constraint."""
+    word = PRECEDING_WORD.search(before)
+    return bool(word) and word.group(1).lower() in IDENTIFIER_WORDS and bool(IDENTIFIER.fullmatch(span[1:-1]))
 
 
 def _mask_quoted(line: str) -> str:
@@ -102,11 +126,15 @@ def _mask_quoted(line: str) -> str:
     while index < len(line):
         char = line[index]
         if char in "'\"`":
-            end = _quoted_end(line, index)
+            end, escaped = _quoted_end(line, index)
+            if end is not None and not escaped and _keeps_identifier("".join(out), line[index:end]):
+                out.append(line[index:end])
+                index = end
+                continue
             if out and out[-1] in "Ee" and (len(out) == 1 or not out[-2].isalnum()) and char == "'":
                 out.pop()
             out.append(MASK)
-            if end is None:
+            if end is None or escaped:
                 break
             index = end
             continue
@@ -149,16 +177,24 @@ def _mask_row_values(line: str) -> str:
     return _mask_last_group(line, equals + 1) if equals >= 0 else line
 
 
-def _mask_values(line: str) -> str:
-    """Hide data values in a log line, keeping the error text and the leading timestamp.
+def _mask_numbers(text: str) -> str:
+    """Mask phone-shaped and long digit runs, keeping engine error codes as written."""
+    pieces, position = [], 0
+    for code in ENGINE_CODE.finditer(text):
+        pieces.append(LONG_DIGITS.sub(NUMBER_MASK, PHONE_SHAPE.sub(NUMBER_MASK, text[position:code.start()])))
+        pieces.append(code.group(0))
+        position = code.end()
+    pieces.append(LONG_DIGITS.sub(NUMBER_MASK, PHONE_SHAPE.sub(NUMBER_MASK, text[position:])))
+    return "".join(pieces)
 
-    Quoted spans, row values in parentheses, and runs of five or more digits become <value>.
-    """
+
+def _mask_values(line: str) -> str:
+    """Hide data values in a log line, keeping the error text, identifiers after known words, and the leading timestamp."""
     stamp = LEADING_TIMESTAMP.match(line)
     head, rest = (line[:stamp.end()], line[stamp.end():]) if stamp else ("", line)
+    rest = ACCOUNT_VALUE.sub(lambda match: f"{match.group(1)}={MASK}", rest)
     rest = _mask_row_values(_mask_quoted(rest))
-    rest = LONG_DIGITS.sub(MASK, PHONE_SHAPE.sub(MASK, rest))
-    return head + rest
+    return head + _mask_numbers(rest)
 
 
 def _error_files(files: list[dict]) -> list[dict]:
@@ -184,7 +220,7 @@ def _files_overlapping_window(files: list[dict], window) -> list[dict]:
 
 
 def _line_time(line: str) -> datetime | None:
-    match = LOG_TIMESTAMP.search(line)
+    match = LOG_TIMESTAMP.match(line.lstrip())
     return parse_iso(f"{match.group(1)}T{match.group(2)}Z") if match else None
 
 
@@ -213,10 +249,17 @@ def _add_log_lines(ctx: CollectContext, name: str) -> None:
             continue
         command = ctx.last_command
         read_names.append(file_name)
+        previous_kept: tuple[datetime, str, str] | None = None
         for line in (portion.get("LogFileData") or "").splitlines():
             moment = _line_time(line)
             if PROBLEM_LINE.search(line) and moment is not None and ctx.window.start <= moment < ctx.window.end:
-                inside.append((moment, file_name, line))
+                previous_kept = (moment, file_name, line)
+                inside.append(previous_kept)
+            elif previous_kept is not None and "DETAIL:" in line:
+                inside.append((moment or previous_kept[0], file_name, line))
+                previous_kept = None
+            else:
+                previous_kept = None
     for moment, file_name, line in inside[-MAX_LOG_LINES:]:
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=f"db/{name}", time=moment, command=command,
