@@ -108,12 +108,25 @@ def _split_groups(targets: dict[str, str]) -> list[str]:
     return [name.strip() for name in targets["log_groups"].split(",") if name.strip()]
 
 
+def _choose_buckets(buckets: list[tuple[datetime, int]], non_empty: list[tuple[datetime, int]]) -> list[tuple[datetime, int]]:
+    """At most MAX_BUCKET_FACTS buckets in time order: the onset and the peak, then the highest counts."""
+    if len(buckets) <= MAX_BUCKET_FACTS:
+        return buckets
+    keep = {non_empty[0][0], max(non_empty, key=lambda pair: pair[1])[0]} if non_empty else set()
+    for moment, _ in sorted(buckets, key=lambda pair: -pair[1]):
+        if len(keep) >= MAX_BUCKET_FACTS:
+            break
+        keep.add(moment)
+    return [pair for pair in buckets if pair[0] in keep]
+
+
 def _add_buckets(ctx: CollectContext, resource: str, rows: list[dict[str, str]]) -> bool:
     buckets = sorted(
         ((moment, _number(row.get("matches"))) for row in rows if (moment := _insights_time(row.get("bin(5m)")))),
         key=lambda pair: pair[0],
     )
-    shown = sorted(sorted(buckets, key=lambda pair: -pair[1])[:MAX_BUCKET_FACTS], key=lambda pair: pair[0])
+    non_empty = [pair for pair in buckets if pair[1] > 0]
+    shown = _choose_buckets(buckets, non_empty)
     left_out = len(buckets) - len(shown)
     for moment, count in shown:
         ctx.evidence.add(
@@ -121,7 +134,6 @@ def _add_buckets(ctx: CollectContext, resource: str, rows: list[dict[str, str]])
             summary=f"{count} matching log lines in the 5 minutes starting {format_time(moment)}",
             data={"matches": count},
         )
-    non_empty = [pair for pair in buckets if pair[1] > 0]
     if not non_empty:
         return False
     peak = max(non_empty, key=lambda pair: pair[1])
@@ -148,10 +160,18 @@ def _add_patterns(ctx: CollectContext, resource: str, rows: list[dict[str, str]]
 
 def _add_lines(ctx: CollectContext, resource: str, rows: list[dict[str, str]]) -> None:
     for row in rows:
+        moment = _insights_time(row.get("@timestamp"))
+        stream = row.get("@logStream", "unknown")
+        if moment is None:
+            ctx.evidence.add(
+                kind=DERIVED, resource=resource, command=ctx.last_command,
+                summary=f"Matching log line in stream {stream}; its time could not be read",
+                excerpt=row.get("@message", ""),
+            )
+            continue
         ctx.evidence.add(
-            kind=INCIDENT_TIME, resource=resource, time=_insights_time(row.get("@timestamp")), command=ctx.last_command,
-            summary=f"Matching log line in stream {row.get('@logStream', 'unknown')}",
-            excerpt=row.get("@message", ""),
+            kind=INCIDENT_TIME, resource=resource, time=moment, command=ctx.last_command,
+            summary=f"Matching log line in stream {stream}", excerpt=row.get("@message", ""),
         )
 
 

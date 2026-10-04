@@ -263,8 +263,33 @@ def test_bucket_facts_are_capped_at_sixty_keeping_the_highest_counts(config_data
     assert len(buckets) == 60
     assert [f.time for f in buckets] == sorted(f.time for f in buckets)
     counts = [f.data["matches"] for f in buckets]
-    assert min(counts) == 11 and max(counts) == 70
+    assert 1 in counts and 11 not in counts and 12 in counts and max(counts) == 70
     derived = [f.summary for f in ctx.evidence.facts if "Peak" in f.summary]
     assert len(derived) == 1
     assert "10 buckets" in derived[0] and "left out" in derived[0]
     assert "with 70" in derived[0] and "first bucket with matches starts 2026-10-04T10:00:00Z" in derived[0]
+
+
+def test_onset_and_peak_buckets_are_kept_when_the_cap_applies(config_data, tmp_path):
+    rows = [row(**{"bin(5m)": f"2026-10-04 {10 + i // 12:02d}:{i % 12 * 5:02d}:00.000",
+                   "matches": str(1 if i == 0 else 500 + i)}) for i in range(70)]
+    peak_row = rows[10]
+    peak_row[1]["value"] = "9999"
+    ctx, _, _ = run(config_data, tmp_path, standard(buckets=rows))
+    buckets = [f for f in ctx.evidence.facts if "matching log lines in the 5 minutes" in f.summary]
+    assert len(buckets) == 60
+    times = [f.time for f in buckets]
+    assert times == sorted(times)
+    assert "2026-10-04T10:00:00Z" in times
+    assert "2026-10-04T10:50:00Z" in times
+
+
+def test_unparseable_line_time_gives_a_derived_fact_without_time(config_data, tmp_path):
+    lines = [row(**{"@timestamp": "not a time", "@logStream": "s1", "@message": "ERROR boom"}),
+             row(**{"@timestamp": "2026-10-04 10:41:02.500", "@logStream": "s2", "@message": "ERROR fine"})]
+    ctx, _, _ = run(config_data, tmp_path, standard(lines=lines))
+    bad = [f for f in ctx.evidence.facts if f.excerpt == "ERROR boom"][0]
+    assert bad.kind == "derived" and bad.time is None
+    assert "could not be read" in bad.summary
+    good = [f for f in ctx.evidence.facts if f.excerpt == "ERROR fine"][0]
+    assert good.kind == "incident_time"
