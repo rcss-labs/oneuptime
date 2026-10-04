@@ -5,37 +5,32 @@ import json
 from typing import Any
 
 from triage.collectors import Collector
+from triage.collectors.common import split_csv, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED
 from triage.metrics import MetricSpec, add_metric_facts
 
 MAX_TARGETS = 10
 MAX_SOURCE_QUEUES = "10"
-MISSING_MARKERS = ("NotFound", "NonExistent", "DoesNotExist", "does not exist")
+QUEUE_NOT_FOUND = ("QueueDoesNotExist", "AWS.SimpleQueueService.NonExistentQueue")
+TOPIC_NOT_FOUND = ("NotFound", "NotFoundException")
 QUEUE_METRICS = (
     ("ApproximateAgeOfOldestMessage", "Maximum"), ("ApproximateNumberOfMessagesVisible", "Maximum"),
     ("NumberOfMessagesSent", "Sum"), ("NumberOfMessagesDeleted", "Sum"),
 )
 TOPIC_METRICS = (("NumberOfNotificationsFailed", "Sum"), ("NumberOfMessagesPublished", "Sum"))
-
-
-def _split(value: str) -> list[str]:
-    return [item.strip() for item in value.split(",") if item.strip()][:MAX_TARGETS]
-
-
-def _last_call_found_nothing(ctx: CollectContext) -> bool:
-    if not ctx.evidence.errors:
-        return False
-    error = ctx.evidence.errors[-1]
-    return any(marker in error["code"] or marker in error["message"] for marker in MISSING_MARKERS)
+# The only queue attributes a fact may carry; the queue policy and the rest stay out.
+SHOWN_ATTRIBUTES = (
+    "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "ApproximateNumberOfMessagesDelayed",
+    "VisibilityTimeout", "MessageRetentionPeriod",
+)
 
 
 def _duration(seconds: int) -> str:
-    if seconds % 86400 == 0:
-        days = seconds // 86400
-        return f"{days} day{'s' if days != 1 else ''}"
-    if seconds % 3600 == 0:
-        return f"{seconds // 3600} hours"
+    for size, unit in ((86400, "day"), (3600, "hour")):
+        if seconds % size == 0 and seconds:
+            count = seconds // size
+            return f"{count} {unit}{'s' if count != 1 else ''}"
     return f"{seconds} seconds"
 
 
@@ -69,20 +64,22 @@ def _queue_summary(name: str, attributes: dict[str, Any]) -> str:
     )
 
 
-def _collect_queue(ctx: CollectContext, name: str) -> dict[str, Any] | None:
+def _collect_queue(ctx: CollectContext, name: str) -> tuple[dict[str, Any] | None, bool]:
+    """Read one queue; return its attributes and whether it is the dead letter queue of another queue."""
     resource = f"queue/{name}"
-    located = ctx.aws("sqs", "get-queue-url", ["--queue-name", name])
+    located = ctx.aws("sqs", "get-queue-url", ["--queue-name", name], not_found=QUEUE_NOT_FOUND)
     url = (located or {}).get("QueueUrl")
     if not url:
-        if _last_call_found_nothing(ctx):
-            ctx.evidence.add(kind=CURRENT, resource=resource, summary=f"Queue {name} was not found")
-        return None
+        if was_not_found(ctx, QUEUE_NOT_FOUND):
+            ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=f"Queue {name} was not found")
+        return None, False
     reply = ctx.aws("sqs", "get-queue-attributes", ["--queue-url", url, "--attribute-names", "All"])
     attributes = (reply or {}).get("Attributes")
     if attributes is None:
-        return None
+        return None, False
     ctx.evidence.add(
-        kind=CURRENT, resource=resource, command=ctx.last_command, data={"attributes": attributes},
+        kind=CURRENT, resource=resource, command=ctx.last_command,
+        data={"attributes": {key: attributes[key] for key in SHOWN_ATTRIBUTES if key in attributes}},
         summary=_queue_summary(name, attributes),
     )
     sources = ctx.aws("sqs", "list-dead-letter-source-queues", ["--queue-url", url, "--max-items", MAX_SOURCE_QUEUES])
@@ -94,7 +91,7 @@ def _collect_queue(ctx: CollectContext, name: str) -> dict[str, Any] | None:
         )
     dimensions = {"QueueName": name}
     add_metric_facts(ctx, resource, [MetricSpec(m, "AWS/SQS", m, dimensions, s) for m, s in QUEUE_METRICS])
-    return attributes
+    return attributes, bool(source_names)
 
 
 def _flag_dead_letters(ctx: CollectContext, name: str, attributes: dict[str, Any]) -> None:
@@ -107,38 +104,54 @@ def _flag_dead_letters(ctx: CollectContext, name: str, attributes: dict[str, Any
 
 
 def _collect_queues(ctx: CollectContext, names: list[str]) -> None:
-    done: set[str] = set()
-    for name in names:
-        if name in done:
+    read: dict[str, dict[str, Any]] = {}
+    dead_letter_names: set[str] = set()
+    tried: set[str] = set()
+    pending = list(names)
+    while pending:
+        name = pending.pop(0)
+        if name in tried:
             continue
-        done.add(name)
-        attributes = _collect_queue(ctx, name)
-        target, _ = _dead_letter_arn(attributes or {})
-        if target and target.rsplit(":", 1)[-1] not in done:
+        tried.add(name)
+        attributes, serves_as_dead_letter = _collect_queue(ctx, name)
+        if serves_as_dead_letter:
+            dead_letter_names.add(name)
+        if attributes is None:
+            continue
+        read[name] = attributes
+        target, _ = _dead_letter_arn(attributes)
+        if target:
             dead_letter = target.rsplit(":", 1)[-1]
-            done.add(dead_letter)
-            dead_attributes = _collect_queue(ctx, dead_letter)
-            if dead_attributes is not None:
-                _flag_dead_letters(ctx, dead_letter, dead_attributes)
+            dead_letter_names.add(dead_letter)
+            pending.append(dead_letter)
+    for name in sorted(dead_letter_names & read.keys()):
+        _flag_dead_letters(ctx, name, read[name])
 
 
 def _delivery_text(attributes: dict[str, Any]) -> str:
-    try:
-        policy = json.loads(attributes.get("DeliveryPolicy") or "")
-        retries = [p.get("numRetries") for p in policy.get("http", {}).values() if isinstance(p, dict) and "numRetries" in p]
-    except (json.JSONDecodeError, AttributeError):
-        retries = []
-    return f"delivery policy {retries[0]} retries" if retries else "default delivery policy"
+    for key in ("DeliveryPolicy", "EffectiveDeliveryPolicy"):
+        try:
+            policy = json.loads(attributes.get(key) or "")
+            retries = [p.get("numRetries") for p in policy.get("http", {}).values() if isinstance(p, dict) and "numRetries" in p]
+        except (json.JSONDecodeError, AttributeError):
+            retries = []
+        if retries:
+            return f"delivery policy {retries[0]} retries"
+    return "default delivery policy"
 
 
 def _collect_topic(ctx: CollectContext, arn: str) -> None:
-    name = arn.rsplit(":", 1)[-1]
+    parts = arn.split(":")
+    if len(parts) < 6 or parts[0] != "arn" or not parts[3]:
+        ctx.evidence.add_error("", "InvalidTarget", f"a topic must be given as an ARN, not {arn!r}")
+        return
+    name, region = parts[-1], parts[3]
     resource = f"topic/{name}"
-    reply = ctx.aws("sns", "get-topic-attributes", ["--topic-arn", arn])
+    reply = ctx.aws("sns", "get-topic-attributes", ["--topic-arn", arn], region=region, not_found=TOPIC_NOT_FOUND)
     attributes = (reply or {}).get("Attributes")
     if attributes is None:
-        if _last_call_found_nothing(ctx):
-            ctx.evidence.add(kind=CURRENT, resource=resource, summary=f"Topic {name} was not found")
+        if was_not_found(ctx, TOPIC_NOT_FOUND):
+            ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=f"Topic {name} was not found")
         return
     ctx.evidence.add(
         kind=CURRENT, resource=resource, command=ctx.last_command,
@@ -148,19 +161,12 @@ def _collect_topic(ctx: CollectContext, arn: str) -> None:
         ),
     )
     dimensions = {"TopicName": name}
-    add_metric_facts(ctx, resource, [MetricSpec(m, "AWS/SNS", m, dimensions, s) for m, s in TOPIC_METRICS])
+    add_metric_facts(ctx, resource, [MetricSpec(m, "AWS/SNS", m, dimensions, s) for m, s in TOPIC_METRICS], region=region)
 
 
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
-    queues, topics = _split(targets.get("queues", "")), _split(targets.get("topics", ""))
-    if not queues and not topics:
-        ctx.evidence.add(
-            kind=DERIVED, resource="messaging",
-            summary="No queues or topics were given: pass queues (comma-separated queue names) or topics (comma-separated topic ARNs), so nothing was read",
-        )
-        return
-    _collect_queues(ctx, queues)
-    for arn in topics:
+    _collect_queues(ctx, split_csv(targets.get("queues"))[:MAX_TARGETS])
+    for arn in split_csv(targets.get("topics"))[:MAX_TARGETS]:
         _collect_topic(ctx, arn)
 
 
@@ -170,4 +176,5 @@ COLLECTOR = Collector(
     required=(),
     optional=("queues", "topics"),
     run=collect,
+    one_of=("queues", "topics"),
 )

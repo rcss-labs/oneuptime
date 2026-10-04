@@ -63,20 +63,17 @@ def test_declares_its_targets():
     assert COLLECTOR.name == "messaging"
     assert COLLECTOR.required == ()
     assert COLLECTOR.optional == ("queues", "topics")
+    assert COLLECTOR.one_of == ("queues", "topics")
 
 
-def test_neither_target_explains_and_makes_no_call(config_data, tmp_path):
+def test_neither_target_makes_no_call_and_adds_nothing(config_data, tmp_path):
     ctx, aws = run(config_data, tmp_path, {})
-    assert aws.calls == []
-    assert len(ctx.evidence.facts) == 1
-    fact = ctx.evidence.facts[0]
-    assert fact.kind == "derived" and "queues" in fact.summary and "topics" in fact.summary
-    assert ctx.evidence.errors == []
+    assert aws.calls == [] and ctx.evidence.facts == [] and ctx.evidence.errors == []
 
 
-def test_blank_targets_count_as_missing(config_data, tmp_path):
+def test_blank_targets_make_no_call(config_data, tmp_path):
     ctx, aws = run(config_data, tmp_path, {"queues": " , ", "topics": ""})
-    assert aws.calls == [] and len(ctx.evidence.facts) == 1
+    assert aws.calls == [] and ctx.evidence.facts == []
 
 
 def test_healthy_queue(config_data, tmp_path):
@@ -201,3 +198,68 @@ def test_targets_are_capped(config_data, tmp_path):
     queues = ",".join(f"q{n}" for n in range(15))
     _, aws = run(config_data, tmp_path, {"queues": queues})
     assert len(aws.called("sqs", "get-queue-url")) == 10
+
+
+def test_dead_letter_queue_is_flagged_whatever_the_order_of_the_targets(config_data, tmp_path):
+    replies = {"orders": attributes(dead_letter=DLQ_ARN), "orders-dlq": attributes(visible=12, in_flight=0)}
+    for order in ("orders,orders-dlq", "orders-dlq,orders"):
+        ctx, _ = run(config_data, tmp_path, {"queues": order}, fake=PerQueue(base_answers(), replies))
+        flagged = by_summary(ctx, "holds")
+        assert len(flagged) == 1 and flagged[0].kind == "derived" and "orders-dlq" in flagged[0].summary and "12" in flagged[0].summary
+
+
+def test_a_queue_that_serves_as_a_dead_letter_queue_is_flagged_by_its_sources(config_data, tmp_path):
+    sources = {"queueUrls": [f"https://sqs.eu-west-1.example.com/{ACCOUNT}/orders"]}
+    answers = base_answers(**{"sqs list-dead-letter-source-queues": sources, "sqs get-queue-attributes": attributes(visible=3, in_flight=0)})
+    ctx, _ = run(config_data, tmp_path, {"queues": "orders-dlq"}, answers)
+    assert len(by_summary(ctx, "holds")) == 1
+
+
+def test_topic_calls_use_the_region_in_its_arn(config_data, tmp_path):
+    arn = f"arn:aws:sns:us-east-1:{ACCOUNT}:global-events"
+    _, aws = run(config_data, tmp_path, {"topics": arn})
+    for argv in (aws.called("sns", "get-topic-attributes") + aws.called("cloudwatch", "get-metric-data")):
+        assert argv[argv.index("--region") + 1] == "us-east-1"
+
+
+def test_a_topic_name_that_is_not_an_arn_is_rejected_without_a_call(config_data, tmp_path):
+    ctx, aws = run(config_data, tmp_path, {"topics": "order-events"})
+    assert aws.calls == []
+    assert [e["code"] for e in ctx.evidence.errors] == ["InvalidTarget"]
+
+
+def test_the_queue_policy_is_not_copied(config_data, tmp_path):
+    policy = json.dumps({"Statement": [{"Principal": {"AWS": f"arn:aws:iam::{ACCOUNT}:root"}, "Action": "sqs:SendMessage"}]})
+    answers = base_answers(**{"sqs get-queue-attributes": attributes(Policy=policy)})
+    ctx, _ = run(config_data, tmp_path, {"queues": "orders"}, answers)
+    document = ctx.evidence.to_json()
+    assert "sqs:SendMessage" not in document and "Principal" not in document
+
+
+def test_effective_delivery_policy_is_used_when_no_delivery_policy_is_set(config_data, tmp_path):
+    effective = json.dumps({"http": {"defaultHealthyRetryPolicy": {"numRetries": 3}}})
+    answers = base_answers(**{"sns get-topic-attributes": {"Attributes": {"SubscriptionsConfirmed": "1", "EffectiveDeliveryPolicy": effective}}})
+    ctx, _ = run(config_data, tmp_path, {"topics": TOPIC_ARN}, answers)
+    assert "3 retries" in ctx.evidence.facts[0].summary
+
+
+def test_retention_of_one_hour_is_singular(config_data, tmp_path):
+    answers = base_answers(**{"sqs get-queue-attributes": attributes(MessageRetentionPeriod="3600")})
+    ctx, _ = run(config_data, tmp_path, {"queues": "orders"}, answers)
+    assert "retention 1 hour," in ctx.evidence.facts[0].summary
+
+
+def test_not_found_facts_carry_a_command_and_record_no_error(config_data, tmp_path):
+    dotted = (254, "An error occurred (AWS.SimpleQueueService.NonExistentQueue) when calling the GetQueueUrl operation: x")
+    for reply in (NOT_FOUND, dotted):
+        ctx, _ = run(config_data, tmp_path, {"queues": "orders"}, base_answers(**{"sqs get-queue-url": reply}))
+        assert ctx.evidence.facts[0].command and ctx.evidence.errors == []
+    missing = (254, "An error occurred (NotFound) when calling the GetTopicAttributes operation: Topic does not exist")
+    ctx, _ = run(config_data, tmp_path, {"topics": TOPIC_ARN}, base_answers(**{"sns get-topic-attributes": missing}))
+    assert ctx.evidence.facts[0].command and ctx.evidence.errors == []
+
+
+def test_denied_queue_lookup_is_an_error_not_a_missing_queue(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, {"queues": "orders"}, base_answers(**{"sqs get-queue-url": access_denied("GetQueueUrl")}))
+    assert ctx.evidence.facts == []
+    assert [e["code"] for e in ctx.evidence.errors] == ["AccessDeniedException"]
