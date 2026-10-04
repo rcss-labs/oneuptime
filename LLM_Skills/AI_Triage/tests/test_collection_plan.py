@@ -40,7 +40,12 @@ def targets_of(command):
 
 def option(command, name):
     argv = command.argv
-    return argv[argv.index(name) + 1]
+    for index, word in enumerate(argv):
+        if word.startswith(name + "="):
+            return word[len(name) + 1:]
+        if word == name:
+            return argv[index + 1]
+    raise AssertionError(f"{name} not in {argv}")
 
 
 def named(commands, name):
@@ -310,3 +315,39 @@ def test_opensearch_options_are_accepted_by_the_command(config):
     for command in plan(resources, config):
         if command.tool == "opensearch_query.py":
             parser.parse_args(command.argv[2:])
+
+
+# fix round 1
+
+def test_a_suffix_that_starts_with_a_dash_is_planned_as_one_word(config):
+    import collect
+    command = one(plan({"dynamodb_tables": ["-ledger"]}, config), "dynamodb")
+    assert "--suffix=-ledger" in command.argv
+    assert collect._build_parser().parse_args(command.argv[2:]).suffix == "-ledger"
+
+
+def test_opensearch_suffix_is_one_word(config):
+    resources = {"opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-checkout-*"}}
+    assert [c.argv[-1] for c in named(plan(resources, config), "opensearch")] == [
+        "--suffix=histogram", "--suffix=top-messages", "--suffix=search"]
+
+
+def test_non_string_filter_values_are_planned_as_json(config):
+    import opensearch_query
+    filter_ = {"ok": True, "no": False, "n": 5, "x": None, "s": "text", "f": 1.5}
+    resources = {"opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-checkout-*", "filter": filter_}}
+    command = named(plan(resources, config), "opensearch")[0]
+    filters = [v for f, v in zip(command.argv, command.argv[1:]) if f == "--filter"]
+    assert filters == ["ok=true", "no=false", "n=5", "x=null", "s=text", "f=1.5"]
+    opensearch_query._build_parser().parse_args(command.argv[2:])
+
+
+@pytest.mark.parametrize("value", [" /svc", "cluster/ ", "/", "  /  ", "a/b/c"])
+def test_an_ecs_service_with_an_empty_part_is_refused(config, value):
+    commands = plan({"ecs_service": value}, config)
+    assert [c.tool for c in named(commands, "ecs")] == ["skipped"]
+
+
+def test_ecs_service_parts_are_stripped(config):
+    command = one(plan({"ecs_service": " c / s "}, config), "ecs")
+    assert targets_of(command) == {"cluster": "c", "service": "s"}

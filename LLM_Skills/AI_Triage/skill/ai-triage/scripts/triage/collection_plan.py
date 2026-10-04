@@ -1,6 +1,7 @@
 """Turn a case's target into the exact collector commands, so a run never relies on remembered option names."""
 from __future__ import annotations
 
+import json
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,7 +60,7 @@ class _Planner:
         for key, value in targets.items():
             argv += ["--target", f"{key}={value}"]
         if suffix:
-            argv += ["--suffix", suffix]
+            argv.append(f"--suffix={suffix}")
         self.commands.append(PlannedCommand(COLLECTOR_DOMAIN[name], "collect.py", name, argv, reason))
 
     def opensearch(self, subcommand: str, spec: dict, reason: str) -> None:
@@ -67,8 +68,9 @@ class _Planner:
                 "--index", spec["index_pattern"], "--start", self.case["window"]["start"],
                 "--end", self.case["window"]["end"], "--case-dir", self.case["case_dir"]]
         for key, value in (spec.get("filter") or {}).items():
-            argv += ["--filter", f"{key}={value}"]
-        argv += ["--suffix", subcommand]
+            text = value if isinstance(value, str) else json.dumps(value)
+            argv += ["--filter", f"{key}={text}"]
+        argv.append(f"--suffix={subcommand}")
         self.commands.append(PlannedCommand(COLLECTOR_DOMAIN["opensearch"], "opensearch_query.py", "opensearch", argv, reason))
 
     def skip(self, key: str, why: str) -> None:
@@ -91,7 +93,7 @@ def _text_list(value: Any) -> list[str] | None:
 def _split_ecs(value: Any) -> tuple[str, str] | None:
     if not _is_text(value):
         return None
-    cluster, _, service = value.partition("/")
+    cluster, _, service = (part.strip() for part in value.partition("/"))
     return (cluster, service) if cluster and service and "/" not in service else None
 
 
