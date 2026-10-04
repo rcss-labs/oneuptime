@@ -158,3 +158,12 @@ def test_record_with_a_missing_case_exits_one(skill_dir, tmp_path):
 
 def test_missing_required_option_is_a_usage_error(skill_dir, case_dir):
     assert run(skill_dir, "record-confluence", "--case-dir", str(case_dir)).returncode == 2
+
+
+def test_audit_through_a_link_at_audit_json_exits_one(skill_dir, case_dir, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    (case_dir / "audit.json").symlink_to(outside)
+    result = run(skill_dir, "audit", "--case-dir", str(case_dir))
+    assert result.returncode == 1 and "audit.json" in result.stderr
+    assert outside.read_text() == "keep"

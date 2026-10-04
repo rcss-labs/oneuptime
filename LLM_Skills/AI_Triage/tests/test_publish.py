@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -131,6 +132,43 @@ def test_audit_of_a_file_that_is_not_utf8_is_a_message(run_dir):
     (run_dir / "report.md").write_bytes(b"\xff\xfe bad")
     with pytest.raises(PublishError, match="report.md"):
         audit_case(run_dir)
+
+
+def test_the_symlink_refusal_does_not_depend_on_a_separate_check(run_dir, tmp_path, monkeypatch):
+    target = tmp_path / "other.md"
+    target.write_text("# Other\n")
+    (run_dir / "report.md").unlink()
+    (run_dir / "report.md").symlink_to(target)
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+    with pytest.raises(PublishError, match="report.md"):
+        audit_case(run_dir)
+
+
+def test_audit_never_writes_through_a_link_at_audit_json(run_dir, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    (run_dir / "audit.json").symlink_to(outside)
+    with pytest.raises(PublishError, match="audit.json"):
+        audit_case(run_dir)
+    assert outside.read_text() == "keep"
+
+
+def test_slack_message_never_writes_through_a_link(run_dir, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    (run_dir / "slack-message.md").symlink_to(outside)
+    with pytest.raises(PublishError, match="slack-message.md"):
+        slack_message(run_dir, None)
+    assert outside.read_text() == "keep"
+
+
+def test_a_report_json_that_is_a_link_is_refused(run_dir, tmp_path):
+    target = tmp_path / "r.json"
+    target.write_text(json.dumps(report_data()))
+    (run_dir / "report.json").unlink()
+    (run_dir / "report.json").symlink_to(target)
+    with pytest.raises(PublishError, match="report.json"):
+        slack_message(run_dir, None)
 
 
 # page_title
@@ -411,6 +449,19 @@ def test_a_very_long_link_keeps_the_cap_and_the_link(run_dir):
 def test_a_link_too_long_to_fit_is_dropped_to_hold_the_cap(run_dir):
     text = slack_message(run_dir, "https://wiki.example.com/" + "a" * 1700)
     assert len(text) <= 1500 and "aaaa" not in text
+
+
+@pytest.mark.parametrize("filler", ["&", "@", "<"])
+def test_the_cap_holds_after_escaping_a_link(run_dir, filler):
+    text = slack_message(run_dir, "https://w.example.com/" + filler * 1200)
+    assert len(text) <= 1500
+
+
+@pytest.mark.parametrize("filler", ["&", "@", "<"])
+def test_the_cap_holds_after_escaping_a_title(cases_dir, filler):
+    run = make_run(cases_dir, case=case_data(title=filler * 3000))
+    text = slack_message(run, "https://wiki.example.com/pages/1")
+    assert len(text) <= 1500 and text.splitlines()[-1] == "Full report: https://wiki.example.com/pages/1"
 
 
 def test_cause_found_with_a_missing_top_cause_is_an_error(cases_dir):

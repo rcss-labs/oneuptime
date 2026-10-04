@@ -1,9 +1,12 @@
 """Check what is published for secrets, prepare the Confluence request and the Slack message, and record what was published."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -34,19 +37,59 @@ def _one_line(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text).strip()
 
 
-def _read_text(path: Path) -> str:
+def _read_regular(path: Path) -> bytes | None:
+    """Read a regular file without following a link; None when it does not exist.
+
+    The checks run on the open descriptor, so a swap after the open cannot change what is read.
+    """
     try:
-        return path.read_bytes().decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise PublishError(f"{path.name}: not valid UTF-8 ({error.reason})") from error
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.EMLINK):
+            raise PublishError(f"{path.name}: is a symbolic link; use a regular file inside the run folder") from error
+        raise PublishError(f"{path.name}: {error.strerror or error}") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise PublishError(f"{path.name}: is not a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            return handle.read()
     except OSError as error:
         raise PublishError(f"{path.name}: {error.strerror or error}") from error
+    finally:
+        os.close(descriptor)
+
+
+def _read_text(path: Path) -> str:
+    data = _read_regular(path)
+    if data is None:
+        raise PublishError(f"{path.name}: file not found")
+    return _decode(path.name, data)
+
+
+def _write_text(path: Path, text: str) -> None:
+    """Write a file in the run folder; a symbolic link or a non-regular file is refused, never followed."""
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.EMLINK):
+            raise PublishError(f"{path.name}: is a symbolic link; it is not written through") from error
+        raise PublishError(f"{path.name}: {error.strerror or error}") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise PublishError(f"{path.name}: is not a regular file")
+        os.ftruncate(descriptor, 0)
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
+            handle.write(text)
+    except OSError as error:
+        raise PublishError(f"{path.name}: {error.strerror or error}") from error
+    finally:
+        os.close(descriptor)
 
 
 def _read_json(case_dir: Path, name: str) -> dict:
     path = case_dir / name
-    if not path.is_file():
-        raise PublishError(f"{name}: file not found in {case_dir}")
     try:
         data = json.loads(_read_text(path))
     except json.JSONDecodeError as error:
@@ -59,8 +102,6 @@ def _read_json(case_dir: Path, name: str) -> dict:
 def _load_case_file(run_dir: Path) -> dict:
     """case.json of one run; PublishError names the file when it is missing or damaged."""
     path = run_dir / "case.json"
-    if not path.is_file():
-        raise PublishError(f"{path}: file not found")
     try:
         data = json.loads(_read_text(path))
     except json.JSONDecodeError as error:
@@ -74,17 +115,7 @@ def _load_case_file(run_dir: Path) -> dict:
 
 def _regular_file_bytes(case_dir: Path, name: str) -> bytes | None:
     """The bytes of a published file, None when absent; a link or a non-regular file is refused."""
-    path = case_dir / name
-    if path.is_symlink():
-        raise PublishError(f"{name}: is a symbolic link; publish a regular file inside the run folder")
-    if not path.exists():
-        return None
-    if not path.is_file():
-        raise PublishError(f"{name}: is not a regular file")
-    try:
-        return path.read_bytes()
-    except OSError as error:
-        raise PublishError(f"{name}: {error.strerror or error}") from error
+    return _read_regular(case_dir / name)
 
 
 def _decode(name: str, data: bytes) -> str:
@@ -111,7 +142,7 @@ def _audit(case_dir: Path, title: str | None = None) -> dict:
         for hit in audit_text(title):
             hits.append({"file": "title", "line": hit.line, "column": hit.column, "category": hit.category})
     result = {"clean": not hits, "checked": checked, "hits": hits, "sha256": digests}
-    (case_dir / "audit.json").write_text(json.dumps(result, indent=2) + "\n")
+    _write_text(case_dir / "audit.json", json.dumps(result, indent=2) + "\n")
     return result
 
 
@@ -234,14 +265,13 @@ def slack_message(case_dir: Path, confluence_url: str | None) -> str:
         for index, action in enumerate(actions, start=1):
             where = f"action {action.get('id') or index}"
             lines.append(f"- {safe(_field(action, 'title', where))} ({safe(_field(action, 'label', where))})")
-    if not confluence_url:
-        footer = NO_LINK_LINE
-    elif len(confluence_url) > SLACK_LINK_LIMIT:
-        footer = LINK_TOO_LONG_LINE
-    else:
+    footer = NO_LINK_LINE
+    if confluence_url:
         footer = "Full report: " + safe(confluence_url)
+        if len(footer) > SLACK_LINK_LIMIT:
+            footer = LINK_TOO_LONG_LINE
     text = _cap("\n".join(lines), SLACK_LIMIT - len(footer) - 1) + "\n" + footer
-    (case_dir / "slack-message.md").write_text(text)
+    _write_text(case_dir / "slack-message.md", text)
     return text
 
 
