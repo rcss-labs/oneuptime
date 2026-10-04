@@ -78,6 +78,16 @@ def _action_text(rule: dict) -> str:
     return "no action"
 
 
+def _cannot_block_text(name: str, default: str, rules: list[dict]) -> str:
+    if default == "block":
+        return f"The default action of web ACL {name} is block, but it has no metric name, so it was not sampled"
+    if any({"Captcha", "Challenge"} & set(rule.get("Action") or {}) for rule in rules):
+        return (
+            f"No rule in web ACL {name} blocks outright, but CAPTCHA or Challenge rules exist and can stop API clients"
+        )
+    return f"Nothing in web ACL {name} blocks: no rule or rule group can block and the default action is {default}"
+
+
 def _add_web_acl(ctx: CollectContext, arn: str, now: datetime) -> None:
     parts = _acl_parts(arn)
     if parts is None:
@@ -103,27 +113,27 @@ def _add_web_acl(ctx: CollectContext, arn: str, now: datetime) -> None:
     # Sampling by a rule's own metric name is the only way to know which rule blocked a request.
     # A rule group with no override applies its own actions, so it can block too.
     blockers = []
-    for rule in rules:
+    for rule in sorted(rules, key=lambda r: r.get("Priority", 0)):
         metric = rule.get("VisibilityConfig", {}).get("MetricName")
         if "Block" in (rule.get("Action") or {}):
-            blockers.append((f"rule {rule.get('Name')}", metric, False))
+            blockers.append((f"rule {rule.get('Name')}", metric, "rule"))
         elif "None" in (rule.get("OverrideAction") or {}):
-            blockers.append((f"rule group {rule.get('Name')}", metric, True))
+            blockers.append((f"rule group {rule.get('Name')}", metric, "group"))
     sampled_blockers = blockers[:MAX_BLOCKING_RULES]
-    if len(blockers) > len(sampled_blockers):
+    left_out = len(blockers) - len(sampled_blockers)
+    if left_out:
+        subject = "more blocking rules or rule groups were" if left_out > 1 else "more blocking rule or rule group was"
         ctx.evidence.add(
             kind=DERIVED, resource=resource, command=ctx.last_command,
-            summary=f"{len(blockers) - len(sampled_blockers)} more blocking rules or rule groups were not sampled",
+            summary=f"{left_out} {subject} not sampled",
         )
     targets = list(sampled_blockers)
-    if default == "block":
-        targets.append(("the default action", acl.get("VisibilityConfig", {}).get("MetricName"), False))
+    acl_metric = acl.get("VisibilityConfig", {}).get("MetricName")
+    if default == "block" and acl_metric:
+        targets.append(("the web ACL's own metric", acl_metric, "acl"))
     targets = [target for target in targets if target[1]]
     if not targets:
-        ctx.evidence.add(
-            kind=DERIVED, resource=resource, command=ctx.last_command,
-            summary=f"Nothing in web ACL {name} blocks: no rule or rule group can block and the default action is {default}",
-        )
+        ctx.evidence.add(kind=DERIVED, resource=resource, command=ctx.last_command, summary=_cannot_block_text(name, default, rules))
         return
     if now - ctx.window.end > SAMPLING_HORIZON:
         ctx.evidence.add(
@@ -134,12 +144,12 @@ def _add_web_acl(ctx: CollectContext, arn: str, now: datetime) -> None:
             ),
         )
         return
-    for label, metric, is_group in targets:
-        _add_blocked_requests(ctx, resource, arn, scope, region, metric, label, is_group)
+    for label, metric, kind in targets:
+        _add_blocked_requests(ctx, resource, arn, scope, region, metric, label, kind)
 
 
 def _add_blocked_requests(
-    ctx: CollectContext, resource: str, arn: str, scope: str, region: str, metric: str, label: str, is_group: bool
+    ctx: CollectContext, resource: str, arn: str, scope: str, region: str, metric: str, label: str, kind: str
 ) -> None:
     window = f"StartTime={format_time(ctx.window.start)},EndTime={format_time(ctx.window.end)}"
     reply = ctx.aws(
@@ -164,7 +174,14 @@ def _add_blocked_requests(
     for sampled in blocked[: int(MAX_SAMPLES)]:
         request = sampled.get("Request", {})
         inner = sampled.get("RuleNameWithinRuleGroup")
-        who = f"{label} (rule {inner})" if is_group and inner else label
+        if kind == "group" and inner:
+            who = f"{label} (rule {inner})"
+        elif kind == "acl":
+            # The ACL's own metric is not documented to return only default-action requests.
+            who = f"rule {inner}" if inner else "the default action"
+            who += " (sampled under the web ACL's own metric)"
+        else:
+            who = label
         # Only the path and country are read; headers and the client address are never copied.
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=resource, time=sampled.get("Timestamp"), command=ctx.last_command,
@@ -173,11 +190,7 @@ def _add_blocked_requests(
 
 
 def _resource_acl(ctx: CollectContext, resource_arn: str) -> str | None:
-    fields = resource_arn.split(":")
-    if len(fields) < 6 or fields[0] != "arn":
-        ctx.evidence.add_error("", "InvalidTarget", "resource_arn is not an ARN")
-        return None
-    region = fields[3] or ctx.region
+    region = resource_arn.split(":")[3] or ctx.region
     reply = ctx.aws("wafv2", "get-web-acl-for-resource", ["--resource-arn", resource_arn], region=region)
     if reply is None:
         return None
@@ -198,8 +211,21 @@ def _distribution_ids(targets: dict[str, str]) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+def _valid_resource_arn(ctx: CollectContext, resource_arn: str) -> bool:
+    fields = resource_arn.split(":", 5)
+    ok = len(fields) == 6 and fields[0] == "arn" and all(fields[1:3]) and bool(fields[5])
+    if ok and fields[2] == "cloudfront":
+        resource = fields[5].split("/")
+        ok = len(resource) == 2 and resource[0] == "distribution" and bool(resource[1])
+    if not ok:
+        ctx.evidence.add_error("", "InvalidTarget", "resource_arn is not a valid ARN")
+    return ok
+
+
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     now = ctx.now or datetime.now(timezone.utc)
+    if targets.get("resource_arn") and not _valid_resource_arn(ctx, targets["resource_arn"]):
+        targets = {key: value for key, value in targets.items() if key != "resource_arn"}
     arns = [targets["web_acl_arn"]] if targets.get("web_acl_arn") else []
     for distribution_id in _distribution_ids(targets):
         arns.append(_add_distribution(ctx, distribution_id))

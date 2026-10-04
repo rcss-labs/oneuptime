@@ -374,3 +374,47 @@ def test_a_malformed_resource_arn_is_a_target_error(config_data, tmp_path):
     ctx, aws, _ = run(config_data, tmp_path, answers_for(), {"resource_arn": "not-an-arn"})
     assert [e["code"] for e in ctx.evidence.errors] == ["InvalidTarget"]
     assert aws.calls == []
+
+
+def test_the_sampling_cap_follows_priority_not_list_order(config_data, tmp_path):
+    groups = [rule_group(f"g{n}", 10 + n) for n in range(5)]
+    late = block_rule("rate-first", 0)
+    acl = web_acl()
+    acl["WebACL"]["Rules"] = groups + [late]
+    _, aws, _ = run(config_data, tmp_path, answers_for(**{"wafv2 get-web-acl": acl}), {"web_acl_arn": GLOBAL_ACL})
+    metrics = [value_of(c, "--rule-metric-name") for c in aws.called("wafv2", "get-sampled-requests")]
+    assert metrics[0] == "m-rate-first" and "m-g4" not in metrics and len(metrics) == 5
+
+
+def test_one_unsampled_rule_is_not_pluralised(config_data, tmp_path):
+    acl = web_acl(extra_rules=[block_rule(f"r{n}", 10 + n) for n in range(5)])
+    ctx, _, _ = run(config_data, tmp_path, answers_for(**{"wafv2 get-web-acl": acl}), {"web_acl_arn": GLOBAL_ACL})
+    assert by_summary(ctx, "1 more blocking rule or rule group was not sampled")
+
+
+def test_captcha_and_challenge_rules_are_not_ruled_out(config_data, tmp_path):
+    acl = web_acl()
+    acl["WebACL"]["Rules"] = [{"Name": "bots", "Priority": 1, "Action": {"Challenge": {}},
+                               "VisibilityConfig": {"MetricName": "bots"}}]
+    ctx, _, _ = run(config_data, tmp_path, answers_for(**{"wafv2 get-web-acl": acl}), {"web_acl_arn": GLOBAL_ACL})
+    note = [f for f in ctx.evidence.facts if f.kind == "derived"][0]
+    assert "CAPTCHA or Challenge rules exist and can stop API clients" in note.summary
+    assert "Nothing in web ACL" not in note.summary
+
+
+def test_malformed_cloudfront_arns_are_target_errors_and_make_no_call(config_data, tmp_path):
+    for arn in ("x:cloudfront:y", f"arn:aws:cloudfront::{ACCOUNT}:", f"arn:aws:cloudfront::{ACCOUNT}:distribution/"):
+        ctx, aws, _ = run(config_data, tmp_path, answers_for(), {"resource_arn": arn})
+        assert [e["code"] for e in ctx.evidence.errors] == ["InvalidTarget"] and aws.calls == []
+
+
+def test_samples_under_the_acls_own_metric_are_not_blamed_on_the_default_action(config_data, tmp_path):
+    acl = web_acl(default="Block")
+    by_metric = {"edge-acl-metric": sampled([sample(uri="/a", inner="GroupRule"), sample(uri="/b")]),
+                 "rate": sampled([])}
+    ctx, _, _ = run(config_data, tmp_path, answers_for(**{"wafv2 get-web-acl": acl}), {"web_acl_arn": GLOBAL_ACL},
+                    by_metric=by_metric)
+    blocked = [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+    assert "sampled under the web ACL's own metric" in blocked[0].summary
+    assert "default action" not in blocked[0].summary and "GroupRule" in blocked[0].summary
+    assert "by the default action" in blocked[1].summary and "sampled under the web ACL's own metric" in blocked[1].summary
