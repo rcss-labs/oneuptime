@@ -5,6 +5,8 @@ import sys
 import pytest
 import yaml
 
+from pathlib import Path
+
 from conftest import SKILL_SRC
 
 COMMAND = SKILL_SRC / "scripts" / "map_suggest.py"
@@ -42,7 +44,14 @@ def make_case(skill_dir, tmp_path, discovery=DISCOVERY):
                          capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     case_dir = json.loads(out.stdout)["case_dir"]
-    if discovery is not None:
+    if discovery is not None and discovery["resources"].get("opensearch") == {"cluster": "logs-prod"}:
+        # case.py target refuses an OpenSearch resource without an index pattern; write the target as an old case.json held it.
+        path = Path(case_dir) / "case.json"
+        case = json.loads(path.read_text())
+        case["target"] = {"source": "discovered", "service": None, "environment": None, "account": discovery["account"],
+                          "region": discovery["region"], "resources": discovery["resources"], "depends_on": []}
+        path.write_text(json.dumps(case))
+    elif discovery is not None:
         found = tmp_path / "discovery.json"
         found.write_text(json.dumps(discovery))
         done = subprocess.run([sys.executable, str(case_script), "target", "--case-dir", case_dir,
@@ -70,7 +79,7 @@ def test_help_works():
 def test_propose_prints_the_block_and_changes_nothing(skill_dir, case_dir, map_file):
     result = run(skill_dir, "propose", "--case-dir", case_dir, "--service-name", "orders-api")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.startswith("  orders-api:\n")
+    assert result.stdout.startswith('  "orders-api":\n')
     assert yaml.safe_load("services:\n" + result.stdout)["services"]["orders-api"]["environments"]["prod"]
     assert map_file.read_text() == MAP_TEXT
     assert [p.name for p in map_file.parent.iterdir() if "service-map" in p.name] == ["service-map.yaml"]
@@ -108,7 +117,7 @@ def test_opensearch_without_an_index_pattern_exits_1_and_prints_the_block(skill_
     discovery = {**DISCOVERY, "resources": {"opensearch": {"cluster": "logs-prod"}}}
     case_dir = make_case(skill_dir, tmp_path, discovery)
     result = run(skill_dir, "propose", "--case-dir", case_dir, "--service-name", "orders-api")
-    assert result.returncode == 1 and "index pattern" in result.stderr and "orders-api:" in result.stderr
+    assert result.returncode == 1 and "index pattern" in result.stderr and '"orders-api":' in result.stderr
 
 
 def test_a_missing_case_exits_2(skill_dir, tmp_path):
@@ -125,3 +134,19 @@ def test_a_missing_config_exits_2(tmp_path, case_dir):
 
 def test_a_missing_service_name_is_a_usage_error(skill_dir, case_dir):
     assert run(skill_dir, "propose", "--case-dir", case_dir).returncode == 2
+
+
+def test_a_lock_file_makes_apply_exit_1_and_changes_nothing(skill_dir, case_dir, map_file):
+    lock = map_file.with_name("service-map.yaml.lock")
+    lock.write_text("")
+    result = run(skill_dir, "apply", "--case-dir", case_dir, "--service-name", "orders-api")
+    assert result.returncode == 1 and "another run is applying" in result.stderr
+    assert map_file.read_text() == MAP_TEXT and lock.exists()
+
+
+def test_apply_without_a_map_file_creates_it(skill_dir, case_dir, map_file):
+    map_file.unlink()
+    result = run(skill_dir, "apply", "--case-dir", case_dir, "--service-name", "orders-api")
+    assert result.returncode == 0, result.stderr
+    assert "orders-api" in yaml.safe_load(map_file.read_text())["services"]
+    assert not list(map_file.parent.glob("*.lock"))

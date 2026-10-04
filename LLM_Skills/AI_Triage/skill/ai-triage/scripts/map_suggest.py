@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
             print(result["yaml"], end="")
         else:
             backup = apply(args.case_dir, config, map_path, args.service_name, args.environment, now.date(), now)
-            print(f"added {args.service_name} to {map_path}\nbackup: {backup}")
+            print(f"added {args.service_name} to {map_path}\nbackup: {backup or 'none (the map file did not exist)'}")
         return 0
     except SuggestError as error:
         print(error, file=sys.stderr)
