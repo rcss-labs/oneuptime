@@ -620,11 +620,17 @@ def validate_work_order(work_order: Any) -> list[str]:
 # --- evidence coverage --------------------------------------------------------------------
 
 TRUNCATED_CODE = "truncated"
+UNREADABLE_CODE = "unreadable"
 
 
 def coverage_from_evidence(case_dir: Path) -> list[dict]:
     """Evidence errors grouped by code, then files marked truncated, as [{"code", "entries"}] sorted by code."""
     groups: dict[str, list[dict]] = {}
+    readable = {name for name, _ in evidence_documents(case_dir)}
+    for path in sorted((case_dir / "evidence").glob("*.json")):
+        if path.name not in readable:
+            groups.setdefault(UNREADABLE_CODE, []).append(
+                {"file": path.name, "command": "", "message": "the file could not be read as an evidence document; its facts are missing"})
     for file_name, document in evidence_documents(case_dir):
         for error in document.get("errors") or []:
             if isinstance(error, dict):
@@ -645,6 +651,29 @@ def _inline(value: Any) -> str:
 
 def _cell(value: Any) -> str:
     return _inline(value).replace("|", "\\|")
+
+
+def _read_checked(case: dict) -> dict:
+    try:
+        checked = json.loads((Path(case["case_dir"]) / "findings" / "checked.json").read_text())
+    except (OSError, ValueError, KeyError):
+        return {}
+    return checked if isinstance(checked, dict) else {}
+
+
+def _checks_recorded(checked: dict) -> list[str]:
+    """One line per analyst that recorded what it checked."""
+    recorded = checked.get("checked") if isinstance(checked.get("checked"), dict) else {}
+    return [f"{_inline(analyst)}: {'; '.join(_inline(item) for item in items)}"
+            for analyst, items in sorted(recorded.items()) if isinstance(items, list) and items]
+
+
+def _none(checked: dict) -> list[str]:
+    """The text of an empty section: what the analysts recorded as checked, or that nothing was recorded."""
+    lines = _checks_recorded(checked)
+    if not lines:
+        return ["None. No checks were recorded."]
+    return ["None. Checks recorded by the analysts:", ""] + [f"- {line}" for line in lines]
 
 
 def _bullets(items: list[str]) -> list[str]:
@@ -697,10 +726,10 @@ def _finding_verdict_lines(finding_id: str, summary: dict | None) -> list[str]:
     return [_field("TypeSafe verdict", f"{entry.get('verdict', '-')} ({detail})" if detail else entry.get("verdict"))]
 
 
-def _render_findings(findings: dict[str, dict], facts: dict[str, dict], summary: dict | None) -> list[str]:
+def _render_findings(findings: dict[str, dict], facts: dict[str, dict], summary: dict | None, checked: dict) -> list[str]:
     lines = ["## 4. Findings", ""]
     if not findings:
-        return lines + ["None."]
+        return lines + _none(checked)
     by_analyst: dict[str, list[dict]] = {}
     for finding in findings.values():
         by_analyst.setdefault(finding.get("analyst", "unknown"), []).append(finding)
@@ -720,7 +749,11 @@ def _render_findings(findings: dict[str, dict], facts: dict[str, dict], summary:
                              f"time {fact.get('time') or '-'}, excerpt: {_inline(fact.get('excerpt') or fact.get('summary') or '-')}")
             lines.append("")
         lines.pop()
+    checks = _checks_recorded(checked)
+    if checks:
+        lines += ["", "**Checks recorded by the analysts**", ""] + [f"- {line}" for line in checks]
     return lines
+
 
 
 def _hypothesis_table(hypotheses: list[dict]) -> list[str]:
@@ -754,10 +787,10 @@ def _judgment_lines(cause_id: str, summary: dict | None) -> list[str]:
     return lines
 
 
-def _render_causes(report: dict, summary: dict | None) -> list[str]:
+def _render_causes(report: dict, summary: dict | None, checked: dict) -> list[str]:
     lines = ["## 5. Ranked causes", ""]
     if not report["causes"]:
-        return lines + ["None."]
+        return lines + _none(checked)
     for rank, cause in enumerate(report["causes"], 1):
         tested = [h for h in report["hypotheses"] if h.get("cause") == cause["id"]]
         lines += [f"### {rank}. {_inline(cause['id'])} ({_inline(cause['label'])}): {_inline(cause['statement'])}", "",
@@ -801,11 +834,11 @@ def _render_action(action: dict, summary: dict | None) -> list[str]:
     return lines
 
 
-def _render_actions(report: dict, summary: dict | None) -> list[str]:
+def _render_actions(report: dict, summary: dict | None, checked: dict) -> list[str]:
     lines = ["## 6. Remediation work order", ""]
     ordered = [a for kind in ACTION_TYPES for a in report["actions"] if a["type"] == kind]
     if not ordered:
-        return lines + ["None."]
+        return lines + _none(checked)
     for action in ordered:
         lines += _render_action(action, summary) + [""]
     return lines[:-1]
@@ -830,7 +863,7 @@ def _typesafe_line(report: dict, summary: dict | None) -> str:
 
 
 def _render_coverage(report: dict, case: dict, evidence_gaps: list[dict], summary: dict | None,
-                     adhoc: list[dict]) -> list[str]:
+                     adhoc: list[dict], checked: dict) -> list[str]:
     lines = ["## 7. Coverage notes", "", "**Not checked**", ""]
     lines += _bullets([f"{e['what']}: {e['why']}" for e in report["coverage"]["not_checked"]])
     lines += ["", "**Evidence errors**", ""]
@@ -845,13 +878,17 @@ def _render_coverage(report: dict, case: dict, evidence_gaps: list[dict], summar
     lines += ["", "**Rejected findings**", ""]
     lines += _bullets([f"{r.get('analyst', '?')} {r.get('id')}: {'; '.join(map(str, r.get('reasons', [])))}"
                        for r in _rejected_findings(case)])
+    lines += ["", "**Finding files that could not be read**", ""]
+    lines += _bullets([f"{u.get('file')}: {u.get('reason')}" for u in checked.get("unreadable") or [] if isinstance(u, dict)])
+    lines += ["", "**Notes from the finding check**", ""]
+    lines += _bullets([str(note) for note in checked.get("warnings") or []])
     lines += ["", "**Open questions**", ""] + _bullets(report["open_questions"])
     return lines
 
 
-def _render_map_changes(report: dict) -> list[str]:
+def _render_map_changes(report: dict, checked: dict) -> list[str]:
     changes = [item if isinstance(item, str) else json.dumps(item, sort_keys=True) for item in report["map_changes"]]
-    return ["## 8. Proposed service map changes", ""] + _bullets(changes)
+    return ["## 8. Proposed service map changes", ""] + (_bullets(changes) if changes else _none(checked))
 
 
 def _render_run(report: dict, case: dict, now: datetime) -> list[str]:
@@ -871,16 +908,17 @@ def render_report(report: dict, case: dict, findings: dict[str, dict], timeline_
     raw_summary, _ = load_summary(case)
     summary = _judged(raw_summary)
     adhoc = (raw_summary or {}).get("adhoc") or []
+    checked = _read_checked(case)
     blocks = [
         [f"{REQUIRED_HEADINGS[0]} {_inline(incident['number'])} {_inline(incident['title'])}"],
         _render_summary(report),
         _render_incident(case),
-        ["## 3. Timeline", "", render_rows(timeline_rows) if timeline_rows else "None."],
-        _render_findings(findings, facts, summary),
-        _render_causes(report, summary),
-        _render_actions(report, summary),
-        _render_coverage(report, case, evidence_gaps, summary, adhoc),
-        _render_map_changes(report),
+        ["## 3. Timeline", "", render_rows(timeline_rows) if timeline_rows else "\n".join(_none(checked))],
+        _render_findings(findings, facts, summary, checked),
+        _render_causes(report, summary, checked),
+        _render_actions(report, summary, checked),
+        _render_coverage(report, case, evidence_gaps, summary, adhoc, checked),
+        _render_map_changes(report, checked),
         _render_run(report, case, now),
     ]
     text = "\n\n".join("\n".join(block) for block in blocks) + "\n"

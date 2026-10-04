@@ -719,16 +719,16 @@ def test_empty_sections_say_none(case_dir, case):
         report["status"] = "unresolved"
         report["summary"]["top_cause"] = None
     text = render(mutated(VALID_REPORT, empty), case_dir, case)
-    assert section(text, "## 5. Ranked causes").strip() == "None."
-    assert section(text, "## 6. Remediation work order").strip() == "None."
-    assert section(text, "## 8. Proposed service map changes").strip() == "None."
+    assert section(text, "## 5. Ranked causes").strip().startswith("None.")
+    assert section(text, "## 6. Remediation work order").strip().startswith("None.")
+    assert section(text, "## 8. Proposed service map changes").strip().startswith("None.")
     assert "None." in section(text, "## 7. Coverage notes")
 
 
 def test_findings_section_says_none_when_no_valid_findings(tmp_path, case):
     text = render_report(UNRESOLVED_REPORT, {**case, "case_dir": str(tmp_path)}, {}, [], [], RENDERED_AT)
-    assert section(text, "## 4. Findings").strip() == "None."
-    assert section(text, "## 3. Timeline").strip() == "None."
+    assert section(text, "## 4. Findings").strip().startswith("None.")
+    assert section(text, "## 3. Timeline").strip().startswith("None.")
 
 
 def test_map_changes_are_listed(case_dir, case):
@@ -1240,3 +1240,60 @@ def skill_dir(tmp_path, config_data):
     (root / "config").mkdir(parents=True)
     (root / "config" / "triage-config.yaml").write_text(yaml.safe_dump(config_data))
     return root
+
+
+# what was checked, and unreadable inputs
+
+def write_checked(case_dir, **changes):
+    path = case_dir / "findings" / "checked.json"
+    checked = json.loads(path.read_text())
+    checked.update(changes)
+    path.write_text(json.dumps(checked))
+
+
+def empty_report(report):
+    report["causes"], report["hypotheses"], report["actions"], report["map_changes"] = [], [], [], []
+    report["status"], report["summary"]["top_cause"] = "unresolved", None
+
+
+def test_empty_sections_say_what_the_analysts_checked(case_dir, case):
+    write_checked(case_dir, checked={"compute": ["ECS service events", "stopped tasks"], "edge": ["Load balancer health"]})
+    text = render(mutated(VALID_REPORT, empty_report), case_dir, case)
+    for heading in ("## 5. Ranked causes", "## 6. Remediation work order", "## 8. Proposed service map changes"):
+        body = section(text, heading)
+        assert "ECS service events; stopped tasks" in body and "Load balancer health" in body, heading
+        assert "compute" in body and "edge" in body
+
+
+def test_empty_findings_say_what_was_checked(case_dir, case):
+    write_checked(case_dir, valid=[], checked={"compute": ["ECS service events"]})
+    findings = section(render_report(UNRESOLVED_REPORT, case, {}, build_timeline(case_dir), [], RENDERED_AT), "## 4. Findings")
+    assert findings.strip().startswith("None.") and "ECS service events" in findings
+
+
+def test_none_alone_says_that_nothing_was_recorded(case_dir, case):
+    write_checked(case_dir, checked={})
+    text = render(mutated(VALID_REPORT, empty_report), case_dir, case)
+    assert "None. No checks were recorded." in section(text, "## 5. Ranked causes")
+    assert "None. No checks were recorded." in section(text, "## 8. Proposed service map changes")
+
+
+def test_an_unreadable_evidence_file_is_a_coverage_gap(case_dir, case):
+    (case_dir / "evidence" / "rds-prod-main-eu-west-1.json").write_text("{broken")
+    gaps = coverage_from_evidence(case_dir)
+    unreadable = next(gap for gap in gaps if gap["code"] == "unreadable")
+    assert [entry["file"] for entry in unreadable["entries"]] == ["rds-prod-main-eu-west-1.json"]
+    assert "rds-prod-main-eu-west-1.json" in section(render(VALID_REPORT, case_dir, case), "## 7. Coverage notes")
+
+
+def test_unreadable_finding_files_and_check_warnings_are_listed(case_dir, case):
+    write_checked(case_dir, unreadable=[{"file": "findings/network.json", "reason": "not valid JSON"}],
+                  warnings=["a fact in x.json has no text id and was skipped"])
+    coverage = section(render(VALID_REPORT, case_dir, case), "## 7. Coverage notes")
+    assert "findings/network.json" in coverage and "not valid JSON" in coverage
+    assert "a fact in x.json has no text id and was skipped" in coverage
+
+
+def test_the_findings_section_shows_the_checks_next_to_the_findings(case_dir, case):
+    write_checked(case_dir, checked={"compute": ["ECS service events"]})
+    assert "ECS service events" in section(render(VALID_REPORT, case_dir, case), "## 4. Findings")
