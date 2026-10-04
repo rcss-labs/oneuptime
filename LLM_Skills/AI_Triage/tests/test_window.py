@@ -185,3 +185,41 @@ def test_max_hours_below_one_is_rejected(max_hours):
 def test_format_time_rejects_naive_datetime():
     with pytest.raises(WindowError):
         format_time(datetime(2026, 10, 4, 10))
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("2026-10-04T10:00:00.000+0000", at(10)),
+        ("2026-10-04T10:00:00+00:00", at(10)),
+        ("2026-10-04T10:00:00Z", at(10)),
+        ("2026-10-04T10:00:00+0530", at(4, 30)),
+        ("2026-10-04T10:00:00-0700", at(17)),
+        ("2026-10-04T10:00:00-07:00", at(17)),
+        ("2026-10-04T10:00:00+02", at(8)),
+        ("2026-10-04T10:00:00.1Z", at(10) + timedelta(milliseconds=100)),
+        ("2026-10-04T10:00:00.123456789Z", at(10) + timedelta(microseconds=123456)),
+        ("2026-10-04T10:00:00.000000001Z", at(10)),
+    ],
+)
+def test_parse_time_accepts_offset_forms_and_fraction_lengths(text, expected):
+    assert parse_time(text) == expected
+    assert parse_time(text).utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize("text", ["2026-10-04T10:00:00.000", "2026-10-04T10:00", "2026-10-04"])
+def test_parse_time_still_rejects_zoneless_times(text):
+    with pytest.raises(WindowError):
+        parse_time(text)
+
+
+def test_parse_time_does_not_depend_on_newer_fromisoformat(monkeypatch):
+    class Boom(datetime):
+        @classmethod
+        def fromisoformat(cls, text):
+            raise AssertionError("fromisoformat must not be used")
+
+    import triage.window as window_module
+
+    monkeypatch.setattr(window_module, "datetime", Boom)
+    assert parse_time("2026-10-04T10:00:00.5+0000") == at(10) + timedelta(milliseconds=500)

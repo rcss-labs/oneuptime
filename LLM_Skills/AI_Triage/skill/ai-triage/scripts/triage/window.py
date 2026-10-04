@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 SAME_TIME_SECONDS = 30
-_FRACTION_RE = re.compile(r"\.(\d+)")
+_TIME_RE = re.compile(
+    r"^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})[T ](?P<hour>\d{2}):(?P<minute>\d{2})"
+    r"(?::(?P<second>\d{2})(?:\.(?P<fraction>\d{1,9}))?)?"
+    r"(?P<zone>[Zz]|[+-]\d{2}(?::?\d{2})?)?$"
+)
 
 
 class WindowError(ValueError):
@@ -39,21 +43,34 @@ class Window:
 
 
 def parse_time(text: str) -> datetime:
-    """Parse ISO 8601 with Z or a numeric offset into an aware UTC datetime."""
+    """Parse ISO 8601 with Z or a numeric offset into an aware UTC datetime.
+
+    Parsed by hand so the result does not depend on the Python version's fromisoformat.
+    """
     if not isinstance(text, str) or not text.strip():
         raise WindowError(f"cannot parse time: {text!r}")
-    cleaned = text.strip()
-    if cleaned[-1] in "zZ":
-        cleaned = cleaned[:-1] + "+00:00"
-    # fromisoformat only takes 3 or 6 fractional digits on older Pythons.
-    cleaned = _FRACTION_RE.sub(lambda m: "." + m.group(1)[:6].ljust(6, "0"), cleaned, count=1)
+    match = _TIME_RE.match(text.strip())
+    if not match:
+        raise WindowError(f"cannot parse time: {text}")
+    if match.group("zone") is None:
+        raise WindowError(f"time must include a timezone: {text}")
+    year, month, day, hour, minute = (int(match.group(name)) for name in ("year", "month", "day", "hour", "minute"))
+    second = int(match.group("second") or 0)
+    microsecond = int((match.group("fraction") or "").ljust(6, "0")[:6] or 0)
     try:
-        parsed = datetime.fromisoformat(cleaned)
+        moment = datetime(year, month, day, hour, minute, second, microsecond, tzinfo=_zone(match.group("zone")))
     except ValueError as error:
         raise WindowError(f"cannot parse time: {text}") from error
-    if parsed.tzinfo is None:
-        raise WindowError(f"time must include a timezone: {text}")
-    return parsed.astimezone(timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+def _zone(zone: str) -> timezone:
+    if zone in ("Z", "z"):
+        return timezone.utc
+    sign = -1 if zone[0] == "-" else 1
+    digits = zone[1:].replace(":", "")
+    offset = timedelta(hours=int(digits[:2]), minutes=int(digits[2:4] or 0))
+    return timezone(sign * offset)
 
 
 def _require_aware(moment: datetime, label: str) -> None:

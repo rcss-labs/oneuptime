@@ -453,13 +453,13 @@ def test_secret_key_component_matching(key, expected):
 
 
 def test_value_redacts_everything_under_a_secret_key():
-    obj = {"password": [PW], "secrets": {"x": PW}, "api_keys": [PW], "pin": {"password": {"n": 1234}}}
+    obj = {"password": [PW], "secrets": {"x": PW}, "api_keys": [PW], "pin": {"password": [1234]}}
     out = Redactor().value(obj)
     assert out == {
         "password": ["<SECRET-1>"],
         "secrets": {"x": "<SECRET-1>"},
         "api_keys": ["<SECRET-1>"],
-        "pin": {"password": {"n": "<SECRET-2>"}},
+        "pin": {"password": ["<SECRET-2>"]},
     }
 
 
@@ -503,3 +503,259 @@ def test_value_keeps_reference_style_keys_even_inside_a_secret_dict():
     obj = {"MasterUserSecret": {"SecretArn": secret_arn, "SecretStatus": "active", "Token": PW}}
     out = Redactor().value(obj)
     assert out == {"MasterUserSecret": {"SecretArn": secret_arn, "SecretStatus": "active", "Token": "<SECRET-1>"}}
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2: regression, name/value text, key rule, URL boundary, speed, over-redaction
+# ---------------------------------------------------------------------------
+import json
+import time
+
+import triage.redact as redact_module
+
+B64 = "dXNlcjpw" + "YXNzd29yZA=="
+OPENAI = "sk" + "-proj-" + "abcdefghijklmnop1234"
+ANTHROPIC = "sk" + "-ant-" + "abcdefghijklmnop1234"
+SK_PLAIN = "sk" + "-" + "abcdefghijklmnop1234"
+
+
+def test_authorization_dict_keys_keep_scheme_and_redact_token():
+    obj = {"headers": {
+        "Authorization": "Basic " + B64,
+        "authorization": "Token " + PW,
+        "Proxy-Authorization": "Basic " + B64,
+    }}
+    out = Redactor().value(obj)
+    assert out == {"headers": {
+        "Authorization": "Basic <SECRET-1>",
+        "authorization": "Token <SECRET-2>",
+        "Proxy-Authorization": "Basic <SECRET-1>",
+    }}
+
+
+def test_authorization_name_value_entry_keeps_scheme():
+    out = Redactor().value([{"name": "Authorization", "value": "Basic " + B64}])
+    assert out == [{"name": "Authorization", "value": "Basic <SECRET-1>"}]
+
+
+def test_authorization_text_proxy_header():
+    assert Redactor().text("Proxy-Authorization: Basic " + B64) == "Proxy-Authorization: Basic <SECRET-1>"
+
+
+NAME_VALUE_TEXT_CASES = [
+    ("json-name-value", '{"name":"DB_PASSWORD","value":"' + PW + '"}', '{"name":"DB_PASSWORD","value":"<SECRET-1>"}'),
+    ("json-key-value", '{"Key":"db_password","Value":"' + PW + '"}', '{"Key":"db_password","Value":"<SECRET-1>"}'),
+    (
+        "json-parameter",
+        '{"ParameterKey":"DBPassword","ParameterValue":"' + PW + '"}',
+        '{"ParameterKey":"DBPassword","ParameterValue":"<SECRET-1>"}',
+    ),
+    (
+        "json-in-env-list",
+        '{"env":[{"name":"HOME","value":"/root"},{"name":"DB_PASSWORD","value":"' + PW + '"}]}',
+        '{"env":[{"name":"HOME","value":"/root"},{"name":"DB_PASSWORD","value":"<SECRET-1>"}]}',
+    ),
+    (
+        "escaped-json",
+        '{\\"name\\":\\"DB_PASSWORD\\",\\"value\\":\\"' + PW + '\\"}',
+        '{\\"name\\":\\"DB_PASSWORD\\",\\"value\\":\\"<SECRET-1>\\"}',
+    ),
+    ("yaml", f"- name: DB_PASSWORD\n  value: {PW}\n- name: HOME\n  value: /root", "- name: DB_PASSWORD\n  value: <SECRET-1>\n- name: HOME\n  value: /root"),
+    ("yaml-quoted", f"  - name: \"API_TOKEN\"\n    value: \"{PW}\"", "  - name: \"API_TOKEN\"\n    value: \"<SECRET-1>\""),
+]
+
+
+@pytest.mark.parametrize("name, source, expected", NAME_VALUE_TEXT_CASES, ids=[c[0] for c in NAME_VALUE_TEXT_CASES])
+def test_text_redacts_value_following_a_secret_name(name, source, expected):
+    assert Redactor().text(source) == expected
+    assert audit_text(source) != []
+    assert audit_text(expected) == []
+
+
+def test_text_keeps_name_value_pair_with_ordinary_name_and_value_from():
+    source = '{"name":"HOME","value":"/root"} {"name":"DB_PASSWORD","valueFrom":{"x":"y"}}'
+    assert Redactor().text(source) == source
+
+
+def test_value_parses_json_strings_and_redacts_structurally():
+    annotation = json.dumps({"spec": {"env": [{"name": "DB_PASSWORD", "value": PW}, {"name": "A", "value": "b"}]}})
+    out = Redactor().value({"metadata": {"annotations": {"last-applied": annotation}}})
+    parsed = json.loads(out["metadata"]["annotations"]["last-applied"])
+    assert parsed == {"spec": {"env": [{"name": "DB_PASSWORD", "value": "<SECRET-1>"}, {"name": "A", "value": "b"}]}}
+    assert PW not in repr(out)
+    assert ", " not in out["metadata"]["annotations"]["last-applied"]
+
+
+def test_value_json_array_string_and_non_json_string():
+    redactor = Redactor()
+    assert json.loads(redactor.value('[{"password": "' + PW + '"}]')) == [{"password": "<SECRET-1>"}]
+    assert redactor.value("[ERROR] contact a@example.com") == "[ERROR] contact <EMAIL-1>"
+    assert redactor.value("{not json} a@example.com") == "{not json} <EMAIL-1>"
+
+
+@pytest.mark.parametrize(
+    "key, expected",
+    [
+        ("secretkey", True), ("SECRETKEY", True), ("accesstoken", True), ("apitoken", True),
+        ("authtoken", True), ("clientsecret", True), ("jwtsecret", True), ("accesskey", True),
+        ("privatekey", True), ("OPENAI_KEY", True), ("STRIPE_KEY", True), ("consumer_key", True),
+        ("app_key", True), ("hmac_key", True), ("jwt_key", True), ("Authorization", True),
+        ("Proxy-Authorization", True), ("key", False), ("Key", False),
+        ("partition_key", False), ("sort_key", False), ("s3_key", False), ("routing_key", False),
+        ("cache_key", False), ("kms_key", False), ("primary_key", False), ("foreign_key", False),
+        ("idempotency_key", False), ("object_key", False), ("hash_key", False), ("shard_key", False),
+        ("range_key", False), ("dedup_key", False), ("group_key", False), ("row_key", False),
+        ("public_key", False), ("index_key", False), ("tag_key", False), ("metric_key", False),
+        ("map_key", False), ("lookup_key", False),
+        ("PasswordLastUsed", False), ("MaxPasswordAge", False), ("PasswordReusePrevention", False),
+        ("Expiration", False), ("SecretVersionsToStages", False), ("AccessTokenValidity", False),
+        ("ExplicitAuthFlows", False), ("defaultMode", False), ("expirationSeconds", False),
+        ("TOKEN_TTL", False), ("AUTH_MODE", False), ("password_file", False), ("token_timeout", False),
+        ("token_date", False), ("auth_required", False), ("token_units", False), ("secret_days", False),
+    ],
+)
+def test_key_rule_round_two(key, expected):
+    from triage.redact import looks_secret_key
+
+    assert looks_secret_key(key) is expected
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (f"secretkey={PW}", "secretkey=<SECRET-1>"),
+        (f"SECRETKEY: {PW}", "SECRETKEY: <SECRET-1>"),
+        (f"OPENAI_KEY={OPENAI}", "OPENAI_KEY=<SECRET-1>"),
+        (f"used {OPENAI} here", "used <SECRET-1> here"),
+        (f"used {ANTHROPIC} here", "used <SECRET-1> here"),
+        (f"used {SK_PLAIN} here", "used <SECRET-1> here"),
+    ],
+)
+def test_key_rule_and_vendor_prefixes_in_text(source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    assert audit_text(source) != [] and audit_text(out) == []
+
+
+def test_short_sk_words_are_kept():
+    assert Redactor().text("task-queue disk-usage sk-short") == "task-queue disk-usage sk-short"
+
+
+def test_comma_separated_url_and_email_not_hidden():
+    out = Redactor().text("ref=https://example.com,owner=carol@example.com")
+    assert out == "ref=https://example.com,owner=<EMAIL-1>"
+
+
+def test_json_with_url_and_email_fields_keeps_structure():
+    source = '{"endpoint":"https://h.example.com:443","creds":"u:p","contact":"x@example.com"}'
+    assert Redactor().text(source) == '{"endpoint":"https://h.example.com:443","creds":"u:p","contact":"<EMAIL-1>"}'
+    source = '{"url":"https://api.example.com","email":"alice@example.com"}'
+    assert Redactor().text(source) == '{"url":"https://api.example.com","email":"<EMAIL-1>"}'
+
+
+def test_url_userinfo_email_without_password_is_kept_with_host():
+    assert Redactor().text("https://user@example.com/path") == "https://user@example.com/path"
+
+
+def test_over_redaction_of_settings_and_timestamps_in_value():
+    secret_arn = "arn:aws:secretsmanager:eu-west-1:111111111111:secret:db-AbCdEf"
+    obj = {
+        "PasswordLastUsed": "2026-10-01T10:00:00Z",
+        "PasswordPolicy": {"MaxPasswordAge": 90, "PasswordReusePrevention": 24},
+        "Credentials": {"Expiration": "2026-10-04T10:00:00Z", "SessionToken": PW},
+        "SecretVersionsToStages": {"v1": ["AWSCURRENT"]},
+        "AccessTokenValidity": 60,
+        "ExplicitAuthFlows": ["ALLOW_USER_SRP_AUTH"],
+        "secret": {"defaultMode": 420, "items": [{"key": "password", "path": "pw"}], "SecretArn": secret_arn},
+        "env": [{"name": "TOKEN_TTL", "value": "3600"}, {"name": "AUTH_MODE", "value": "oidc"}],
+        "sessionCredentialFromConsole": "true",
+        "password": None,
+        "api_token": False,
+    }
+    out = Redactor().value(obj)
+    assert out["PasswordLastUsed"] == "2026-10-01T10:00:00Z"
+    assert out["PasswordPolicy"] == {"MaxPasswordAge": 90, "PasswordReusePrevention": 24}
+    assert out["Credentials"] == {"Expiration": "2026-10-04T10:00:00Z", "SessionToken": "<SECRET-1>"}
+    assert out["SecretVersionsToStages"] == {"v1": ["AWSCURRENT"]}
+    assert out["AccessTokenValidity"] == 60
+    assert out["ExplicitAuthFlows"] == ["ALLOW_USER_SRP_AUTH"]
+    assert out["secret"]["defaultMode"] == 420
+    assert out["secret"]["items"] == [{"key": "password", "path": "pw"}]
+    assert out["secret"]["SecretArn"] == secret_arn
+    assert out["env"] == obj["env"]
+    assert out["sessionCredentialFromConsole"] == "true"
+    assert out["password"] is None and out["api_token"] is False
+
+
+def test_number_redacted_only_under_an_immediately_secret_key():
+    redactor = Redactor()
+    assert redactor.value({"password": 1234}) == {"password": "<SECRET-1>"}
+    assert redactor.value({"password": {"retries": 3}}) == {"password": {"retries": 3}}
+
+
+def test_text_over_redaction_fixes():
+    assert Redactor().text("run --password-file /run/secrets/db --token-file=/var/run/t") == (
+        "run --password-file /run/secrets/db --token-file=/var/run/t"
+    )
+    assert Redactor().text('{"password": null, "token": true}') == '{"password": null, "token": true}'
+    out = Redactor().text("error: auth_token: field required (type=value_error.missing)")
+    assert out == "error: auth_token: <SECRET-1> (type=value_error.missing)"
+    assert value_after_flag_kept()
+
+
+def value_after_flag_kept() -> bool:
+    return Redactor().value(["--password-file", "/run/secrets/db"]) == ["--password-file", "/run/secrets/db"]
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (f"app --db-password {PW}", "app --db-password <SECRET-1>"),
+        (f'sh -c "mysql --password {PW} -h db"', 'sh -c "mysql --password <SECRET-1> -h db"'),
+        (f"mysql --password '{PW}' -h db", "mysql --password '<SECRET-1>' -h db"),
+        (f"curl -u admin:{PW} https://api.example.com/x", "curl -u admin:<SECRET-1> https://api.example.com/x"),
+        (f"curl --user admin:{PW} https://api.example.com/x", "curl --user admin:<SECRET-1> https://api.example.com/x"),
+        (f"curl --proxy-user admin:{PW} https://api.example.com/x", "curl --proxy-user admin:<SECRET-1> https://api.example.com/x"),
+    ],
+)
+def test_secret_flags_inside_one_command_string(source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    assert audit_text(source) != [] and audit_text(out) == []
+
+
+def test_non_secret_flags_and_docker_user_are_kept():
+    source = "docker run -u 1000:1000 --user 1000:1000 --port 8080 --name web"
+    assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize("name", ["a", "b", "A", "bearer", "dots", "jwt", "lines", "json", "oneline", "yaml", "auth", "fields"])
+def test_text_and_audit_are_fast_on_hostile_and_realistic_500kb_inputs(name):
+    size = 500_000
+    shapes = {
+        "a": "a" * size,
+        "b": "b" * size,
+        "A": "A" * size,
+        "bearer": "Bearer " + "a" * size,
+        "dots": "a." * (size // 2),
+        "jwt": "eyJ" + "a." * (size // 2),
+        "lines": "2026-10-04T10:00:00Z INFO request handled in 12 ms path=/health host=api.example.com\n" * 5800,
+        "json": json.dumps([{"id": i, "msg": "ok", "host": "api.example.com"} for i in range(8000)], separators=(",", ":")),
+        "oneline": "word " * (size // 5),
+        "yaml": "password: x\n" * 41000,
+        "auth": "Authorization: " * 33000,
+        "fields": json.dumps([{"password": "x", "id": i} for i in range(8000)], separators=(",", ":")),
+    }
+    text = shapes[name]
+    started = time.perf_counter()
+    Redactor().text(text)
+    text_seconds = time.perf_counter() - started
+    started = time.perf_counter()
+    audit_text(text)
+    audit_seconds = time.perf_counter() - started
+    assert text_seconds < 2, f"text() took {text_seconds:.2f}s"
+    assert audit_seconds < 2, f"audit_text() took {audit_seconds:.2f}s"
+
+
+def test_audit_docstring_says_secrets_only():
+    assert "secrets only" in (redact_module.audit_text.__doc__ or "")
