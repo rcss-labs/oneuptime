@@ -86,3 +86,123 @@ def test_everything_else_is_denied_with_a_reason(command, reason):
 )
 def test_ambiguous_invocations_ask(command, env):
     assert verdict(command, env).kind == ASK
+
+
+# ---- fix round 1 -------------------------------------------------------------
+
+from triage.guard_aws import classify
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "aws ecs list-clusters --profile triage-prod-main --profil admin --region eu-west-1",
+        "aws ecs list-clusters --profile triage-prod-main --profil=admin --region eu-west-1",
+        "aws ecs list-clusters --profil admin --region eu-west-1",
+        "aws ecs list-clusters --profile triage-prod-main --regio us-east-1",
+        "aws ecs list-clusters --profile triage-prod-main --region eu-west-1 --regi us-east-1",
+        "aws ecs list-clusters --profile triage-prod-main --region eu-west-1 --endpoint http://localhost:4566",
+        "aws ecs list-clusters --profile triage-prod-main --region eu-west-1 --endpoint-ur http://localhost:4566",
+        "aws ecs list-clusters --profile triage-prod-main --region eu-west-1 --deb",
+        "aws ecs list-clusters --profile triage-prod-main --region eu-west-1 --debu",
+        "aws ssm get-parameter --name n --with-decrypt --profile triage-prod-main --region eu-west-1",
+        "aws ssm get-parameter --name n --with-decryptio --profile triage-prod-main --region eu-west-1",
+        "aws apigateway get-api-key --api-key k --include-valu --profile triage-prod-main --region eu-west-1",
+        "aws ecs list-clusters --profile triage-prod-main --region eu-west-1 --no-verify",
+        "aws ecs list-clusters --profile triage-prod-main --region eu-west-1 --no-verify-ss",
+        "aws ecs list-clusters --profile triage-prod-main --region eu-west-1 --p",
+        "aws ecs list-clusters --profile triage-prod-main --region eu-west-1 --out text",
+    ],
+)
+def test_abbreviated_options_ask_because_the_cli_accepts_them(command):
+    result = verdict(command)
+    assert result.kind == ASK
+    assert "could be an abbreviation the guard cannot check" in result.reason
+
+
+def test_the_abbreviation_reason_names_the_option():
+    result = verdict("aws ecs list-clusters --profil=admin --region eu-west-1")
+    assert result.reason == "option --profil could be an abbreviation the guard cannot check"
+
+
+def test_the_abbreviation_check_comes_before_the_profile_check():
+    # Without it, --profil admin would be missed and the triage profile would pass.
+    assert verdict(f"aws ecs list-clusters {OK} --profil admin").kind == ASK
+
+
+def test_full_option_names_are_not_abbreviations():
+    assert verdict(f"aws ecs list-clusters {OK} --output json --query 'x'").kind == ALLOW
+
+
+def test_the_environment_check_still_comes_first():
+    result = verdict(f"aws ecs list-clusters {OK} --profil admin", env=("AWS_PROFILE=admin",))
+    assert result.kind == ASK and "AWS_*" in result.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"aws ssm get-parameter --name n --with-decryption {OK}",
+        f"aws apigateway get-api-key --api-key k --include-value {OK}",
+        f"aws apigateway get-api-keys --include-values {OK}",
+        f"aws apigateway get-api-keys --include-values=true {OK}",
+        f"aws ecr-public get-login-password {OK}",
+        f"aws ecr-public get-authorization-token {OK}",
+        f"aws codeartifact get-authorization-token --domain d {OK}",
+        f"aws ecr get-login {OK}",
+        f"aws redshift get-cluster-credentials --db-user u {OK}",
+        f"aws redshift get-cluster-credentials-with-iam {OK}",
+        f"aws redshift-serverless get-credentials --workgroup-name w {OK}",
+        f"aws lightsail get-relational-database-master-user-password --relational-database-name d {OK}",
+        f"aws lightsail get-instance-access-details --instance-name i {OK}",
+        f"aws cognito-identity get-credentials-for-identity --identity-id i {OK}",
+        f"aws iam list-service-specific-credentials {OK}",
+        f"aws emr get-cluster-session-credentials --cluster-id c {OK}",
+        f"aws sts get-service-bearer-token {OK}",
+        f"aws sso-oidc create-token {OK}",
+        f"aws glue get-connection --name c {OK}",
+        f"aws glue get-connections {OK}",
+        f"aws athena get-query-results --query-execution-id q {OK}",
+        f"aws appconfig get-configuration --application a {OK}",
+        f"aws appconfigdata get-latest-configuration --configuration-token t {OK}",
+        f"aws s3control get-data-access --account-id 111111111111 {OK}",
+        f"aws lambda get-layer-version --layer-name l --version-number 1 {OK}",
+        f"aws lambda get-layer-version-by-arn --arn a {OK}",
+        f"aws codecommit get-folder --repository-name r --folder-path / {OK}",
+        f"aws ec2 get-console-screenshot --instance-id i {OK}",
+    ],
+)
+def test_value_revealing_flags_and_secret_returning_reads_are_denied(command):
+    assert verdict(command).kind == DENY
+
+
+def test_secret_name_patterns_are_denied_for_services_nobody_listed():
+    for operation in ("get-secret-value-x", "describe-password-policy-x", "get-new-credentials", "create-access-token", "do-login"):
+        assert classify("madeup", operation, []).kind == DENY, operation
+
+
+def test_ordinary_reads_with_neighbouring_names_stay_allowed():
+    assert verdict(f"aws secretsmanager describe-secret --secret-id s {OK}").kind == ALLOW
+    assert verdict(f"aws iam get-credential-report {OK}").kind == ALLOW
+    assert verdict(f"aws ssm get-parameter --name n --no-with-decryption {OK}").kind == ALLOW
+    assert verdict(f"aws ecs list-clusters --max-items 5 --no-paginate {OK}").kind == ALLOW
+
+
+def test_classify_allows_a_read():
+    assert classify("ecs", "describe-services", ["--cluster", "a"]).kind == ALLOW
+    assert classify("s3", "ls", []).kind == ALLOW
+    assert classify("logs", "start-query", []).kind == ALLOW
+
+
+def test_classify_denies_a_write_and_an_unknown_operation():
+    assert classify("ecs", "stop-task", ["--task", "t"]).kind == DENY
+    assert classify("ec2", "terminate-instances", []).kind == DENY
+    assert classify("ecs", "frobnicate", []).kind == DENY
+    assert classify("s3", "cp", []).kind == DENY
+
+
+def test_classify_denies_a_secret_read_and_value_revealing_flags():
+    assert classify("secretsmanager", "get-secret-value", []).kind == DENY
+    assert classify("ssm", "get-parameter", ["--with-decryption"]).kind == DENY
+    assert classify("ssm", "get-parameter", ["--name", "x"]).kind == ALLOW
+    assert classify("apigateway", "get-api-keys", ["--include-values"]).kind == DENY

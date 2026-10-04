@@ -1,6 +1,8 @@
 """Decide whether one AWS CLI invocation is a triage read."""
 from __future__ import annotations
 
+from typing import Sequence
+
 from triage.verdict import ALLOW, ASK, DENY, Verdict
 
 VALUE_OPTIONS = frozenset(
@@ -51,8 +53,27 @@ DENY_EXACT = frozenset(
         ("kinesis", "get-shard-iterator"),
         ("codecommit", "get-file"),
         ("codecommit", "get-blob"),
+        ("glue", "get-connection"),
+        ("glue", "get-connections"),
+        ("athena", "get-query-results"),
+        ("appconfig", "get-configuration"),
+        ("appconfigdata", "get-latest-configuration"),
+        ("s3control", "get-data-access"),
+        ("lightsail", "get-instance-access-details"),
+        ("lambda", "get-layer-version"),
+        ("lambda", "get-layer-version-by-arn"),
+        ("codecommit", "get-folder"),
+        ("ec2", "get-console-screenshot"),
     }
 )
+# An operation whose name contains one of these returns a secret, whatever its service.
+DENY_NAME_PARTS = ("secret-value", "password", "credentials", "token", "login")
+# Flags that make an otherwise ordinary read return secret values.
+REVEALING_FLAGS = frozenset({"--with-decryption", "--include-value", "--include-values"})
+# The AWS CLI accepts any unique prefix of a long option, so these could hide behind a shortened spelling.
+CHECKED_OPTIONS = frozenset(
+    {"--profile", "--region", "--endpoint-url", "--debug", "--with-decryption", "--include-value", "--include-values", "--no-verify-ssl"}
+) | {option for option in VALUE_OPTIONS if option.startswith("--")}
 LOCAL_READS = frozenset({("configure", "list"), ("configure", "list-profiles")})
 
 
@@ -81,9 +102,21 @@ def _service_and_operation(argv: tuple[str, ...]) -> tuple[str | None, str | Non
     return positionals[0], positionals[1]
 
 
+def _abbreviated_option(argv: tuple[str, ...]) -> str | None:
+    for word in argv:
+        if word.startswith("--"):
+            name = word.split("=", 1)[0]
+            if name not in CHECKED_OPTIONS and any(option.startswith(name) for option in CHECKED_OPTIONS):
+                return name
+    return None
+
+
 def check_aws(argv: tuple[str, ...], env: tuple[str, ...], profiles: frozenset[str]) -> Verdict:
     if any(assignment.startswith("AWS_") for assignment in env):
         return Verdict(ASK, "AWS_* environment variables are set on the command line")
+    abbreviated = _abbreviated_option(argv)
+    if abbreviated:
+        return Verdict(ASK, f"option {abbreviated} could be an abbreviation the guard cannot check")
     if "--debug" in argv:
         return Verdict(DENY, "--debug prints request signing details")
     if _option_values(argv, "--endpoint-url"):
@@ -111,10 +144,17 @@ def check_aws(argv: tuple[str, ...], env: tuple[str, ...], profiles: frozenset[s
         return Verdict(ASK, f"no operation given for aws {service}")
     if operation == "help":
         return Verdict(ALLOW, "help text")
-    if (service, operation) in DENY_EXACT:
+    return classify(service, operation, argv[1:])
+
+
+def classify(service: str, operation: str, args: Sequence[str]) -> Verdict:
+    """The rules that depend only on the service, the operation, and the argument words."""
+    if (service, operation) in DENY_EXACT or any(part in operation for part in DENY_NAME_PARTS):
         return Verdict(DENY, f"aws {service} {operation} returns secrets, credentials, or stored data")
-    if "--with-decryption" in argv:
-        return Verdict(DENY, "--with-decryption reads encrypted values")
+    for word in args:
+        flag = word.split("=", 1)[0]
+        if flag in REVEALING_FLAGS:
+            return Verdict(DENY, f"{flag} reads encrypted or secret values")
     if service == "s3" and operation != "ls":
         return Verdict(DENY, f"aws s3 {operation} is not a read-only listing")
     if (service, operation) in READ_EXACT or operation.startswith(READ_PREFIXES):
