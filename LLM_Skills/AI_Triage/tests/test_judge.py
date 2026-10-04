@@ -310,6 +310,26 @@ def test_every_request_and_reply_is_stored_in_order(tmp_path, config):
     assert stored["model"] == "jev-test" and stored["request_id"] == "req-004" and stored["usage"]["output_tokens"] == 2
 
 
+# digests
+
+def test_the_summary_stores_a_digest_beside_each_cause_and_action(tmp_path, config):
+    from triage.digest import action_digest, cause_digest
+    from triage.findings import valid_findings
+    case_dir = build_case(tmp_path, config)
+    summary = run(case_dir, config, FakeJudge(make_responder()))
+    report = json.loads((case_dir / "report.json").read_text())
+    findings = valid_findings(case_dir)
+    for cause in report["causes"]:
+        assert summary["causes"][cause["id"]]["digest"] == cause_digest(cause, findings)
+    for action in report["actions"]:
+        assert summary["actions"][action["id"]]["digest"] == action_digest(action)
+
+
+def test_unavailable_summaries_carry_digests_too(tmp_path, config):
+    summary = run(build_case(tmp_path, config), config, FakeJudge(fail_with="down"))
+    assert len(summary["causes"]["C1"]["digest"]) == 64 and len(summary["actions"]["A1"]["digest"]) == 64
+
+
 # composition through a run
 
 def test_a_run_confirms_a_cause_whose_gates_all_pass(tmp_path, config):
@@ -325,6 +345,7 @@ def test_a_run_confirms_a_cause_whose_gates_all_pass(tmp_path, config):
     assert cause["rank_probability"] == 0.72 and cause["scope"] == "matches"
     assert cause["symptom_fit"] == pytest.approx(2.5 / 3)
     action = summary["actions"]["A1"]
+    assert action.pop("digest")
     assert action == {"label": "recommended", "target": "addresses_cause", "target_confidence": 0.9, "specific": 0.88, "reasons": []}
     assert summary["ask_engineer"] == [] and summary["adhoc"] == []
     assert json.loads((case_dir / "judgments" / "summary.json").read_text()) == summary

@@ -14,6 +14,7 @@ from typing import Any
 from triage import compose
 from triage.case import load_case
 from triage.config import TriageConfig
+from triage.digest import JUDGED_ACTION_FIELDS, JUDGED_CAUSE_FIELDS, action_digest, cause_digest
 from triage.findings import load_facts, valid_findings
 from triage.judge_client import Judge, JudgeReply, JudgeUnavailable
 from triage.questions import _check_question, build_choice
@@ -26,7 +27,7 @@ UNAVAILABLE_NOTE = "TypeSafe was unavailable; this label is Claude's own estimat
 UNAVAILABLE_ACTION_NOTE = "TypeSafe was unavailable; no action can be recommended without its checks"
 _ACCOUNT_NUMBER_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
 _STORED_NAME_RE = re.compile(r"^(\d{3})-")
-_ACTION_FIELDS = ("title", "target", "current_state", "required_state", "change")
+_ACTION_STATE_FIELDS = tuple(name for name in JUDGED_ACTION_FIELDS if name not in ("id", "cause"))
 
 
 class JudgmentError(Exception):
@@ -123,13 +124,19 @@ def judge_findings(
     return results
 
 
+def _judged_cause(cause: dict) -> dict:
+    """The fields of a cause that judging reads; the same ones the digest covers."""
+    return {name: cause.get(name) for name in JUDGED_CAUSE_FIELDS}
+
+
 def judge_causes(
     session: JudgeSession, questions: dict[str, dict], causes: list[dict], symptoms: list[str], scope: str,
 ) -> dict[str, dict]:
     asked = {name: questions[name] for name in ("symptom_fit", "scope_fit")}
     results = {}
     for cause in causes:
-        state = {"hypothesis": cause["statement"], "symptoms": symptoms, "observed_scope": scope}
+        judged = _judged_cause(cause)
+        state = {"hypothesis": judged["statement"], "symptoms": symptoms, "observed_scope": scope}
         answers = session.ask("cause", cause["id"], state, asked).answers
         results[cause["id"]] = {"symptom_fit": answers["symptom_fit"], "scope_fit": answers["scope_fit"]}
     return results
@@ -164,7 +171,7 @@ def judge_actions(
     statements = {cause["id"]: cause["statement"] for cause in causes}
     results = {}
     for action in actions:
-        state = {"cause": statements.get(action.get("cause"), ""), "action": {name: action.get(name) for name in _ACTION_FIELDS}}
+        state = {"cause": statements.get(action.get("cause"), ""), "action": {name: action.get(name) for name in _ACTION_STATE_FIELDS}}
         answers = session.ask("action", action["id"], state, asked).answers
         results[action["id"]] = {"target": answers["remediation_target"], "specific": answers["action_specific"]}
     return results
@@ -281,17 +288,19 @@ def _draft_label(cause: dict) -> str:
     return cause.get("label") if cause.get("label") in compose.LABEL_ORDER else "candidate"
 
 
-def _unavailable_summary(config: TriageConfig, report: dict, reason: str, model: str | None) -> dict:
+def _unavailable_summary(config: TriageConfig, report: dict, findings: dict[str, dict], reason: str, model: str | None) -> dict:
     summary = _base_summary(config, f"unavailable: {reason}", model)
     for cause in report["causes"]:
         summary["causes"][cause["id"]] = {
             "label": compose.cap_label(_draft_label(cause), "probable"), "gates": {}, "rank_probability": None,
             "symptom_fit": None, "scope": None, "reasons": [UNAVAILABLE_NOTE],
+            "digest": cause_digest(cause, findings),
         }
     for action in report.get("actions", []):
         summary["actions"][action["id"]] = {
             "label": "candidate", "target": None, "target_confidence": None, "specific": None,
             "reasons": [UNAVAILABLE_ACTION_NOTE],
+            "digest": action_digest(action),
         }
     return summary
 
@@ -358,6 +367,7 @@ def _compose_summary(
         summary["causes"][cause["id"]] = {
             "label": compose.cause_label(gates, top), "gates": gates, "rank_probability": low,
             "symptom_fit": fit, "scope": scope, "reasons": reasons,
+            "digest": cause_digest(cause, findings),
         }
     if rank["choices"][0] != rank["choices"][1]:
         summary["ask_engineer"].append(
@@ -370,6 +380,7 @@ def _compose_summary(
         summary["actions"][action["id"]] = {
             "label": label, "target": answers["target"]["choice"], "target_confidence": answers["target"]["confidence"],
             "specific": answers["specific"]["noul"], "reasons": reasons,
+            "digest": action_digest(action),
         }
     return summary
 
@@ -396,7 +407,7 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
         rank = rank_causes(session, questions, causes, report["symptoms"], findings, verdicts, rng)
         action_answers = judge_actions(session, questions, actions, causes)
     except JudgeUnavailable as unavailable:
-        summary = _unavailable_summary(config, report, unavailable.reason, session.model)
+        summary = _unavailable_summary(config, report, findings, unavailable.reason, session.model)
     else:
         summary = _compose_summary(config, report, findings, parse_time(case["incident_start"]), session.model,
                                    verdicts, cause_answers, rank, action_answers)
