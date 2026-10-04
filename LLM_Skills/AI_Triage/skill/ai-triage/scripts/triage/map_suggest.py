@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import os
 import re
@@ -73,9 +74,12 @@ def _case_with_monitors(case_dir: Path) -> dict:
     incident_path = case_dir / "incident.json"
     if incident_path.is_file():
         try:
-            monitors = json.loads(incident_path.read_text()).get("monitors", [])
+            incident = json.loads(incident_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
             raise SuggestError(f"{incident_path}: cannot be read ({error})") from error
+        monitors = incident.get("monitors", []) if isinstance(incident, dict) else None
+        if not isinstance(monitors, list) or not all(isinstance(m, (dict, str)) for m in monitors):
+            raise SuggestError(f"{incident_path}: must be a JSON object whose monitors, if any, are a list")
         case["incident"] = {**case["incident"], "monitors": monitors}
     return case
 
@@ -179,13 +183,20 @@ def _new_backup(map_path: Path, original: bytes, now: datetime) -> Path:
     for counter in range(1000):
         backup = map_path.with_name(stem if counter == 0 else f"{stem}-{counter}")
         try:
-            with open(backup, "xb") as handle:
+            handle = open(backup, "xb")
+        except FileExistsError:
+            continue
+        except OSError as error:
+            raise SuggestError(f"the backup could not be made ({error}); nothing was changed") from error
+        try:
+            with handle:
                 handle.write(original)
                 handle.flush()
                 os.fsync(handle.fileno())
-            return backup
-        except FileExistsError:
-            continue
+        except OSError as error:
+            backup.unlink(missing_ok=True)
+            raise SuggestError(f"the backup could not be made ({error}); nothing was changed") from error
+        return backup
     raise SuggestError(f"{map_path}: could not find a free backup name")
 
 
@@ -195,23 +206,29 @@ def _check_writable(map_path: Path) -> None:
         raise SuggestError(f"{map_path} is not writable; nothing was changed")
 
 
-def _acquire_lock(map_path: Path) -> Path:
+def _acquire_lock(map_path: Path) -> int:
+    """Take an flock on the lock file. A run that dies releases it, so the file never goes stale."""
     lock = map_path.with_name(f"{map_path.name}.lock")
     try:
-        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
-    except FileExistsError as error:
-        raise SuggestError(f"another run is applying a suggestion ({lock} exists); nothing was changed") from error
+        descriptor = os.open(lock, os.O_CREAT | os.O_RDWR, 0o644)
     except OSError as error:
-        raise SuggestError(f"{lock}: cannot be created ({error})") from error
-    return lock
+        raise SuggestError(f"{lock}: cannot be opened ({error})") from error
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        os.close(descriptor)
+        raise SuggestError("another run is applying a suggestion; nothing was changed") from error
+    return descriptor
 
 
 def _write_checked(map_path: Path, content: bytes, intended: dict, entry: dict, name: str,
-                   config: TriageConfig, backup_note: str) -> None:
+                   config: TriageConfig, backup_note: str, block: str) -> None:
     """Write to a temporary file, check it, then replace the map. The map is untouched on any failure."""
     temporary = map_path.with_name(f".{map_path.name}.tmp-{os.getpid()}")
+    created = False
     try:
         with open(temporary, "xb") as handle:
+            created = True
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
@@ -224,11 +241,12 @@ def _write_checked(map_path: Path, content: bytes, intended: dict, entry: dict, 
         os.replace(temporary, map_path)
     except (MapError, yaml.YAMLError) as error:
         raise SuggestError("the service map could not be updated automatically; add the entry by hand"
-                           f"{backup_note}") from error
-    except (OSError, UnicodeError) as error:
-        raise SuggestError(f"the service map could not be written ({error}); it is unchanged{backup_note}") from error
+                           f"{backup_note}. Block to paste under services:\n{block}") from error
+    except (OSError, RuntimeError, UnicodeError) as error:
+        detail = " ".join(str(error).split())
+        raise SuggestError(f"the service map could not be written ({detail}); it is unchanged{backup_note}") from error
     finally:
-        if temporary.exists():
+        if created and temporary.exists():
             temporary.unlink()
 
 
@@ -250,7 +268,7 @@ def apply(case_dir: Path, config: TriageConfig, map_path: Path, service_name: st
                                "paste this block under services: by hand:\n" + block)
         backup = _new_backup(map_path, original, now) if map_path.exists() else None
         note = f"; backup: {backup}" if backup else ""
-        _write_checked(map_path, content, data.get("services") or {}, entry, service_name, config, note)
+        _write_checked(map_path, content, data.get("services") or {}, entry, service_name, config, note, block)
         try:
             case = load_case(case_dir)
             case["map_change"] = {"service_name": service_name, "backup": str(backup) if backup else None,
@@ -261,4 +279,4 @@ def apply(case_dir: Path, config: TriageConfig, map_path: Path, service_name: st
             raise SuggestError(f"the map was updated but the case could not record it ({detail}){note}") from error
         return backup
     finally:
-        lock.unlink(missing_ok=True)
+        os.close(lock)

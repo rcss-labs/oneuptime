@@ -1,3 +1,4 @@
+import fcntl
 import json
 import subprocess
 import sys
@@ -82,7 +83,7 @@ def test_propose_prints_the_block_and_changes_nothing(skill_dir, case_dir, map_f
     assert result.stdout.startswith('  "orders-api":\n')
     assert yaml.safe_load("services:\n" + result.stdout)["services"]["orders-api"]["environments"]["prod"]
     assert map_file.read_text() == MAP_TEXT
-    assert [p.name for p in map_file.parent.iterdir() if "service-map" in p.name] == ["service-map.yaml"]
+    assert [p.name for p in map_file.parent.iterdir() if "service-map" in p.name and not p.name.endswith(".lock")] == ["service-map.yaml"]
 
 
 def test_propose_uses_the_environment_option(skill_dir, case_dir):
@@ -136,12 +137,18 @@ def test_a_missing_service_name_is_a_usage_error(skill_dir, case_dir):
     assert run(skill_dir, "propose", "--case-dir", case_dir).returncode == 2
 
 
-def test_a_lock_file_makes_apply_exit_1_and_changes_nothing(skill_dir, case_dir, map_file):
-    lock = map_file.with_name("service-map.yaml.lock")
-    lock.write_text("")
-    result = run(skill_dir, "apply", "--case-dir", case_dir, "--service-name", "orders-api")
+def test_a_live_lock_makes_apply_exit_1_and_changes_nothing(skill_dir, case_dir, map_file):
+    with open(map_file.with_name("service-map.yaml.lock"), "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        result = run(skill_dir, "apply", "--case-dir", case_dir, "--service-name", "orders-api")
     assert result.returncode == 1 and "another run is applying" in result.stderr
-    assert map_file.read_text() == MAP_TEXT and lock.exists()
+    assert map_file.read_text() == MAP_TEXT
+
+
+def test_a_wrongly_shaped_incident_file_exits_1_with_one_line(skill_dir, case_dir):
+    (Path(case_dir) / "incident.json").write_text("[]")
+    result = run(skill_dir, "propose", "--case-dir", case_dir, "--service-name", "orders-api")
+    assert result.returncode == 1 and "Traceback" not in result.stderr and len(result.stderr.strip().splitlines()) == 1
 
 
 def test_apply_without_a_map_file_creates_it(skill_dir, case_dir, map_file):
@@ -149,4 +156,4 @@ def test_apply_without_a_map_file_creates_it(skill_dir, case_dir, map_file):
     result = run(skill_dir, "apply", "--case-dir", case_dir, "--service-name", "orders-api")
     assert result.returncode == 0, result.stderr
     assert "orders-api" in yaml.safe_load(map_file.read_text())["services"]
-    assert not list(map_file.parent.glob("*.lock"))
+    

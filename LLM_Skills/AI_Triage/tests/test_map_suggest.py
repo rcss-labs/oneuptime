@@ -1,4 +1,6 @@
+import fcntl
 import json
+import os
 from datetime import date, datetime, timezone
 
 import pytest
@@ -70,6 +72,11 @@ def write_map(tmp_path, text):
     path = tmp_path / "service-map.yaml"
     path.write_bytes(text.encode())
     return path
+
+
+def map_files(folder):
+    """Every file the map and its helpers could leave, apart from the lock file, which stays by design."""
+    return sorted(p.name for p in folder.iterdir() if "service-map" in p.name and not p.name.endswith(".lock"))
 
 
 def run_apply(case_dir, config, path, name="orders-api", environment="prod"):
@@ -238,8 +245,9 @@ def test_apply_restores_the_original_when_the_result_does_not_load(config, skill
     original = COMMENTED_MAP + "extra: 1\n"
     path = write_map(tmp_path, original)
     case_dir = make_case(config, skill_dir)
-    with pytest.raises(SuggestError, match="could not be updated automatically; add the entry by hand"):
+    with pytest.raises(SuggestError, match="could not be updated automatically; add the entry by hand") as caught:
         run_apply(case_dir, config, path)
+    assert '  "orders-api":' in str(caught.value)
     assert path.read_bytes() == original.encode()
     backups = list(tmp_path.glob("service-map.yaml.bak-*"))
     assert len(backups) == 1 and backups[0].read_bytes() == original.encode()
@@ -260,7 +268,7 @@ def test_apply_changes_nothing_when_propose_would_refuse(config, skill_dir, tmp_
     with pytest.raises(SuggestError):
         run_apply(make_case(config, skill_dir), config, path, name="alpha")
     assert path.read_bytes() == COMMENTED_MAP.encode()
-    assert [p.name for p in tmp_path.glob("service-map.yaml*")] == ["service-map.yaml"]
+    assert map_files(tmp_path) == ["service-map.yaml"]
 
 
 def test_propose_puts_the_monitor_names_from_incident_json_in_the_match_block(config, skill_dir, tmp_path):
@@ -299,7 +307,7 @@ def test_a_failed_replace_leaves_the_map_and_no_temporary_file(config, skill_dir
     with pytest.raises(SuggestError, match=r"\.bak-20261004-110000"):
         run_apply(make_case(config, skill_dir), config, path)
     assert path.read_bytes() == COMMENTED_MAP.encode()
-    assert sorted(p.name for p in tmp_path.iterdir() if "service-map" in p.name or p.name.startswith(".")) == [
+    assert map_files(tmp_path) == [
         "service-map.yaml", "service-map.yaml.bak-20261004-110000"]
 
 
@@ -329,7 +337,7 @@ def test_a_read_only_map_is_refused_without_a_stray_backup(config, skill_dir, tm
             run_apply(make_case(config, skill_dir), config, path)
     finally:
         path.chmod(0o644)
-    assert [p.name for p in tmp_path.glob("service-map.yaml*")] == ["service-map.yaml"]
+    assert map_files(tmp_path) == ["service-map.yaml"]
 
 
 def test_two_applies_in_the_same_second_keep_two_backups(config, skill_dir, tmp_path):
@@ -348,17 +356,68 @@ def load_case_dir(config, skill_dir):
     return case_dir
 
 
-def test_a_lock_file_stops_apply_and_is_removed_after_a_run(config, skill_dir, tmp_path):
+def test_a_live_run_holding_the_lock_stops_apply(config, skill_dir, tmp_path):
     path = write_map(tmp_path, COMMENTED_MAP)
     case_dir = make_case(config, skill_dir)
-    lock = tmp_path / "service-map.yaml.lock"
-    lock.write_text("")
-    with pytest.raises(SuggestError, match="another run is applying"):
-        run_apply(case_dir, config, path)
-    assert path.read_bytes() == COMMENTED_MAP.encode() and lock.exists()
-    lock.unlink()
-    run_apply(case_dir, config, path)
-    assert not lock.exists()
+    with open(tmp_path / "service-map.yaml.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with pytest.raises(SuggestError, match="another run is applying"):
+            run_apply(case_dir, config, path)
+    assert path.read_bytes() == COMMENTED_MAP.encode()
+
+
+def test_a_lock_file_left_by_a_killed_run_does_not_block(config, skill_dir, tmp_path):
+    path = write_map(tmp_path, COMMENTED_MAP)
+    (tmp_path / "service-map.yaml.lock").write_text("")
+    run_apply(make_case(config, skill_dir), config, path)
+    assert "orders-api" in load_map(path, config).services
+
+
+def test_a_failed_backup_write_leaves_no_partial_backup(config, skill_dir, tmp_path, monkeypatch):
+    path = write_map(tmp_path, COMMENTED_MAP)
+
+    def full_disk(descriptor):
+        raise OSError("no space left")
+
+    monkeypatch.setattr("triage.map_suggest.os.fsync", full_disk)
+    with pytest.raises(SuggestError, match="no space left") as caught:
+        run_apply(make_case(config, skill_dir), config, path)
+    assert "\n" not in str(caught.value)
+    assert path.read_bytes() == COMMENTED_MAP.encode()
+    assert map_files(tmp_path) == ["service-map.yaml"]
+
+
+def test_a_runtime_error_while_loading_is_one_line_and_leaves_the_map(config, skill_dir, tmp_path, monkeypatch):
+    path = write_map(tmp_path, COMMENTED_MAP)
+
+    def broken_load(target, cfg):
+        raise RuntimeError("odd failure")
+
+    monkeypatch.setattr("triage.map_suggest.load_map", broken_load)
+    with pytest.raises(SuggestError, match="odd failure") as caught:
+        run_apply(make_case(config, skill_dir), config, path)
+    assert "\n" not in str(caught.value)
+    assert path.read_bytes() == COMMENTED_MAP.encode()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".")]
+
+
+def test_a_temporary_file_this_run_did_not_create_is_kept(config, skill_dir, tmp_path):
+    path = write_map(tmp_path, COMMENTED_MAP)
+    stranger = tmp_path / f".service-map.yaml.tmp-{os.getpid()}"
+    stranger.write_text("not ours")
+    with pytest.raises(SuggestError):
+        run_apply(make_case(config, skill_dir), config, path)
+    assert stranger.read_text() == "not ours" and path.read_bytes() == COMMENTED_MAP.encode()
+
+
+@pytest.mark.parametrize("incident_json", ["[]", '{"monitors": 5}', '{"monitors": "abc"}', '{"monitors": [5]}'])
+def test_an_incident_file_of_the_wrong_shape_is_one_line(config, skill_dir, tmp_path, incident_json):
+    path = write_map(tmp_path, COMMENTED_MAP)
+    case_dir = make_case(config, skill_dir)
+    (case_dir / "incident.json").write_text(incident_json)
+    with pytest.raises(SuggestError, match="incident.json") as caught:
+        propose(case_dir, config, path, "orders-api", "prod", TODAY)
+    assert "\n" not in str(caught.value)
 
 
 @pytest.mark.parametrize("original, line_after", [
@@ -399,7 +458,7 @@ def test_an_empty_services_map_that_cannot_be_rewritten_exactly_is_refused_with_
         run_apply(make_case(config, skill_dir), config, path)
     assert '  "orders-api":' in str(caught.value)
     assert path.read_bytes() == original.encode()
-    assert [p.name for p in tmp_path.glob("service-map.yaml*")] == ["service-map.yaml"]
+    assert map_files(tmp_path) == ["service-map.yaml"]
 
 
 def test_apply_creates_a_missing_map(config, skill_dir, tmp_path):
@@ -408,7 +467,7 @@ def test_apply_creates_a_missing_map(config, skill_dir, tmp_path):
     assert backup is None
     assert path.read_text().startswith('services:\n  "orders-api":\n')
     assert set(load_map(path, config).services) == {"orders-api"}
-    assert list(tmp_path.glob("service-map.yaml.*")) == []
+    assert map_files(tmp_path) == ["service-map.yaml"]
 
 
 def test_the_opensearch_message_names_what_is_missing(config, skill_dir, tmp_path):
