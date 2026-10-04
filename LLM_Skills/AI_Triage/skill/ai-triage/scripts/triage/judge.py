@@ -16,7 +16,7 @@ from typing import Any
 from triage import compose
 from triage.case import load_case
 from triage.config import TriageConfig
-from triage.digest import JUDGED_ACTION_FIELDS, JUDGED_CAUSE_FIELDS, action_digest, cause_digest
+from triage.digest import JUDGED_ACTION_FIELDS, JUDGED_CAUSE_FIELDS, action_digest, case_identity, cause_digest, draft_digest
 from triage.findings import load_facts, valid_findings
 from triage.judge_client import Judge, JudgeReply, JudgeUnavailable
 from triage.questions import REQUIRED_IDS, _check_question, build_choice
@@ -499,6 +499,7 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
     else:
         summary = _compose_summary(config, report, findings, parse_time(case["incident_start"]), session.model,
                                    verdicts, cause_answers, rank, action_answers)
+    summary["draft_digest"] = draft_digest(report, findings, case_identity(case))
     summary["adhoc"] = adhoc
     write_summary(case_dir, summary)
     stale_path.unlink(missing_ok=True)

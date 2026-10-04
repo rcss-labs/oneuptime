@@ -2,7 +2,16 @@ import copy
 
 import pytest
 
-from triage.digest import JUDGED_ACTION_FIELDS, JUDGED_CAUSE_FIELDS, action_digest, cause_digest
+from triage.digest import (
+    JUDGED_ACTION_FIELDS,
+    JUDGED_CAUSE_FIELDS,
+    POST_JUDGING_ACTION_FIELDS,
+    POST_JUDGING_CAUSE_FIELDS,
+    action_digest,
+    case_identity,
+    cause_digest,
+    draft_digest,
+)
 
 FINDINGS = {
     "compute-1": {"id": "compute-1", "claim": "Containers exited", "fact_ids": ["ecs-0001"], "excerpt": "code 137",
@@ -41,25 +50,98 @@ def test_changing_a_judged_action_field_changes_the_digest(field):
     assert action_digest(changed) != action_digest(ACTION)
 
 
-@pytest.mark.parametrize("field, value", [("label", "candidate"), ("confidence", "low"), ("reasons", ["x"]), ("rationale", "y")])
-def test_changing_a_label_or_other_written_field_does_not_change_the_digest(field, value):
+def test_the_post_judging_fields_are_exactly_labels_confidences_and_reasons():
+    assert set(POST_JUDGING_CAUSE_FIELDS) == {"label", "confidence", "reasons"}
+    assert set(POST_JUDGING_ACTION_FIELDS) == {"label", "confidence", "reasons"}
+
+
+@pytest.mark.parametrize("field, value", [("label", "candidate"), ("confidence", "low"), ("reasons", ["x"])])
+def test_a_label_only_edit_changes_no_digest(field, value):
     assert cause_digest({**CAUSE, field: value}, FINDINGS) == cause_digest(CAUSE, FINDINGS)
     assert action_digest({**ACTION, field: value}) == action_digest(ACTION)
+    edited = copy.deepcopy(REPORT)
+    edited["causes"][0][field] = value
+    edited["actions"][0][field] = value
+    assert draft_digest(edited, FINDINGS, IDENTITY) == draft_digest(REPORT, FINDINGS, IDENTITY)
 
 
-@pytest.mark.parametrize("field, value", [("claim", "Different"), ("fact_ids", ["ecs-0009"]), ("excerpt", "other")])
-def test_changing_a_cited_findings_judged_text_changes_the_cause_digest(field, value):
+@pytest.mark.parametrize("field, value", [("rationale", "y"), ("risk", "high"), ("verification", ["other"]), ("extra", 1)])
+def test_any_other_action_field_is_covered(field, value):
+    assert action_digest({**ACTION, field: value}) != action_digest(ACTION)
+
+
+def test_any_other_cause_field_is_covered():
+    assert cause_digest({**CAUSE, "notes": "x"}, FINDINGS) != cause_digest(CAUSE, FINDINGS)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("claim", "Different"), ("fact_ids", ["ecs-0009"]), ("excerpt", "other"), ("time", "2026-10-04T11:30:00Z"),
+    ("provenance", "current"), ("matched_text", "new"), ("fact_summaries", {"ecs:ecs-0001": "changed"}),
+    ("confidence", "low"), ("analyst", "other"),
+])
+def test_every_field_of_a_cited_finding_is_covered(field, value):
     for finding_id in ("compute-1", "compute-2"):
         changed = copy.deepcopy(FINDINGS)
         changed[finding_id][field] = value
         assert cause_digest(CAUSE, changed) != cause_digest(CAUSE, FINDINGS)
 
 
-def test_a_finding_the_cause_does_not_cite_or_unjudged_finding_fields_do_not_matter():
+def test_a_finding_the_cause_does_not_cite_does_not_matter_to_the_cause():
     changed = copy.deepcopy(FINDINGS)
     changed["compute-3"] = {"claim": "x", "fact_ids": [], "excerpt": "y"}
-    changed["compute-1"]["confidence"] = "low"
     assert cause_digest(CAUSE, changed) == cause_digest(CAUSE, FINDINGS)
+
+
+# draft_digest
+
+IDENTITY = "INC-123/20261004-110000"
+REPORT = {"symptoms": ["502 on checkout"], "summary": {"scope": "Only checkout", "top_cause": "C1"},
+          "causes": [CAUSE, {"id": "C2", "statement": "Scaled to zero", "supporting": ["compute-2"], "contradicting": []}],
+          "actions": [ACTION]}
+
+
+def edited(change):
+    report = copy.deepcopy(REPORT)
+    findings = copy.deepcopy(FINDINGS)
+    change(report, findings)
+    return draft_digest(report, findings, IDENTITY)
+
+
+@pytest.mark.parametrize("change", [
+    lambda r, f: r["symptoms"].append("disk full"),
+    lambda r, f: r["symptoms"].__setitem__(0, "other"),
+    lambda r, f: r["summary"].__setitem__("scope", "Everything"),
+    lambda r, f: r["causes"].append({"id": "C3", "statement": "New", "supporting": [], "contradicting": []}),
+    lambda r, f: r["causes"][1].__setitem__("statement", "Rewritten competing cause"),
+    lambda r, f: r["actions"][0].__setitem__("change", "other"),
+    lambda r, f: r["actions"].append({"id": "A2", "cause": "C2"}),
+    lambda r, f: f["compute-1"].__setitem__("time", "2026-10-04T11:30:00Z"),
+    lambda r, f: f["compute-2"].__setitem__("claim", "changed"),
+])
+def test_an_edit_anywhere_in_the_draft_changes_the_draft_digest(change):
+    assert edited(change) != draft_digest(REPORT, FINDINGS, IDENTITY)
+
+
+def test_the_draft_digest_does_not_depend_on_cause_or_action_order():
+    reordered = copy.deepcopy(REPORT)
+    reordered["causes"].reverse()
+    assert draft_digest(reordered, FINDINGS, IDENTITY) == draft_digest(REPORT, FINDINGS, IDENTITY)
+
+
+def test_the_draft_digest_depends_on_the_case():
+    assert draft_digest(REPORT, FINDINGS, "INC-123/other-run") != draft_digest(REPORT, FINDINGS, IDENTITY)
+
+
+def test_case_identity_joins_the_incident_number_and_the_run_folder():
+    assert case_identity({"incident": {"number": "INC-123"}, "case_dir": "/home/eng/cases/INC-123/20261004-110000"}) == IDENTITY
+    assert case_identity(None) == "/" and case_identity({"incident": 5, "case_dir": None}) == "/"
+
+
+@pytest.mark.parametrize("bad", [None, 5, "x", [], {"causes": None, "actions": 3, "symptoms": {"a": 1}, "summary": []},
+                                 {"causes": [None, 5, {"supporting": [["x"]]}], "actions": ["a"], "summary": {"scope": object()}}])
+def test_the_draft_digest_never_raises(bad):
+    assert len(draft_digest(bad, FINDINGS, IDENTITY)) == 64
+    assert len(draft_digest(REPORT, None, None)) == 64
 
 
 def test_a_missing_field_is_null_and_differs_from_an_empty_one():

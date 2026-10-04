@@ -498,6 +498,18 @@ def test_the_summary_stores_a_digest_beside_each_cause_and_action(tmp_path, conf
         assert summary["actions"][action["id"]]["digest"] == action_digest(action)
 
 
+def test_the_summary_stores_the_draft_digest_at_the_top_level(tmp_path, config):
+    from triage.digest import case_identity, draft_digest
+    from triage.findings import valid_findings
+    case_dir = build_case(tmp_path, config)
+    for judge in (FakeJudge(make_responder()), FakeJudge(fail_with="down")):
+        summary = run(case_dir, config, judge)
+        report = json.loads((case_dir / "report.json").read_text())
+        case = json.loads((case_dir / "case.json").read_text())
+        assert summary["draft_digest"] == draft_digest(report, valid_findings(case_dir), case_identity(case))
+        assert case_identity(case) == "INC-123/" + case_dir.name
+
+
 def test_unavailable_summaries_carry_digests_too(tmp_path, config):
     summary = run(build_case(tmp_path, config), config, FakeJudge(fail_with="down"))
     assert len(summary["causes"]["C1"]["digest"]) == 64 and len(summary["actions"]["A1"]["digest"]) == 64
