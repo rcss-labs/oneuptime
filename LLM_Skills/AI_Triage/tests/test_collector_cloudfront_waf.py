@@ -32,7 +32,7 @@ def web_acl(arn=GLOBAL_ACL, name="edge-acl", default="Allow", extra_rules=()):
         "VisibilityConfig": {"MetricName": "edge-acl-metric"},
         "Rules": [
             {"Name": "rate-limit", "Priority": 1, "Action": {"Block": {}}, "VisibilityConfig": {"MetricName": "rate"}},
-            {"Name": "managed-common", "Priority": 2, "OverrideAction": {"None": {}},
+            {"Name": "managed-common", "Priority": 2, "OverrideAction": {"Count": {}},
              "VisibilityConfig": {"MetricName": "common"}},
             *extra_rules,
         ]}}
@@ -47,12 +47,15 @@ def sampled(requests, population=None, start="2026-10-04T10:00:00+00:00", end="2
             "TimeWindow": {"StartTime": start, "EndTime": end}}
 
 
-def sample(action="BLOCK", uri="/login", country="DE", stamp=IN_WINDOW, **request):
+def sample(action="BLOCK", uri="/login", country="DE", stamp=IN_WINDOW, inner=None, **request):
     body = {"ClientIP": "10.1.2.3", "Country": country, "URI": uri, "Method": "POST",
             "Headers": [{"Name": "User-Agent", "Value": "probe-agent-9f3"}]}
     body.update(request)
     # AWS leaves RuleNameWithinRuleGroup out for a rule that is not inside a rule group.
-    return {"Request": body, "Weight": 1, "Timestamp": stamp, "Action": action}
+    found = {"Request": body, "Weight": 1, "Timestamp": stamp, "Action": action}
+    if inner:
+        found["RuleNameWithinRuleGroup"] = inner
+    return found
 
 
 def answers_for(**extra):
@@ -330,3 +333,44 @@ def test_regional_resource_lookup_uses_the_region_of_its_arn(config_data, tmp_pa
 def test_metric_calls_do_not_change_the_evidence_region(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, answers_for(), {"distribution_id": "E1EXAMPLE"})
     assert ctx.evidence.region == "eu-west-1"
+
+
+def rule_group(name, priority, override="None"):
+    return {"Name": name, "Priority": priority, "OverrideAction": {override: {}},
+            "VisibilityConfig": {"MetricName": f"m-{name}"}, "Statement": {"ManagedRuleGroupStatement": {}}}
+
+
+def test_rule_groups_are_sampled_and_the_inner_rule_is_named(config_data, tmp_path):
+    acl = web_acl()
+    acl["WebACL"]["Rules"] = [rule_group("common", 1), rule_group("counting", 2, override="Count")]
+    by_metric = {"m-common": sampled([sample(uri="/x", inner="SizeRestrictions_BODY"), sample(uri="/y")])}
+    ctx, aws, _ = run(config_data, tmp_path, answers_for(**{"wafv2 get-web-acl": acl}), {"web_acl_arn": GLOBAL_ACL},
+                      by_metric=by_metric)
+    calls = aws.called("wafv2", "get-sampled-requests")
+    assert [value_of(c, "--rule-metric-name") for c in calls] == ["m-common"]
+    blocked = [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+    assert "rule group common (rule SizeRestrictions_BODY)" in blocked[0].summary
+    assert "rule group common:" in blocked[1].summary
+
+
+def test_blocking_rules_beyond_the_cap_are_counted(config_data, tmp_path):
+    acl = web_acl(extra_rules=[block_rule(f"r{n}", 10 + n) for n in range(8)])
+    ctx, aws, _ = run(config_data, tmp_path, answers_for(**{"wafv2 get-web-acl": acl}), {"web_acl_arn": GLOBAL_ACL})
+    assert len(aws.called("wafv2", "get-sampled-requests")) == 5
+    note = [f for f in ctx.evidence.facts if "not sampled" in f.summary and "blocking" in f.summary]
+    assert len(note) == 1 and note[0].kind == "derived" and "4 more" in note[0].summary
+
+
+def test_an_acl_that_cannot_block_says_so(config_data, tmp_path):
+    acl = web_acl()
+    acl["WebACL"]["Rules"] = [rule_group("counting", 1, override="Count")]
+    ctx, aws, _ = run(config_data, tmp_path, answers_for(**{"wafv2 get-web-acl": acl}), {"web_acl_arn": GLOBAL_ACL})
+    assert aws.called("wafv2", "get-sampled-requests") == []
+    note = [f for f in ctx.evidence.facts if f.kind == "derived"]
+    assert len(note) == 1 and "Nothing in web ACL edge-acl blocks" in note[0].summary
+
+
+def test_a_malformed_resource_arn_is_a_target_error(config_data, tmp_path):
+    ctx, aws, _ = run(config_data, tmp_path, answers_for(), {"resource_arn": "not-an-arn"})
+    assert [e["code"] for e in ctx.evidence.errors] == ["InvalidTarget"]
+    assert aws.calls == []

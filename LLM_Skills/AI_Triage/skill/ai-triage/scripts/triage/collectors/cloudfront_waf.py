@@ -101,14 +101,29 @@ def _add_web_acl(ctx: CollectContext, arn: str, now: datetime) -> None:
             summary=f"Rule {rule.get('Name')} priority {rule.get('Priority')} {_action_text(rule)}",
         )
     # Sampling by a rule's own metric name is the only way to know which rule blocked a request.
-    targets = [
-        (f"rule {r.get('Name')}", r.get("VisibilityConfig", {}).get("MetricName"))
-        for r in rules if "Block" in (r.get("Action") or {})
-    ][:MAX_BLOCKING_RULES]
+    # A rule group with no override applies its own actions, so it can block too.
+    blockers = []
+    for rule in rules:
+        metric = rule.get("VisibilityConfig", {}).get("MetricName")
+        if "Block" in (rule.get("Action") or {}):
+            blockers.append((f"rule {rule.get('Name')}", metric, False))
+        elif "None" in (rule.get("OverrideAction") or {}):
+            blockers.append((f"rule group {rule.get('Name')}", metric, True))
+    sampled_blockers = blockers[:MAX_BLOCKING_RULES]
+    if len(blockers) > len(sampled_blockers):
+        ctx.evidence.add(
+            kind=DERIVED, resource=resource, command=ctx.last_command,
+            summary=f"{len(blockers) - len(sampled_blockers)} more blocking rules or rule groups were not sampled",
+        )
+    targets = list(sampled_blockers)
     if default == "block":
-        targets.append(("the default action", acl.get("VisibilityConfig", {}).get("MetricName")))
-    targets = [(label, metric) for label, metric in targets if metric]
+        targets.append(("the default action", acl.get("VisibilityConfig", {}).get("MetricName"), False))
+    targets = [target for target in targets if target[1]]
     if not targets:
+        ctx.evidence.add(
+            kind=DERIVED, resource=resource, command=ctx.last_command,
+            summary=f"Nothing in web ACL {name} blocks: no rule or rule group can block and the default action is {default}",
+        )
         return
     if now - ctx.window.end > SAMPLING_HORIZON:
         ctx.evidence.add(
@@ -119,12 +134,12 @@ def _add_web_acl(ctx: CollectContext, arn: str, now: datetime) -> None:
             ),
         )
         return
-    for label, metric in targets:
-        _add_blocked_requests(ctx, resource, arn, scope, region, metric, label)
+    for label, metric, is_group in targets:
+        _add_blocked_requests(ctx, resource, arn, scope, region, metric, label, is_group)
 
 
 def _add_blocked_requests(
-    ctx: CollectContext, resource: str, arn: str, scope: str, region: str, metric: str, label: str
+    ctx: CollectContext, resource: str, arn: str, scope: str, region: str, metric: str, label: str, is_group: bool
 ) -> None:
     window = f"StartTime={format_time(ctx.window.start)},EndTime={format_time(ctx.window.end)}"
     reply = ctx.aws(
@@ -148,15 +163,21 @@ def _add_blocked_requests(
     blocked = [s for s in reply.get("SampledRequests", []) if s.get("Action") == "BLOCK"]
     for sampled in blocked[: int(MAX_SAMPLES)]:
         request = sampled.get("Request", {})
+        inner = sampled.get("RuleNameWithinRuleGroup")
+        who = f"{label} (rule {inner})" if is_group and inner else label
         # Only the path and country are read; headers and the client address are never copied.
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=resource, time=sampled.get("Timestamp"), command=ctx.last_command,
-            summary=f"Request blocked by {label}: {request.get('URI')} from country {request.get('Country')}",
+            summary=f"Request blocked by {who}: {request.get('URI')} from country {request.get('Country')}",
         )
 
 
 def _resource_acl(ctx: CollectContext, resource_arn: str) -> str | None:
-    region = resource_arn.split(":")[3] or ctx.region
+    fields = resource_arn.split(":")
+    if len(fields) < 6 or fields[0] != "arn":
+        ctx.evidence.add_error("", "InvalidTarget", "resource_arn is not an ARN")
+        return None
+    region = fields[3] or ctx.region
     reply = ctx.aws("wafv2", "get-web-acl-for-resource", ["--resource-arn", resource_arn], region=region)
     if reply is None:
         return None
@@ -178,7 +199,7 @@ def _distribution_ids(targets: dict[str, str]) -> list[str]:
 
 
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
-    now = getattr(ctx, "now", None) or datetime.now(timezone.utc)
+    now = ctx.now or datetime.now(timezone.utc)
     arns = [targets["web_acl_arn"]] if targets.get("web_acl_arn") else []
     for distribution_id in _distribution_ids(targets):
         arns.append(_add_distribution(ctx, distribution_id))
