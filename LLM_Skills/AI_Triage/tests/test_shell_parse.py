@@ -211,14 +211,14 @@ def test_descriptor_digit_is_not_an_argument_only_when_attached():
     assert split_command("echo a2>f")[0].argv == ("echo", "a2")
 
 
-@pytest.mark.parametrize("command", ["echo a >& 2", "echo a >&2", "echo a 2>&1", "echo a >&-"])
+@pytest.mark.parametrize("command", ["echo a >& 2", "echo a >&2", "echo a 2>&1", "echo a 1>&2", "echo a 2>& 1"])
 def test_descriptor_duplication_is_not_a_file_write(command):
     assert split_command(command)[0].writes_file is False
 
 
 @pytest.mark.parametrize(
     "command",
-    ["echo a >| f", "echo a >>f", "echo a &>>f", "echo a &> f", "echo a >&f", "echo a > '/dev/null2'"],
+    ["echo a >>f", "echo a &>>f", "echo a &> f", "echo a 1>f", "echo a 2>>f", "echo a > '/dev/null2'"],
 )
 def test_other_output_redirects_to_files_are_writes(command):
     assert split_command(command)[0].writes_file is True
@@ -310,3 +310,61 @@ def test_quoted_non_ascii_whitespace_and_equals_in_the_middle_are_literal():
     assert split_command("echo 'a\u00a0b' x=y a=b")[0].argv == ("echo", "a\u00a0b", "x=y", "a=b")
     assert split_command("echo '=ls'")[0].argv == ("echo", "=ls")
     assert split_command("echo é")[0].argv == ("echo", "é")
+
+
+# ---- fix round 3: redirects by allow-list ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command, writes, reads",
+    [
+        ("echo a > f", True, False), ("echo a >f", True, False),
+        ("echo a >> f", True, False), ("echo a >>f", True, False),
+        ("echo a 1> f", True, False), ("echo a 1>f", True, False),
+        ("echo a 1>> f", True, False), ("echo a 1>>f", True, False),
+        ("echo a 2> f", True, False), ("echo a 2>f", True, False),
+        ("echo a 2>> f", True, False), ("echo a 2>>f", True, False),
+        ("echo a &> f", True, False), ("echo a &>f", True, False),
+        ("echo a &>> f", True, False), ("echo a &>>f", True, False),
+        ("&> f echo a", True, False),
+        ("echo a 2>&1", False, False), ("echo a 1>&2", False, False), ("echo a >&2", False, False),
+        ("echo a >&1", False, False), ("echo a >& 2", False, False),
+        ("echo a < f", False, True), ("echo a <f", False, True),
+        ("echo a > /dev/null", False, False), ("echo a 2>/dev/null", False, False),
+        ("echo a &>/dev/null", False, False), ("echo a &>> /dev/null", False, False),
+    ],
+)
+def test_accepted_redirect_forms(command, writes, reads):
+    [segment] = split_command(command)
+    assert (segment.writes_file, segment.reads_file) == (writes, reads)
+    assert segment.argv[-1] == "a" or segment.argv == ("echo", "a")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo a >| f", "echo a >|f", "echo a >&- ", "echo a >&f", "echo a >& f", "echo a >&3", "echo a >&12",
+        "echo a <& 0", "echo a <&0", "echo a 0<&0", "echo a <> f", "echo a >! f", "echo a >!f", "echo a >>! f",
+        "echo a &>! f", "echo a &>>!f", "echo a &>| f", "echo a > | f", "echo a > ; echo b", "echo a >", "echo a &> ",
+        "echo a 0< f", "echo a 3> f", "echo a 9>/dev/null", "echo a 12>/dev/null", "echo a 1< f", "echo a 2< f",
+        "echo a 3>&1", "echo a 9>&2", "echo a 2>&3", "echo a 2>&-",
+        "echo a 1&>/dev/null", "echo a 2&>/dev/null", "echo a 9&>/dev/null", "echo a 2&>>/dev/null", "echo a 12&>f",
+        "echo a '2'&>/dev/null", 'echo a "2"&>/dev/null', "echo a \\2&>/dev/null", "echo a x&>f", "echo a;&>f",
+        "echo a 2&", "echo a 2&& echo b",
+    ],
+)
+def test_every_other_redirect_form_is_unparseable(command):
+    with pytest.raises(Unparseable):
+        split_command(command)
+
+
+def test_a_digit_separated_by_space_is_an_ordinary_argument():
+    assert split_command("echo 2 > /dev/null")[0].argv == ("echo", "2")
+    assert split_command("echo -n 2 &>/dev/null")[0].argv == ("echo", "-n", "2")
+    assert split_command("echo 9 &>f")[0].argv == ("echo", "9")
+    assert split_command("echo 2 &")[0].argv == ("echo", "2")
+
+
+def test_a_separator_ampersand_is_still_fine():
+    assert [s.argv for s in split_command("echo a & echo b")] == [("echo", "a"), ("echo", "b")]
+    assert [s.argv for s in split_command("echo a&echo b")] == [("echo", "a"), ("echo", "b")]

@@ -124,9 +124,11 @@ class _Scanner:
     def scan_operator(self, index: int) -> int:
         text = self.text
         char = text[index]
-        if char in "<>" and self.in_word and self.first_quote is None and DIGITS_RE.match("".join(self.chars)):
+        digits = "".join(self.chars) if self.in_word and self.first_quote is None else ""
+        if DIGITS_RE.match(digits) and char in "<>&":
             # Digits written right against a redirect are a descriptor, never an argument.
-            if "".join(self.chars) not in ("1", "2"):
+            # Only the descriptors 1 and 2 before > are accepted.
+            if char != ">" or digits not in ("1", "2"):
                 raise Unparseable("unusual file descriptor in a redirect")
             self.chars, self.in_word = [], False
         self.end_word()
@@ -138,10 +140,11 @@ class _Scanner:
         elif char == "&":
             if following == "&":
                 operator = "&&"
-            elif text.startswith("&>>", index):
-                operator = "&>>"
             elif following == ">":
-                operator = "&>"
+                # zsh drops a descriptor glued to &>, so &> must stand alone as a word start.
+                if index > 0 and text[index - 1] not in BLANKS:
+                    raise Unparseable("&> must follow whitespace")
+                operator = "&>>" if text.startswith("&>>", index) else "&>"
             else:
                 operator = "&"
         elif char == "|":
@@ -149,15 +152,18 @@ class _Scanner:
         elif char == ">":
             if following == "(":
                 raise Unparseable("process substitution")
-            operator = {">": ">>", "&": ">&", "|": ">|"}.get(following, ">")
+            if following == "|":
+                raise Unparseable("unsupported operator >|")
+            operator = {">": ">>", "&": ">&"}.get(following, ">")
         else:  # "<"
-            if following in ("<", "("):
-                raise Unparseable("here-document, here-string, or process substitution")
-            if following == ">":
-                raise Unparseable("unsupported operator <>")
-            operator = "<&" if following == "&" else "<"
+            if following in ("<", "(", ">", "&"):
+                raise Unparseable("unsupported input redirect")
+            operator = "<"
+        after = index + len(operator)
+        if operator in (">", ">>", "&>", "&>>") and text[after : after + 1] == "!":
+            raise Unparseable("zsh clobber override")
         self.tokens.append(operator)
-        return index + len(operator)
+        return after
 
     def scan(self) -> list[_Word | str]:
         text, size = self.text, len(self.text)
@@ -252,12 +258,13 @@ def split_command(command: str) -> list[Segment]:
             if index + 1 >= len(tokens) or not isinstance(tokens[index + 1], _Word):
                 raise Unparseable("redirect without a target")
             target = tokens[index + 1].text
-            if token in ("<", "<&"):
+            if token == "<":
                 reads_file = True
-            else:
-                duplicates_descriptor = token == ">&" and (target.isdigit() or target == "-")
-                if target not in HARMLESS_TARGETS and not duplicates_descriptor:
-                    writes_file = True
+            elif token == ">&":
+                if target not in ("1", "2"):
+                    raise Unparseable("only >&1 and >&2 are accepted")
+            elif target not in HARMLESS_TARGETS:
+                writes_file = True
             index += 2
     flush("")
     return segments
