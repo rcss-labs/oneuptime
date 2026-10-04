@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from triage.collectors import Collector
+from triage.collectors.common import was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED
 from triage.metrics import MetricSpec, add_metric_facts
 
 MAX_ITEMS = 20
 NFS_PORT = 2049
+FILE_SYSTEM_NOT_FOUND = ("FileSystemNotFound",)
+TCP_PROTOCOLS = ("tcp", "6", "-1")
 METRICS = (
     ("BurstCreditBalance", "Minimum"), ("PercentIOLimit", "Maximum"), ("ClientConnections", "Sum"),
     ("PermittedThroughput", "Minimum"), ("MeteredIOBytes", "Sum"),
@@ -25,30 +28,53 @@ def _file_system_summary(name: str, file_system: dict) -> str:
     )
 
 
-def _allows_nfs(group: dict) -> bool:
-    for permission in group.get("IpPermissions", []):
-        if permission.get("IpProtocol") == "-1":
-            return True
-        if permission.get("IpProtocol") == "tcp" and permission.get("FromPort", 1) <= NFS_PORT <= permission.get("ToPort", 0):
-            return True
-    return False
+def _nfs_sources(groups: list[dict]) -> list[str]:
+    """Who the groups allow on TCP 2049: address ranges, prefix lists, and referenced security groups."""
+    sources: list[str] = []
+    for group in groups:
+        for permission in group.get("IpPermissions", []):
+            if permission.get("IpProtocol") not in TCP_PROTOCOLS:
+                continue
+            if permission.get("IpProtocol") != "-1" and not (
+                permission.get("FromPort", 1) <= NFS_PORT <= permission.get("ToPort", 0)
+            ):
+                continue
+            found = (
+                [r.get("CidrIp") for r in permission.get("IpRanges", [])]
+                + [r.get("CidrIpv6") for r in permission.get("Ipv6Ranges", [])]
+                + [r.get("PrefixListId") for r in permission.get("PrefixListIds", [])]
+                + [r.get("GroupId") for r in permission.get("UserIdGroupPairs", [])]
+            )
+            sources += [source for source in found if source and source not in sources]
+    return sources
 
 
-def _add_security_group_verdict(ctx: CollectContext, resource: str, mount_target_ids: list[str]) -> None:
-    group_ids: list[str] = []
-    for mount_target_id in mount_target_ids:
-        reply = ctx.aws("efs", "describe-mount-target-security-groups", ["--mount-target-id", mount_target_id])
-        group_ids += [g for g in (reply or {}).get("SecurityGroups", []) if g not in group_ids]
-    if not group_ids:
+def _join(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _add_nfs_verdict(
+    ctx: CollectContext, resource: str, target: dict, lookups: dict[tuple[str, ...], dict | None]
+) -> None:
+    label = f"Mount target {target.get('MountTargetId')} in {target.get('AvailabilityZoneName')}"
+    reply = ctx.aws("efs", "describe-mount-target-security-groups", ["--mount-target-id", target.get("MountTargetId", "")])
+    group_ids = tuple((reply or {}).get("SecurityGroups", []))
+    groups = None
+    if reply is not None and group_ids:
+        if group_ids not in lookups:
+            described = ctx.aws("ec2", "describe-security-groups", ["--group-ids", *group_ids])
+            lookups[group_ids] = None if described is None else described.get("SecurityGroups", [])
+        groups = lookups[group_ids]
+    if groups is None:
+        ctx.evidence.add(
+            kind=DERIVED, resource=resource, command=ctx.last_command,
+            summary=f"{label}: whether it allows NFS (TCP {NFS_PORT}) could not be determined because its security groups could not be read",
+        )
         return
-    reply = ctx.aws("ec2", "describe-security-groups", ["--group-ids", *group_ids])
-    if reply is None:
-        return
-    allowing = [g.get("GroupId") for g in reply.get("SecurityGroups", []) if _allows_nfs(g)]
+    sources = _nfs_sources(groups)
     summary = (
-        f"Security groups {', '.join(allowing)} allow inbound TCP {NFS_PORT} on the mount targets"
-        if allowing else
-        f"No security group on the mount targets ({', '.join(group_ids)}) allows inbound TCP {NFS_PORT}"
+        f"{label} allows NFS from {_join(sources)}" if sources
+        else f"{label}: nothing allows TCP {NFS_PORT} in its security groups ({', '.join(group_ids) or 'none attached'})"
     )
     ctx.evidence.add(kind=DERIVED, resource=resource, command=ctx.last_command, summary=summary)
 
@@ -72,7 +98,9 @@ def _add_mount_targets(ctx: CollectContext, name: str, resource: str) -> None:
     broken = [f"{t.get('MountTargetId')} ({t.get('LifeCycleState')})" for t in targets if t.get("LifeCycleState") != "available"]
     if broken:
         ctx.evidence.add(kind=DERIVED, resource=resource, summary=f"Mount targets not available: {', '.join(broken)}")
-    _add_security_group_verdict(ctx, resource, [t.get("MountTargetId", "") for t in targets])
+    lookups: dict[tuple[str, ...], dict | None] = {}
+    for target in targets:
+        _add_nfs_verdict(ctx, resource, target, lookups)
 
 
 def _add_access_points(ctx: CollectContext, name: str, resource: str) -> None:
@@ -89,11 +117,11 @@ def _add_access_points(ctx: CollectContext, name: str, resource: str) -> None:
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     name = targets["file_system"]
     resource = f"file-system/{name}"
-    reply = ctx.aws("efs", "describe-file-systems", ["--file-system-id", name])
+    reply = ctx.aws("efs", "describe-file-systems", ["--file-system-id", name], not_found=FILE_SYSTEM_NOT_FOUND)
     systems = (reply or {}).get("FileSystems", [])
     if not systems:
-        if reply is not None or (ctx.evidence.errors and "NotFound" in ctx.evidence.errors[-1]["code"]):
-            ctx.evidence.add(kind=CURRENT, resource=resource, summary=f"File system {name} was not found")
+        if reply is not None or was_not_found(ctx, FILE_SYSTEM_NOT_FOUND):
+            ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=f"File system {name} was not found")
         return
     ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=_file_system_summary(name, systems[0]))
     _add_mount_targets(ctx, name, resource)
