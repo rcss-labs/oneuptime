@@ -94,9 +94,18 @@ def test_opensearch_host_is_matched_whatever_its_letter_case():
     assert kind("curl -s https://OpenSearch.Internal.Example.com/_cat/indices") == DENY
 
 
-def test_absolute_path_to_aws_is_checked_like_aws():
-    assert kind(f"/usr/local/bin/aws ecs list-clusters {AWS_OK}") == ALLOW
-    assert kind(f"/usr/local/bin/aws ecs stop-task --task t {AWS_OK}") == DENY
+def test_aws_and_kubectl_are_recognised_by_bare_name_only():
+    # The old test expected /usr/local/bin/aws to be allowed. That encoded a gap:
+    # a file written to any folder can be named aws, so a path is never trusted.
+    for command in (
+        f"/usr/local/bin/aws ecs list-clusters {AWS_OK}",
+        f"./aws ecs list-clusters {AWS_OK}",
+        f"/tmp/x/aws ecs stop-task --task t {AWS_OK}",
+        f"/tmp/evil/kubectl {KUBE_OK} get pods",
+        f"./kubectl {KUBE_OK} get pods",
+        f"'/usr/bin/aws' ecs list-clusters {AWS_OK}",
+    ):
+        assert kind(command) == ASK, command
 
 
 def test_skill_folder_with_a_space_in_its_path_is_recognised():
@@ -138,3 +147,268 @@ def test_home_relative_script_paths_are_recognised(monkeypatch):
     command = '"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/preflight.py"'
     assert kind(command) == ALLOW
     assert kind("~/.claude/skills/ai-triage/.venv/bin/python ~/.claude/skills/ai-triage/scripts/preflight.py") == ALLOW
+
+
+# ---- fix round 1 -------------------------------------------------------------
+
+SCRIPT = f"{SKILL}/scripts"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # wave B C1: expansions and braces change the argv after the guard looked at it
+        f"aws secretsmanager$E get-secret-value --secret-id prod/db {AWS_OK}",
+        f"aws s3api$E get-object --bucket b --key k /tmp/out {AWS_OK}",
+        f"aws lambda${{E}} get-function --function-name f {AWS_OK}",
+        f"aws s3api get-objec{{t,}} --bucket b --key k {AWS_OK}",
+        f"kubectl {KUBE_OK} get secrets$E",
+        f"kubectl {KUBE_OK} get secret{{s,}}",
+        f"aws ecs list-clusters {AWS_OK} $X",
+        f"aws ecs list-clusters {AWS_OK} ${{X:-a b}}",
+        f"aws ssm get-parameter --name n $'--with-decryption' {AWS_OK}",
+        f"aws ecs list-clusters {AWS_OK} *",
+        # wave A C1: a hash in the middle of a word hides the rest of the line
+        f"aws ecs list-clusters {AWS_OK} a#; aws ecs stop-task --task t --profile admin",
+        # wave B I2: indirect access is asked about, not passed
+        f"python3 -m awscli ecs stop-task --profile admin --region eu-west-1",
+        "eksctl delete cluster --name prod",
+        "helm uninstall payments",
+        "python3 -c 'import boto3; boto3.client(\"ecs\")'",
+        "python3 -c 'import botocore'",
+        f"a''ws ecs stop-task --profile admin --region eu-west-1",
+        "k\\ubectl delete ns prod",
+    ],
+)
+def test_reproductions_from_the_reviews_never_get_allow(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert kind(command) in (ASK, DENY)
+
+
+def test_quote_obfuscated_and_indirect_names_are_sensitive_without_config():
+    assert decide("a''ws ecs stop-task --profile admin", None, "no config").kind == DENY
+    assert decide('"kube"ctl delete ns prod', None, "no config").kind == DENY
+    assert decide("helm uninstall x", None, "no config").kind == DENY
+    assert decide("python3 -m awscli ecs ls", None, "no config").kind == DENY
+    assert decide("ls", None, "no config").kind == PASS
+
+
+@pytest.mark.parametrize(
+    "filter_command",
+    [
+        "jq .",
+        "jq -r .services[].serviceName".replace(".services[].serviceName", "'.services[].serviceName'"),
+        "jq -r -c -S -e -M '.a'",
+        "jq --raw-output --compact-output --sort-keys '.a | length'",
+        "jq '.events[:5]'",
+        "head",
+        "head -n 5",
+        "head -5",
+        "head -c 4000",
+        "tail -n 20",
+        "tail -3",
+        "tail -c 100",
+        "grep ERROR",
+        "grep -i -v -c -E -F -o -n -w timeout",
+        "grep -e -dash",
+        "grep -m 5 -A 2 -B 2 -C 1 -i 'x y'",
+        "grep -i aws",
+        "wc",
+        "wc -l -c -w -m",
+        "sort",
+        "sort -r -n -u -h",
+        "sort -k 2 -t ,",
+        "uniq",
+        "uniq -c -d -u -i",
+        "cut -d , -f 1",
+        "cut -c 1-5",
+        "cut -d - -f 2",
+        "tr -d -s -c abc",
+        "tr a-z A-Z",
+        "tr -d '\\n'",
+        "column",
+        "column -t",
+        "column -t -s ,",
+    ],
+)
+def test_strict_grammar_filters_after_a_pipe_are_allowed(filter_command):
+    assert kind(f"aws ecs list-clusters {AWS_OK} | {filter_command}") == ALLOW
+
+
+@pytest.mark.parametrize(
+    "filter_command",
+    [
+        # wave B C2 reproductions
+        "sort -o /home/eng/.bashrc",
+        "uniq - /home/eng/.zshrc",
+        "grep -r . /home/eng/.ssh",
+        "grep x < /home/eng/.ssh/id_example",
+        "jq -n env",
+        "jq -n '$ENV'",
+        "LD_PRELOAD=/tmp/x.so jq .",
+        "tail -f /var/log/system.log",
+        "tail -f",
+        "head -c 4000 /home/eng/.ssh/id_example",
+        "jq --rawfile a /home/eng/.ssh/id_example .",
+        "jq --slurpfile a f .",
+        "jq -f prog.jq",
+        "jq --args . a b",
+        "jq . file.json",
+        "jq 'input'",
+        "jq '$__loc__'",
+        "jq '.a | @sh'",
+        "jq 'env.HOME'",
+        "jq -r",
+        "jq -- -x",
+        "head file.txt",
+        "head -n x",
+        "head -n 5 file",
+        "grep",
+        "grep a b",
+        "grep -r x",
+        "grep -R x",
+        "grep -f patterns x",
+        "grep --include=x y",
+        "grep -m x y",
+        "grep -iv x",
+        "wc file",
+        "wc -L",
+        "sort file",
+        "sort -o out",
+        "sort --output=out",
+        "uniq a b",
+        "uniq - out",
+        "cut",
+        "cut -d,",
+        "cut -f 1 file",
+        "tr",
+        "tr a b c",
+        "tr -x a",
+        "column file",
+        "column -t file",
+        "xargs rm",
+        "tee out.txt",
+    ],
+)
+def test_filters_outside_the_strict_grammar_are_not_allowed(filter_command):
+    assert kind(f"aws ecs list-clusters {AWS_OK} | {filter_command}") == PASS
+
+
+def test_a_filter_with_a_redirect_is_not_allowed():
+    assert kind(f"aws ecs list-clusters {AWS_OK} | grep x < in.txt") == PASS
+    assert kind(f"aws ecs list-clusters {AWS_OK} | grep x > out.txt") == PASS
+
+
+def test_a_filter_not_preceded_by_a_plain_pipe_is_not_allowed():
+    assert kind(f"aws ecs list-clusters {AWS_OK}; jq .") == PASS
+    assert kind(f"aws ecs list-clusters {AWS_OK} |& jq .") == PASS
+    assert kind("jq .") == PASS
+
+
+def test_a_filter_that_mentions_aws_but_breaks_the_grammar_asks():
+    assert kind(f"aws ecs list-clusters {AWS_OK} | grep -r aws .") == ASK
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"PYTHONPATH=/tmp/evil {PY} {SCRIPT}/preflight.py",
+        f"AWS_CONFIG_FILE=/tmp/cfg {PY} {SCRIPT}/verify_access.py",
+        f"FOO=1 {PY} {SCRIPT}/validate_map.py",
+        f"{PY} {SCRIPT}/preflight.py < /home/eng/.ssh/id_example",
+        f"PYTHONPATH=/tmp/evil {PY} {SCRIPT}/opensearch_query.py --cluster logs-prod health",
+    ],
+)
+def test_environment_and_input_redirects_never_ride_on_an_own_script(command):
+    assert kind(command) == ASK
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"FOO=1 aws ecs list-clusters {AWS_OK}",
+        f"HTTPS_PROXY=http://x aws ecs list-clusters {AWS_OK}",
+        f"LD_PRELOAD=/tmp/x.so kubectl {KUBE_OK} get pods",
+        f"PATH=/tmp/evil kubectl {KUBE_OK} get pods",
+    ],
+)
+def test_any_environment_assignment_on_aws_or_kubectl_asks(command):
+    assert kind(command) == ASK
+
+
+def test_environment_assignment_does_not_hide_a_deny():
+    assert kind(f"FOO=1 aws ecs stop-task --task t {AWS_OK}") == DENY
+
+
+def test_environment_assignment_on_a_filter_is_not_allowed():
+    assert kind(f"aws ecs list-clusters {AWS_OK} | LD_PRELOAD=/tmp/x.so jq .") == PASS
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"{PY} {SCRIPT}/anything_new.py",
+        f"{PY} {SCRIPT}/guard_hook.py",
+        f"{PY} {SCRIPT}/preflight.sh",
+        f"python3 {SCRIPT}/preflight.py",
+        f"/usr/bin/python3 {SCRIPT}/preflight.py",
+        f"{SKILL}/.venv/bin/python3 {SCRIPT}/preflight.py",
+        f"{PY} -c 'print(1)'",
+        f"{PY} {SCRIPT}/../scripts/preflight.py",
+        f"{PY} {SCRIPT}/sub/../preflight.py",
+        f"{SKILL}/.venv/bin/../bin/python {SCRIPT}/preflight.py",
+        f"{PY} ./scripts/preflight.py",
+        f"{PY}",
+        "'$HOME/.claude/skills/ai-triage/.venv/bin/python' '$HOME/.claude/skills/ai-triage/scripts/preflight.py'",
+        "'~/.claude/skills/ai-triage/.venv/bin/python' '~/.claude/skills/ai-triage/scripts/preflight.py'",
+        f"{PY} '$HOME/.claude/skills/ai-triage/scripts/preflight.py'",
+    ],
+)
+def test_only_the_named_own_scripts_run_with_the_skill_python(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert kind(command) == PASS
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["preflight.py", "validate_map.py", "verify_access.py", "opensearch_query.py", "collect.py", "discover.py",
+     "case.py", "findings.py", "timeline.py", "report.py", "judge.py", "publish.py", "map_suggest.py"],
+)
+def test_every_listed_own_script_is_allowed(name):
+    assert kind(f"{PY} {SCRIPT}/{name} --json") == ALLOW
+
+
+def test_own_script_names_are_a_fixed_list():
+    from triage.guard import OWN_SCRIPTS
+
+    assert OWN_SCRIPTS == frozenset(
+        {"preflight.py", "validate_map.py", "verify_access.py", "opensearch_query.py", "collect.py", "discover.py",
+         "case.py", "findings.py", "timeline.py", "report.py", "judge.py", "publish.py", "map_suggest.py"}
+    )
+
+
+def test_an_own_script_with_a_redundant_slash_is_still_recognised():
+    assert kind(f"{PY} {SCRIPT}//preflight.py") == ALLOW
+    assert kind(f"{PY} {SCRIPT}/./preflight.py") == ALLOW
+
+
+def test_home_paths_are_expanded_only_when_unquoted_or_double_quoted(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    py, script = "$HOME/.claude/skills/ai-triage/.venv/bin/python", "$HOME/.claude/skills/ai-triage/scripts/preflight.py"
+    assert kind(f"{py} {script}") == ALLOW
+    assert kind(f'"{py}" "{script}"') == ALLOW
+    assert kind(f"'{py}' '{script}'") == PASS
+
+
+def test_without_home_the_home_paths_cannot_be_checked(monkeypatch):
+    monkeypatch.delenv("HOME", raising=False)
+    command = '"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/preflight.py"'
+    assert kind(command) == PASS
+
+
+def test_a_multi_line_command_mentioning_aws_asks():
+    assert kind(f"cd /tmp\naws ecs stop-task --task t {AWS_OK}") == ASK
+
+
+def test_a_module_that_names_awscli_is_asked_about_not_passed():
+    assert kind(f"{PY} {SCRIPT}/triage/awscli.py") == ASK
