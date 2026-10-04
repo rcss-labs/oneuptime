@@ -13,6 +13,7 @@ from pathlib import Path
 
 from triage.awscli import Runner, subprocess_runner
 from triage.collectors import Collector, all_collectors
+from triage.collectors.common import split_csv
 from triage.config import ConfigError, default_config_path, load_config
 from triage.context import CollectContext, SignInExpired
 from triage.evidence import Evidence
@@ -52,7 +53,7 @@ def _target_problem(collector: Collector, targets: dict[str, str]) -> str | None
     empty = [key for key in collector.required if not targets[key].strip()]
     if empty:
         return f"{collector.name} target {', '.join(empty)} must not be empty ({keys})"
-    if collector.one_of and not any(targets.get(key, "").strip() for key in collector.one_of):
+    if collector.one_of and not any(split_csv(targets.get(key)) for key in collector.one_of):
         return f"{collector.name} needs at least one of these targets: {', '.join(collector.one_of)} ({keys})"
     if unknown:
         return f"{collector.name} has no target {', '.join(unknown)} ({keys})"

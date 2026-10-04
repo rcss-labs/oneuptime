@@ -304,3 +304,12 @@ def test_context_gets_a_clock(skill_dir, fake_collector):
     collect.main(args(skill_dir, "--target", "thing=x"), runner=FakeAws({}))
     assert fake_collector[0][0].now is not None
     assert fake_collector[0][0].now.tzinfo is not None
+
+
+@pytest.mark.parametrize("value", [" , ", ",", ",,  ,"])
+def test_one_of_comma_only_value_counts_as_missing(skill_dir, one_of_collector, value):
+    assert collect.main(args(skill_dir, "--target", f"a={value}", name="pick")) == 4
+
+
+def test_one_of_value_with_a_real_item_passes(skill_dir, one_of_collector):
+    assert collect.main(args(skill_dir, "--target", "a= , x", name="pick"), runner=FakeAws({})) == 0
