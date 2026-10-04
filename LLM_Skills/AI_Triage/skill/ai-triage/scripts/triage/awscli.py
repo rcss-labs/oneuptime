@@ -21,7 +21,7 @@ UNKNOWN = "Unknown"
 REFUSED = "RefusedByGuard"
 TRIAGE_PROFILE_PREFIX = "triage-"
 
-ERROR_CODE_RE = re.compile(r"An error occurred \((\w+)\)")
+ERROR_CODE_RE = re.compile(r"An error occurred \(([\w.]+)\)")
 SSO_EXPIRED_MARKERS = (
     "Error loading SSO Token",
     "Token has expired",

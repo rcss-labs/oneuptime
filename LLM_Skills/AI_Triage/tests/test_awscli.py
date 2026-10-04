@@ -139,3 +139,12 @@ def test_ordinary_options_that_start_alike_are_not_refused():
     runner = runner_returning(0, "{}")
     args = ["--start-time", "1", "--end-time", "2", "--metric-data-queries", "x", "--max-items", "5", "--query", "q"]
     assert run_aws("cloudwatch", "get-metric-data", args, profile="triage-a", region="eu-west-1", runner=runner).ok
+
+
+def test_error_codes_may_contain_dots():
+    stderr = "An error occurred (InvalidInstanceID.NotFound) when calling the DescribeInstances operation: The instance ID 'i-1' does not exist"
+    result = run_aws("ec2", "describe-instances", profile="triage-a", region="eu-west-1", runner=runner_returning(254, "", stderr))
+    assert result.error_code == "InvalidInstanceID.NotFound"
+    stderr = "An error occurred (InvalidGroup.NotFound) when calling the DescribeSecurityGroups operation: x"
+    result = run_aws("ec2", "describe-security-groups", profile="triage-a", region="eu-west-1", runner=runner_returning(254, "", stderr))
+    assert result.error_code == "InvalidGroup.NotFound"
