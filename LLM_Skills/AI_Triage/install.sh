@@ -42,12 +42,26 @@ while (($# > 0)); do
   shift
 done
 
+if [[ -z "${HOME:-}" || ! -d "${HOME}" ]]; then
+  printf 'Error: %s\n' "HOME is not set to a directory" >&2
+  exit "${EXIT_FAILURE}"
+fi
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source_dir="${script_dir}/skill/ai-triage"
 dest_dir="${HOME}/.claude/skills/ai-triage"
 backup_root="${HOME}/.ai-triage/backups"
 
 log() { printf '%s\n' "$*"; }
+
+# Say what happened, or in a dry run what would happen: announce <would text> <did text>.
+announce() {
+  if ((dry_run)); then
+    log "[dry-run] Would $1"
+  else
+    log "$2"
+  fi
+}
 
 fail() {
   local code="$1"
@@ -58,7 +72,7 @@ fail() {
 
 run() {
   if ((dry_run)); then
-    log "[dry-run] $*"
+    log "[dry-run] Would run: $*"
   else
     "$@"
   fi
@@ -78,13 +92,28 @@ check_prerequisites() {
   fi
 }
 
+# Refuse to install into the repository: removing the old code would delete the source.
+check_destination() {
+  local message="the install folder points into the repository; remove the link and run again"
+  if [[ -L "${dest_dir}" ]]; then
+    fail "${EXIT_FAILURE}" "${message}"
+  fi
+  [[ -d "${dest_dir}" ]] || return 0
+  local physical_dest physical_source
+  physical_dest="$(cd "${dest_dir}" && pwd -P)"
+  physical_source="$(cd "${source_dir}" && pwd -P)"
+  if [[ "${physical_dest}" == "${physical_source}" || "${physical_dest}" == "${physical_source}/"* ]]; then
+    fail "${EXIT_FAILURE}" "${message}"
+  fi
+}
+
 backup_config() {
   [[ -d "${dest_dir}/config" ]] || return 0
   local backup_dir
-  backup_dir="${backup_root}/$(date +%Y%m%d-%H%M%S)"
+  backup_dir="${backup_root}/$(date +%Y%m%d-%H%M%S)-$$"
   run mkdir -p "${backup_dir}"
-  run cp -R "${dest_dir}/config" "${backup_dir}/config"
-  log "Backed up your config to ${backup_dir}"
+  run cp -RL "${dest_dir}/config" "${backup_dir}/config"
+  announce "back up your config to ${backup_dir}" "Backed up your config to ${backup_dir}"
 }
 
 copy_code() {
@@ -107,10 +136,10 @@ install_config() {
   for name in triage-config service-map; do
     run cp "${source_dir}/config/${name}.example.yaml" "${dest_dir}/config/${name}.example.yaml"
     if [[ -f "${dest_dir}/config/${name}.yaml" ]]; then
-      log "Kept your existing ${name}.yaml"
+      announce "keep your existing ${name}.yaml" "Kept your existing ${name}.yaml"
     else
       run cp "${source_dir}/config/${name}.example.yaml" "${dest_dir}/config/${name}.yaml"
-      log "Created ${name}.yaml from the example. Edit it before the first run."
+      announce "create ${name}.yaml from the example" "Created ${name}.yaml from the example. Edit it before the first run."
     fi
   done
 }
@@ -168,6 +197,7 @@ NEXT
 }
 
 check_prerequisites
+check_destination
 backup_config
 copy_code
 install_config

@@ -1,10 +1,11 @@
+import hashlib
 import os
 import subprocess
 import sys
 
 import pytest
 
-from conftest import ROOT
+from conftest import ROOT, SKILL_SRC
 
 INSTALL = ROOT / "install.sh"
 
@@ -127,3 +128,128 @@ def test_missing_kubectl_is_only_a_warning(sandbox):
     (sandbox[1] / "kubectl").unlink()
     result = install(sandbox)
     assert result.returncode == 0 and "Warning: kubectl was not found" in result.stdout
+
+
+def run_with_env(sandbox, env_overrides, remove=(), *args):
+    """Run install.sh with a hand-built environment, to test bad HOME values."""
+    home, bin_dir = sandbox
+    env = {"HOME": str(home), "PATH": f"{bin_dir}:/usr/bin:/bin", "AI_TRIAGE_SKIP_VENV": "1"}
+    env.update(env_overrides)
+    for name in remove:
+        env.pop(name, None)
+    return subprocess.run(["bash", str(INSTALL), *args], capture_output=True, text=True, env=env)
+
+
+def test_unset_home_is_refused(sandbox):
+    result = run_with_env(sandbox, {}, remove=("HOME",))
+    assert result.returncode == 1 and "HOME is not set to a directory" in result.stderr
+
+
+def test_empty_home_is_refused(sandbox):
+    result = run_with_env(sandbox, {"HOME": ""})
+    assert result.returncode == 1 and "HOME is not set to a directory" in result.stderr
+
+
+def test_home_that_is_a_file_is_refused(sandbox, tmp_path):
+    not_a_directory = tmp_path / "a-file"
+    not_a_directory.write_text("x")
+    result = run_with_env(sandbox, {"HOME": str(not_a_directory)})
+    assert result.returncode == 1 and "HOME is not set to a directory" in result.stderr
+
+
+def source_fingerprint():
+    return {
+        str(path.relative_to(SKILL_SRC)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(SKILL_SRC.rglob("*"))
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+
+def assert_source_untouched(before):
+    """Every file that existed before is still there, unchanged. New files from other work are ignored."""
+    after = source_fingerprint()
+    assert {name: after.get(name) for name in before} == before
+
+
+LINK_ERROR = "the install folder points into the repository; remove the link and run again"
+
+
+def test_destination_linked_to_the_source_is_refused_and_source_is_untouched(sandbox):
+    skills = sandbox[0] / ".claude" / "skills"
+    skills.mkdir(parents=True)
+    (skills / "ai-triage").symlink_to(SKILL_SRC)
+    before = source_fingerprint()
+
+    result = install(sandbox)
+
+    assert result.returncode == 1 and LINK_ERROR in result.stderr
+    assert_source_untouched(before)
+    assert not (sandbox[0] / ".ai-triage").exists()
+
+
+def test_destination_inside_the_source_through_a_linked_parent_is_refused(sandbox):
+    claude = sandbox[0] / ".claude"
+    claude.mkdir()
+    (claude / "skills").symlink_to(SKILL_SRC.parent)  # skill/, so the destination is skill/ai-triage
+    before = source_fingerprint()
+
+    result = install(sandbox)
+
+    assert result.returncode == 1 and LINK_ERROR in result.stderr
+    assert_source_untouched(before)
+
+
+def test_dry_run_only_says_what_it_would_do(sandbox):
+    fresh = install(sandbox, "--dry-run")
+    assert fresh.returncode == 0
+    assert "[dry-run] Would create triage-config.yaml from the example" in fresh.stdout
+    assert "[dry-run] Would create service-map.yaml from the example" in fresh.stdout
+
+    assert install(sandbox).returncode == 0
+    upgrade = install(sandbox, "--dry-run")
+    assert upgrade.returncode == 0
+    assert "[dry-run] Would back up your config to " in upgrade.stdout
+    assert "[dry-run] Would keep your existing triage-config.yaml" in upgrade.stdout
+
+    for output in (fresh.stdout, upgrade.stdout):
+        for line in output.splitlines():
+            if line.startswith("[dry-run]"):
+                assert line.startswith("[dry-run] Would ") or line == "[dry-run] Nothing was changed.", line
+        for claim in ("Backed up", "Created ", "Kept "):
+            assert claim not in output
+    assert not (sandbox[0] / ".ai-triage").exists()
+
+
+def test_two_installs_in_a_row_leave_distinct_backups(sandbox):
+    assert install(sandbox).returncode == 0
+    (dest(sandbox) / "config" / "triage-config.yaml").write_text("first: true\n")
+    assert install(sandbox).returncode == 0
+    (dest(sandbox) / "config" / "triage-config.yaml").write_text("second: true\n")
+    assert install(sandbox).returncode == 0
+
+    backups = sorted((sandbox[0] / ".ai-triage" / "backups").iterdir())
+    assert len(backups) == 2
+    assert {b.joinpath("config", "triage-config.yaml").read_text() for b in backups} == {"first: true\n", "second: true\n"}
+    assert all(b.name.count("-") == 2 and b.name.rsplit("-", 1)[1].isdigit() for b in backups)
+
+
+def test_a_linked_config_folder_is_backed_up_as_files(sandbox, tmp_path):
+    assert install(sandbox).returncode == 0
+    elsewhere = tmp_path / "shared-config"
+    elsewhere.mkdir()
+    (elsewhere / "triage-config.yaml").write_text("mine: true\n")
+    (elsewhere / "service-map.yaml").write_text("services: {}\n")
+    config = dest(sandbox) / "config"
+    for child in config.iterdir():
+        child.unlink()
+    config.rmdir()
+    config.symlink_to(elsewhere)
+
+    result = install(sandbox)
+
+    assert result.returncode == 0, result.stderr
+    (backup,) = (sandbox[0] / ".ai-triage" / "backups").iterdir()
+    saved = backup / "config"
+    assert saved.is_dir() and not saved.is_symlink()
+    assert (saved / "triage-config.yaml").read_text() == "mine: true\n"
+    assert not (saved / "triage-config.yaml").is_symlink()
