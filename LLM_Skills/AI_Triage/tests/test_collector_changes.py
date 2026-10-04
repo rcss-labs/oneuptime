@@ -77,8 +77,30 @@ def test_read_only_events_are_dropped(config_data, tmp_path):
 def test_events_are_capped_at_forty_per_name_newest_first(config_data, tmp_path):
     events = [event(f"Change{n}", when=f"2026-10-04T10:{n:02d}:00+00:00") for n in range(50)]
     ctx, _, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": events}}, {"resource_names": "a"})
-    assert len(ctx.evidence.facts) == 40
-    assert "Change49" in ctx.evidence.facts[0].summary
+    changes = [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+    assert len(changes) == 40
+    assert "Change49" in changes[0].summary
+
+
+def test_complete_answer_with_more_writes_than_shown_says_how_many_were_left_out(config_data, tmp_path):
+    events = [event(f"Change{n}", when=f"2026-10-04T10:{n:02d}:00+00:00") for n in range(45)]
+    ctx, _, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": events}}, {"resource_names": "a"})
+    notes = [f for f in ctx.evidence.facts if f.kind == "derived"]
+    assert len(notes) == 1
+    assert notes[0].summary == "5 older changes for a between 2026-10-04T10:00:00Z and 2026-10-04T12:00:00Z were not shown"
+
+
+def test_account_wide_facts_say_any_resource(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}}, {})
+    assert fact_summaries(ctx) == [
+        "No change was recorded for any resource between 2026-10-04T10:00:00Z and 2026-10-04T12:00:00Z"
+    ]
+
+
+def test_incident_a_minute_before_the_window_looks_at_the_whole_window(config_data, tmp_path):
+    _, aws, _ = run(config_data, tmp_path, {}, {"resource_names": "x", "incident_start": "2026-10-04T09:56:00Z"})
+    call = aws.called("cloudtrail", "lookup-events")[0]
+    assert call[call.index("--end-time") + 1] == "2026-10-04T12:00:00Z"
 
 
 def test_one_call_per_resource_name_at_most_ten(config_data, tmp_path):
@@ -271,24 +293,26 @@ def test_incident_start_after_the_window_keeps_the_window_end(config_data, tmp_p
 def test_cut_list_is_reported(config_data, tmp_path):
     answers = {"cloudtrail lookup-events": {"Events": [event("UpdateService")], "NextToken": "abc"}}
     ctx, _, _ = run(config_data, tmp_path, answers, {"resource_names": "checkout-api"})
-    cut = [f for f in ctx.evidence.facts if "More change events exist" in f.summary]
+    cut = [f for f in ctx.evidence.facts if "More events exist" in f.summary]
     assert len(cut) == 1 and cut[0].kind == "derived"
-    assert cut[0].summary == ("More change events exist for checkout-api than the 1 shown; "
-                              "these are the newest in the period")
+    assert cut[0].summary == "More events exist than the 1 read; they may include changes"
 
 
 def test_cut_list_with_no_write_found_does_not_claim_nothing_changed(config_data, tmp_path):
     events = [event(f"Describe{n}", read_only="true") for n in range(50)]
     ctx, _, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": events, "NextToken": "abc"}},
                     {"resource_names": "x"})
-    assert fact_summaries(ctx) == ["No change was found among the 50 newest events; older events were not read"]
+    assert fact_summaries(ctx) == [
+        "No change was found among the 50 newest events for x between 2026-10-04T10:00:00Z and "
+        "2026-10-04T12:00:00Z; older events were not read"
+    ]
     assert ctx.evidence.facts[0].kind == "derived"
 
 
 def test_cut_list_count_is_the_number_returned(config_data, tmp_path):
     answers = {"cloudtrail lookup-events": {"Events": [event("UpdateService")], "NextToken": "abc"}}
     ctx, _, _ = run(config_data, tmp_path, answers, {"resource_names": "x"})
-    assert any("than the 1 shown" in s for s in fact_summaries(ctx))
+    assert any("than the 1 read" in s for s in fact_summaries(ctx))
 
 
 def test_incident_before_the_window_looks_at_the_whole_window(config_data, tmp_path):
@@ -301,7 +325,7 @@ def test_incident_before_the_window_looks_at_the_whole_window(config_data, tmp_p
 def test_complete_list_is_not_reported_as_cut(config_data, tmp_path):
     answers = {"cloudtrail lookup-events": {"Events": [event("UpdateService")]}}
     ctx, _, _ = run(config_data, tmp_path, answers, {"resource_names": "x"})
-    assert not any("More change events" in s for s in fact_summaries(ctx))
+    assert not any("More events exist" in s for s in fact_summaries(ctx))
 
 
 def test_incident_start_without_a_timezone_is_an_error(config_data, tmp_path):

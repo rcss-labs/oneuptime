@@ -40,11 +40,15 @@ def _lookup_end(ctx: CollectContext, incident_start: str | None) -> datetime:
     incident = parse_iso(incident_start)
     if incident is None:
         return ctx.window.end
-    end = min(ctx.window.end, incident + timedelta(minutes=LOOKUP_GRACE_MINUTES))
-    return end if end > ctx.window.start else ctx.window.end
+    if incident < ctx.window.start:
+        return ctx.window.end
+    return min(ctx.window.end, incident + timedelta(minutes=LOOKUP_GRACE_MINUTES))
 
 
-def _add_cloudtrail(ctx: CollectContext, lookup: str, name: str, incident_start: str | None) -> None:
+def _add_cloudtrail(
+    ctx: CollectContext, lookup: str, name: str, incident_start: str | None, label: str | None = None,
+) -> None:
+    label = label or name
     start, end = ctx.window.start, _lookup_end(ctx, incident_start)
     reply = ctx.aws(
         "cloudtrail", "lookup-events",
@@ -54,7 +58,8 @@ def _add_cloudtrail(ctx: CollectContext, lookup: str, name: str, incident_start:
     if reply is None:
         return
     writes = [e for e in reply.get("Events", []) if str(e.get("ReadOnly")).lower() == "false"]
-    shown = newest_in_window(Window(start, end), writes, lambda e: e.get("EventTime"), MAX_EVENTS_PER_NAME)
+    in_period = newest_in_window(Window(start, end), writes, lambda e: e.get("EventTime"), len(writes))
+    shown = in_period[:MAX_EVENTS_PER_NAME]
     for item in shown:
         resources = [r.get("ResourceName") for r in item.get("Resources", []) if r.get("ResourceName")]
         resource = ", ".join(resources) or name
@@ -66,19 +71,23 @@ def _add_cloudtrail(ctx: CollectContext, lookup: str, name: str, incident_start:
             ),
         )
     returned = len(reply.get("Events", []))
+    period = f"between {format_time(start)} and {format_time(end)}"
     if reply.get("NextToken"):
-        ctx.evidence.add(
-            kind=DERIVED, resource=name, command=ctx.last_command,
-            summary=(
-                f"More change events exist for {name} than the {len(shown)} shown; these are the newest in the period"
-                if shown else
-                f"No change was found among the {returned} newest events; older events were not read"
-            ),
+        summary = (
+            f"More events exist than the {returned} read; they may include changes"
+            if shown else
+            f"No change was found among the {returned} newest events for {label} {period}; older events were not read"
         )
+        ctx.evidence.add(kind=DERIVED, resource=name, command=ctx.last_command, summary=summary)
     elif not shown:
         ctx.evidence.add(
             kind=DERIVED, resource=name, command=ctx.last_command,
-            summary=f"No change was recorded for {name} between {format_time(start)} and {format_time(end)}",
+            summary=f"No change was recorded for {label} {period}",
+        )
+    elif len(in_period) > len(shown):
+        ctx.evidence.add(
+            kind=DERIVED, resource=name, command=ctx.last_command,
+            summary=f"{len(in_period) - len(shown)} older changes for {label} {period} were not shown",
         )
 
 
@@ -190,7 +199,8 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         for name in names:
             _add_cloudtrail(ctx, f"AttributeKey=ResourceName,AttributeValue={name}", name, incident_start)
     else:
-        _add_cloudtrail(ctx, "AttributeKey=ReadOnly,AttributeValue=false", "account", incident_start)
+        _add_cloudtrail(ctx, "AttributeKey=ReadOnly,AttributeValue=false", "account", incident_start,
+                        label="any resource")
     if targets.get("stack"):
         _add_stack_events(ctx, targets["stack"], incident_start)
     if targets.get("pipeline"):
