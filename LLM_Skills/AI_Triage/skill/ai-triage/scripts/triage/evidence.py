@@ -20,6 +20,9 @@ MAX_FACTS = 200
 MAX_ERROR_MESSAGE = 300
 MAX_SUMMARY = 500
 MAX_DATA_STRING = 500
+MAX_DATA_KEYS = 50
+MAX_KEY_LENGTH = 100
+SUMMARY_CUT_MARKER = "… [summary cut]"
 _SUFFIX_CLEANER = re.compile(r"[^A-Za-z0-9-]")
 
 
@@ -39,15 +42,32 @@ def _cut(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _cut_summary(text: str) -> str:
+    """Cut to MAX_SUMMARY characters, ending with a marker that says the summary was cut."""
+    if len(text) <= MAX_SUMMARY:
+        return text
+    return text[: MAX_SUMMARY - len(SUMMARY_CUT_MARKER)] + SUMMARY_CUT_MARKER
+
+
 def _cut_strings(value: Any) -> Any:
-    """Cut every string inside value, at any depth, to MAX_DATA_STRING characters."""
+    """Cut every string inside value, and every key, at any depth."""
     if isinstance(value, str):
         return _cut(value, MAX_DATA_STRING)
     if isinstance(value, dict):
-        return {key: _cut_strings(item) for key, item in value.items()}
+        return {str(key)[:MAX_KEY_LENGTH]: _cut_strings(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_cut_strings(item) for item in value]
     return value
+
+
+def _limit_data(data: dict) -> dict:
+    """At most MAX_DATA_KEYS keys; extra keys are dropped and counted in keys_omitted."""
+    cut = _cut_strings(data)
+    if len(cut) <= MAX_DATA_KEYS:
+        return cut
+    kept = dict(list(cut.items())[: MAX_DATA_KEYS - 1])
+    kept["keys_omitted"] = len(cut) - len(kept)
+    return kept
 
 
 class Evidence:
@@ -86,8 +106,8 @@ class Evidence:
             kind=kind,
             time=format_time(time) if time is not None else None,
             resource=self.redactor.text(resource),
-            summary=_cut(self.redactor.text(summary), MAX_SUMMARY),
-            data=_cut_strings(self.redactor.value(data or {})),
+            summary=_cut_summary(self.redactor.text(summary)),
+            data=_limit_data(self.redactor.value(data or {})),
             command=self.redactor.text(command),
             excerpt=_cut(self.redactor.text(excerpt), MAX_EXCERPT),
         )

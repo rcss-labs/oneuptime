@@ -149,7 +149,7 @@ def test_write_path_cannot_leave_the_evidence_folder(tmp_path):
 
 def test_summary_is_cut_to_500_characters():
     fact = add_simple(make_evidence(), summary="s" * 900)
-    assert len(fact.summary) == 500 and fact.summary.endswith("…")
+    assert len(fact.summary) == 500 and fact.summary.endswith("… [summary cut]")
 
 
 def test_every_string_in_data_is_cut_at_any_depth():
@@ -157,3 +157,28 @@ def test_every_string_in_data_is_cut_at_any_depth():
     assert len(fact.data["a"]) == 500 and fact.data["a"].endswith("…")
     assert len(fact.data["b"][0]["c"]) == 500
     assert fact.data["d"] == 5 and fact.data["e"] == "short"
+
+
+def test_summary_that_already_ends_with_the_marker_is_left_alone():
+    summary = "x" * 400 + "… [summary cut]"
+    assert add_simple(make_evidence(), summary=summary).summary == summary
+
+
+def test_data_keeps_at_most_50_keys_of_100_characters():
+    data = {f"k{n:03d}": n for n in range(60)}
+    data["z" * 300] = 1
+    fact = add_simple(make_evidence(), data=data)
+    assert len(fact.data) == 50
+    assert fact.data["keys_omitted"] == 61 - 49
+    assert all(len(key) <= 100 for key in fact.data)
+    assert "k000" in fact.data and "k048" in fact.data and "k049" not in fact.data
+
+
+def test_data_with_few_keys_has_no_omission_note():
+    fact = add_simple(make_evidence(), data={"a": 1})
+    assert fact.data == {"a": 1}
+
+
+def test_nested_keys_are_cut():
+    fact = add_simple(make_evidence(), data={"a": {"k" * 300: 1}})
+    assert all(len(key) <= 100 for key in fact.data["a"])
