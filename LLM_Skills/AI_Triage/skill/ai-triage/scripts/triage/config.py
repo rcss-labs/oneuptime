@@ -53,6 +53,10 @@ class OpenSearchCluster:
     host: str
     allowed_index_patterns: tuple[str, ...]
     time_field: str
+    verify_tls: bool = True
+    ca_bundle: str | None = None
+    message_field: str = "message"
+    level_field: str = "level"
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,16 @@ def _text(section: dict[str, Any], key: str, where: str, errors: list[str]) -> s
     return value.strip()
 
 
+def _optional_text(section: dict[str, Any], key: str, default: str | None, where: str, errors: list[str]) -> str | None:
+    if key not in section:
+        return default
+    value = section[key]
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{where}.{key}: must be a non-empty string when set")
+        return default
+    return value.strip()
+
+
 def _parse_accounts(raw: dict[str, Any], errors: list[str]) -> dict[str, Account]:
     accounts: dict[str, Account] = {}
     if not raw:
@@ -167,8 +181,16 @@ def _parse_opensearch(raw: dict[str, Any], accounts: dict[str, Account], errors:
             if not isinstance(pattern, str) or pattern.strip() in FORBIDDEN_INDEX_PATTERNS:
                 errors.append(f"{where}.allowed_index_patterns: '{pattern}' is too broad")
         time_field = _text(body, "time_field", where, errors)
+        verify_tls = body.get("verify_tls", True)
+        if not isinstance(verify_tls, bool):
+            errors.append(f"{where}.verify_tls: must be true or false")
+            verify_tls = True
+        ca_bundle = _optional_text(body, "ca_bundle", None, where, errors)
+        message_field = _optional_text(body, "message_field", "message", where, errors)
+        level_field = _optional_text(body, "level_field", "level", where, errors)
         clusters[str(name)] = OpenSearchCluster(
-            str(name), account, endpoint, parsed.hostname or "", tuple(str(p) for p in patterns), time_field
+            str(name), account, endpoint, parsed.hostname or "", tuple(str(p) for p in patterns), time_field,
+            verify_tls, ca_bundle, message_field, level_field,
         )
     return clusters
 

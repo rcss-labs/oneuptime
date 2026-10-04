@@ -21,6 +21,7 @@ opensearch_clusters:
     endpoint: https://opensearch.internal.example.com
     allowed_index_patterns: ["app-logs-*"]
     time_field: "@timestamp"
+    verify_tls: true
 
 eks_clusters:
   platform-prod:

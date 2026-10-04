@@ -93,3 +93,53 @@ def test_load_config_reports_bad_yaml(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_config(path)
     assert "not valid YAML" in excinfo.value.errors[0]
+
+
+def test_opensearch_connection_settings_default_when_absent(config_data):
+    cluster = parse_config(config_data).opensearch_clusters["logs-prod"]
+    assert cluster.verify_tls is True
+    assert cluster.ca_bundle is None
+    assert cluster.message_field == "message"
+    assert cluster.level_field == "level"
+
+
+def test_opensearch_connection_settings_are_accepted(config_data):
+    config_data["opensearch_clusters"]["logs-prod"].update(
+        verify_tls=False, ca_bundle="/etc/ssl/internal-ca.pem", message_field="log", level_field="severity"
+    )
+    cluster = parse_config(config_data).opensearch_clusters["logs-prod"]
+    assert cluster.verify_tls is False
+    assert cluster.ca_bundle == "/etc/ssl/internal-ca.pem"
+    assert cluster.message_field == "log"
+    assert cluster.level_field == "severity"
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("verify_tls", "yes"),
+        ("verify_tls", 1),
+        ("verify_tls", None),
+        ("ca_bundle", ""),
+        ("ca_bundle", 5),
+        ("message_field", "  "),
+        ("message_field", ["message"]),
+        ("level_field", ""),
+        ("level_field", 3),
+    ],
+)
+def test_wrong_opensearch_connection_setting_types_are_rejected(config_data, key, value):
+    config_data["opensearch_clusters"]["logs-prod"][key] = value
+    with pytest.raises(ConfigError) as excinfo:
+        parse_config(config_data)
+    assert any(f"opensearch_clusters.logs-prod.{key}" in error for error in excinfo.value.errors)
+
+
+def test_wrong_connection_setting_is_reported_with_other_problems(config_data):
+    config_data["opensearch_clusters"]["logs-prod"]["verify_tls"] = "no"
+    config_data["accounts"]["prod-main"]["account_id"] = "123"
+    with pytest.raises(ConfigError) as excinfo:
+        parse_config(config_data)
+    joined = "\n".join(excinfo.value.errors)
+    assert "opensearch_clusters.logs-prod.verify_tls: must be true or false" in joined
+    assert "accounts.prod-main.account_id" in joined
