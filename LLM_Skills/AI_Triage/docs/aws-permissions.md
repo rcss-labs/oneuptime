@@ -79,7 +79,7 @@ the common resource paths.
 | ACM | `acm:DescribeCertificate` | Certificate expiry | Low |
 | CloudFront | `cloudfront:GetDistribution`, `GetDistributionConfig` | Origins and behaviors | Low |
 | WAF | `wafv2:GetWebACL`, `GetWebACLForResource`, `GetRuleGroup`, `GetSampledRequests` | Which rule blocked traffic | High: sampled requests |
-| API Gateway | `apigateway:GET` on REST and HTTP APIs, usage plans, account settings, domain names | Stages, integrations, throttling | Low |
+| API Gateway | `apigateway:GET` on REST and HTTP APIs, account settings, domain names | Stages, integrations, throttling | Low |
 | CloudFormation | `cloudformation:DescribeStackEvents`, `DescribeStackResources` | What a stack update changed | Low |
 | CodePipeline, CodeBuild | `codepipeline:GetPipelineState`, `GetPipelineExecution`, `ListPipelineExecutions`, `ListActionExecutions`, `codebuild:BatchGetBuilds` | Correlate releases with the incident | Low |
 | AWS Config | `config:GetResourceConfigHistory`, `BatchGetResourceConfig` | What changed on one resource, and when | Medium: configuration values |
@@ -90,6 +90,7 @@ the common resource paths.
 
 ### Sensitive data decisions
 
+- **API Gateway** usage plans and API keys are not readable, because they expose key values.
 - **Log content** is readable for every log group. Triage is not possible without it.
 - **Parameter Store** plain values are readable. Encrypted values are not, because
   decryption is not granted.

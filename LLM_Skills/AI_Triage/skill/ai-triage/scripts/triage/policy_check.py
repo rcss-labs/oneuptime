@@ -45,11 +45,24 @@ REQUIRED_DENIES = frozenset(
         "rds-db:connect",
     }
 )
+# Action names are compared in lower case, as IAM does.
+FORBIDDEN_ALLOW_PREFIXES = ("s3:getobject",)
+SECRET_API_GATEWAY_PATHS = ("usageplans", "apikeys")
 ACCOUNT_ID_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
 
 
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else [value]
+
+
+def _lower(names: Any) -> frozenset[str]:
+    return frozenset(name.lower() for name in names)
+
+
+FORBIDDEN_LOWER = _lower(FORBIDDEN_ALLOWS)
+READ_EXCEPTIONS_LOWER = _lower(READ_EXCEPTIONS)
+READ_PREFIXES_LOWER = tuple(prefix.lower() for prefix in READ_NAME_PREFIXES)
+REQUIRED_DENIES_LOWER = _lower(REQUIRED_DENIES)
 
 
 def check_policy(document: Any, raw_text: str) -> list[str]:
@@ -70,7 +83,7 @@ def check_policy(document: Any, raw_text: str) -> list[str]:
         return problems + ["policy must have a non-empty Statement list"]
 
     sids: set[str] = set()
-    denied: set[str] = set()
+    denied: set[str] = set()  # lower case
     for index, statement in enumerate(statements):
         sid = statement.get("Sid") if isinstance(statement, dict) else None
         where = f"statement {sid or index}"
@@ -82,28 +95,37 @@ def check_policy(document: Any, raw_text: str) -> list[str]:
         sids.add(sid)
         if "NotAction" in statement or "NotResource" in statement:
             problems.append(f"{where}: NotAction and NotResource are not allowed")
+        if {"Condition", "Principal", "NotPrincipal"} & statement.keys():
+            problems.append(f"{where}: conditions are not allowed in this policy")
         effect = statement.get("Effect")
         actions = [str(action) for action in _as_list(statement.get("Action", []))]
         if not actions:
             problems.append(f"{where}: needs at least one Action")
         if effect == "Deny":
-            denied.update(actions)
+            denied.update(action.lower() for action in actions)
             if _as_list(statement.get("Resource")) != ["*"]:
                 problems.append(f"{where}: a Deny must apply to every resource")
             continue
         if effect != "Allow":
             problems.append(f"{where}: Effect must be Allow or Deny")
             continue
+        resources = [str(resource).lower() for resource in _as_list(statement.get("Resource", []))]
         for action in actions:
+            lowered = action.lower()
             service, _, name = action.partition(":")
             if not service or not name:
                 problems.append(f"{where}: '{action}' is not a service:Action pair")
             elif "*" in action:
                 problems.append(f"{where}: '{action}' uses a wildcard")
-            elif action in FORBIDDEN_ALLOWS:
+            elif lowered in FORBIDDEN_LOWER or lowered.startswith(FORBIDDEN_ALLOW_PREFIXES):
                 problems.append(f"{where}: '{action}' must never be granted")
-            elif action not in READ_EXCEPTIONS and not name.startswith(READ_NAME_PREFIXES):
+            elif lowered not in READ_EXCEPTIONS_LOWER and not name.lower().startswith(READ_PREFIXES_LOWER):
                 problems.append(f"{where}: '{action}' is not a read action")
-    for action in sorted(REQUIRED_DENIES - denied):
-        problems.append(f"missing explicit deny for '{action}'")
+            elif lowered == "apigateway:get" and any(
+                path in resource for resource in resources for path in SECRET_API_GATEWAY_PATHS
+            ):
+                problems.append(f"{where}: usage plans and API keys expose key values and must not be readable")
+    for action in sorted(REQUIRED_DENIES):
+        if action.lower() not in denied:
+            problems.append(f"missing explicit deny for '{action}'")
     return problems

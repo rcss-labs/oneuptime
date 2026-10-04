@@ -103,3 +103,51 @@ def test_account_id_is_reported(policy):
 @pytest.mark.parametrize("document", [None, [], {"Version": "2008-10-17", "Statement": []}, {"Version": "2012-10-17"}])
 def test_malformed_documents_are_reported(document):
     assert check_policy(document, json.dumps(document)) != []
+
+
+@pytest.mark.parametrize(
+    "action, expected",
+    [
+        ("secretsmanager:GetSecretvalue", "must never be granted"),
+        ("SECRETSMANAGER:GETSECRETVALUE", "must never be granted"),
+        ("s3:GetObjectVersion", "must never be granted"),
+        ("s3:getobjecttagging", "must never be granted"),
+        ("S3:GetObjectAcl", "must never be granted"),
+        ("ecs:updateservice", "is not a read action"),
+    ],
+)
+def test_action_names_are_compared_without_regard_to_case(policy, action, expected):
+    assert any(expected in problem for problem in problems(allow(policy, action)))
+
+
+def test_lower_case_read_names_are_still_reads(policy):
+    assert problems(allow(policy, "ec2:describeinstances", "logs:startquery")) == []
+
+
+def test_required_deny_in_another_case_counts(policy):
+    document = copy.deepcopy(policy)
+    deny = next(s for s in document["Statement"] if s["Effect"] == "Deny")
+    deny["Action"] = [a.upper() if a == "kms:Decrypt" else a for a in deny["Action"]]
+    assert problems(document) == []
+
+
+@pytest.mark.parametrize("effect", ["Allow", "Deny"])
+@pytest.mark.parametrize("key, value", [("Condition", {"Bool": {"aws:SecureTransport": "true"}}), ("Principal", "*"), ("NotPrincipal", "*")])
+def test_conditions_and_principals_are_reported(policy, effect, key, value):
+    document = copy.deepcopy(policy)
+    statement = next(s for s in document["Statement"] if s["Effect"] == effect)
+    statement[key] = value
+    assert any("conditions are not allowed in this policy" in p for p in problems(document))
+
+
+@pytest.mark.parametrize("resource", ["arn:aws:apigateway:*::/usageplans", "arn:aws:apigateway:*::/usageplans/*", "arn:aws:apigateway:*::/apikeys/*", "arn:aws:apigateway:*::/UsagePlans/x/keys"])
+def test_api_gateway_usage_plans_and_keys_are_reported(policy, resource):
+    document = copy.deepcopy(policy)
+    statement = next(s for s in document["Statement"] if "apigateway:GET" in s.get("Action", []))
+    statement["Resource"].append(resource)
+    assert any("usage plans and API keys expose key values" in p for p in problems(document))
+
+
+def test_api_gateway_grant_has_no_usage_plan_resources(policy):
+    statement = next(s for s in policy["Statement"] if "apigateway:GET" in s.get("Action", []))
+    assert not [r for r in statement["Resource"] if "usageplans" in r or "apikeys" in r]

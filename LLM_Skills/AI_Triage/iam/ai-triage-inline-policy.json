@@ -61,7 +61,7 @@
       "Action": ["apigateway:GET"],
       "Resource": [
         "arn:aws:apigateway:*::/restapis/*", "arn:aws:apigateway:*::/apis/*", "arn:aws:apigateway:*::/account",
-        "arn:aws:apigateway:*::/usageplans", "arn:aws:apigateway:*::/usageplans/*", "arn:aws:apigateway:*::/domainnames/*"
+        "arn:aws:apigateway:*::/domainnames/*"
       ]
     },
     {

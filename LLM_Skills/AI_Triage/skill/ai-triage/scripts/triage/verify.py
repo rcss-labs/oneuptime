@@ -65,8 +65,8 @@ SIMULATED_READS: tuple[str, ...] = (
     "config:GetResourceConfigHistory",
     "cloudtrail:LookupEvents",
 )
-# The simulator must not answer "allowed" for any of these.
-SIMULATED_WRITES: tuple[str, ...] = (
+# The simulator must not answer "allowed" for any of these writes and secret reads.
+SIMULATED_DENIED: tuple[str, ...] = (
     "ecs:UpdateService",
     "ecs:StopTask",
     "ecs:ExecuteCommand",
@@ -147,7 +147,7 @@ def run_simulation(account: Account, role_name: str, runner: Runner) -> list[Che
     arn = next((r.get("Arn") for r in (roles.data or {}).get("Roles", []) if r.get("RoleName") == role_name), None) if roles.ok else None
     if arn is None:
         return [CheckResult(account.alias, "Simulator", FAILED, "could not find the role behind the triage profile")]
-    actions = SIMULATED_READS + SIMULATED_WRITES
+    actions = SIMULATED_READS + SIMULATED_DENIED
     simulation = run_aws(
         "iam",
         "simulate-principal-policy",
@@ -167,7 +167,7 @@ def run_simulation(account: Account, role_name: str, runner: Runner) -> list[Che
         decision = decisions.get(action, "no answer")
         status = PASSED if decision == "allowed" else FAILED
         results.append(CheckResult(account.alias, f"Allowed: {action}", status, "" if status == PASSED else decision))
-    for action in SIMULATED_WRITES:
+    for action in SIMULATED_DENIED:
         decision = decisions.get(action, "no answer")
         status = PASSED if decision in ("implicitDeny", "explicitDeny") else FAILED
         results.append(CheckResult(account.alias, f"Denied: {action}", status, "" if status == PASSED else decision))

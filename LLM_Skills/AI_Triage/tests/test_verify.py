@@ -7,7 +7,7 @@ from triage.verify import (
     FAILED,
     PASSED,
     SIMULATED_READS,
-    SIMULATED_WRITES,
+    SIMULATED_DENIED,
     SKIPPED,
     exit_code,
     render_table,
@@ -25,7 +25,7 @@ def identity(account_id="111111111111", role=ROLE):
 
 def simulation(overrides=None):
     decisions = {action: "allowed" for action in SIMULATED_READS}
-    decisions.update({action: "implicitDeny" for action in SIMULATED_WRITES})
+    decisions.update({action: "implicitDeny" for action in SIMULATED_DENIED})
     decisions["kms:Decrypt"] = "explicitDeny"
     decisions.update(overrides or {})
     return {"EvaluationResults": [{"EvalActionName": a, "EvalDecision": d} for a, d in decisions.items()]}

@@ -43,3 +43,10 @@ def test_readme_covers_the_required_sections():
         assert heading in text
     for script in ("validate_map.py", "preflight.py", "verify_access.py", "install.sh"):
         assert script in text
+
+
+def test_documents_say_that_api_keys_are_not_readable():
+    text = DOC.read_text()
+    assert "**API Gateway** usage plans and API keys are not readable, because they expose key values." in text
+    api_row = next(line for line in text.splitlines() if line.startswith("| API Gateway"))
+    assert "usage plan" not in api_row.lower()
