@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import bisect
+import collections
 import copy
 import functools
 import hashlib
@@ -18,7 +19,7 @@ Span = tuple[int, int]
 SpanRule = Callable[[str], list[Span]]
 
 PLACEHOLDER_RE = re.compile(r"<[A-Z]+-\d+>")
-_NUMBERED_PLACEHOLDER_RE = re.compile(r"<(SECRET|EMAIL|IP)-(\d+)>")
+_NUMBERED_PLACEHOLDER_RE = re.compile(r"<(SECRET|EMAIL|IP|TOKEN|PHONE|UNREADABLE)-(\d+)>")
 _SCHEME_AND_PLACEHOLDER_RE = re.compile(r"(?:[A-Za-z]+ )?<[A-Z]+-\d+>")
 
 # A name is secret when one of its parts (split on separators and camel case, trailing digits
@@ -607,13 +608,23 @@ def _balanced_spans(text: str) -> list[list]:
     return top
 
 
+PLACEHOLDER_CATEGORIES = ("SECRET", "EMAIL", "IP", "TOKEN", "PHONE", "UNREADABLE")
+# counts() always reports these; the others only once they occur.
+_ALWAYS_COUNTED = ("SECRET", "EMAIL", "IP")
+
+
+def _digest(original: str) -> str:
+    # surrogatepass: half an emoji from a truncated JSON escape must not make redaction raise
+    return hashlib.sha256(original.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 class Redactor:
     """Replaces sensitive values with stable placeholders such as <SECRET-1>."""
 
     def __init__(self) -> None:
         # Keyed by a digest so the original values are never held in memory.
-        self._numbers: dict[str, dict[str, int]] = {"SECRET": {}, "EMAIL": {}, "IP": {}}
-        self._highest: dict[str, int] = {"SECRET": 0, "EMAIL": 0, "IP": 0}
+        self._numbers: dict[str, dict[str, int]] = {category: {} for category in PLACEHOLDER_CATEGORIES}
+        self._highest: dict[str, int] = {category: 0 for category in PLACEHOLDER_CATEGORIES}
         self._depth = 0
         self._depth_limit = MAX_DIRECT_DEPTH
         self._embedded_nesting = 0
@@ -626,7 +637,7 @@ class Redactor:
             self._highest[category] = max(self._highest[category], int(match.group(2)))
 
     def _placeholder(self, category: str, original: str) -> str:
-        digest = hashlib.sha256(original.encode()).hexdigest()
+        digest = _digest(original)
         numbers = self._numbers[category]
         if digest not in numbers:
             self._highest[category] += 1
@@ -701,12 +712,12 @@ class Redactor:
         self._embedded_nesting += 1
         try:
             replacements: list[tuple[int, int, str]] = []
-            pending = _balanced_spans(text)
+            pending = collections.deque(_balanced_spans(text))
             while pending:
-                start, end, children = pending.pop(0)
+                start, end, children = pending.popleft()
                 outcome = self._redact_span(text[start:end])
                 if outcome is _FAILED:
-                    pending = children + pending
+                    pending.extendleft(reversed(children))
                 elif outcome is not None:
                     replacements.append((start, end, outcome))
             if not replacements:
@@ -723,7 +734,26 @@ class Redactor:
         finally:
             self._embedded_nesting -= 1
 
+    def _unreadable(self, original: Any) -> str:
+        """The last safety net: a whole-string placeholder, never the original and never a crash."""
+        try:
+            key = original if isinstance(original, str) else f"{type(original).__name__}:{id(original)}"
+            digest = _digest(key)
+        except Exception:
+            digest = f"unhashable:{id(original)}"
+        numbers = self._numbers["UNREADABLE"]
+        if digest not in numbers:
+            self._highest["UNREADABLE"] += 1
+            numbers[digest] = self._highest["UNREADABLE"]
+        return f"<UNREADABLE-{numbers[digest]}>"
+
     def text(self, value: str) -> str:
+        try:
+            return self._text(value)
+        except Exception:
+            return self._unreadable(value)
+
+    def _text(self, value: str) -> str:
         self._reserve_existing_placeholders(value)
         value = self._redact_embedded(value)
         for _, rule in SECRET_RULES:
@@ -735,11 +765,13 @@ class Redactor:
         )
 
     def value(self, obj: Any, key: str | None = None) -> Any:
-        secret = key is not None and looks_secret_key(key)
         try:
+            secret = key is not None and looks_secret_key(key)
             return self._walk(obj, secret, secret, key is not None and is_authorization_key(key))
         except (_TooDeep, RecursionError):
             return DEEP_STRUCTURE_PLACEHOLDER
+        except Exception:
+            return self._unreadable(obj)
 
     def _secret_scalar(self, obj: Any) -> str:
         text = str(obj)
@@ -795,6 +827,12 @@ class Redactor:
         return self._walk_scalar(obj, secret, immediate, authorization)
 
     def _walk_scalar(self, obj: Any, secret: bool, immediate: bool, authorization: bool) -> Any:
+        try:
+            return self._walk_scalar_unguarded(obj, secret, immediate, authorization)
+        except Exception:
+            return self._unreadable(obj)
+
+    def _walk_scalar_unguarded(self, obj: Any, secret: bool, immediate: bool, authorization: bool) -> Any:
         if isinstance(obj, bool) or obj is None:
             return obj
         if isinstance(obj, (int, float)):
@@ -808,7 +846,7 @@ class Redactor:
                 return self._authorization_value(obj) if authorization else self._secret_scalar(obj)
             structured = self._json_string(obj)
             return structured if structured is not None else self.text(obj)
-        return obj
+        return self._secret_scalar(obj) if secret else obj
 
     def _walk_container(self, obj: Any, secret: bool, immediate: bool, authorization: bool, keep: bool) -> Any:
         if isinstance(obj, dict):
@@ -883,7 +921,10 @@ class Redactor:
         return result
 
     def counts(self) -> dict[str, int]:
-        return {category.lower(): len(numbers) for category, numbers in self._numbers.items()}
+        return {
+            category.lower(): len(numbers) for category, numbers in self._numbers.items()
+            if numbers or category in _ALWAYS_COUNTED
+        }
 
 
 @dataclass(frozen=True)
@@ -896,10 +937,13 @@ class AuditHit:
 def audit_text(text: str) -> list[AuditHit]:
     """Locate anything the secret rules would still change, for secrets only: emails and IP
     addresses are not reported. Reports positions, never values."""
-    line_starts = [0] + [match.end() for match in re.finditer("\n", text)]
-    hits = []
-    for category, rule in SECRET_RULES:
-        for start, _ in rule(text):
-            line = bisect.bisect_right(line_starts, start)
-            hits.append(AuditHit(category, line, start - line_starts[line - 1] + 1))
-    return sorted(hits, key=lambda hit: (hit.line, hit.column))
+    try:
+        line_starts = [0] + [match.end() for match in re.finditer("\n", text)]
+        hits = []
+        for category, rule in SECRET_RULES:
+            for start, _ in rule(text):
+                line = bisect.bisect_right(line_starts, start)
+                hits.append(AuditHit(category, line, start - line_starts[line - 1] + 1))
+        return sorted(hits, key=lambda hit: (hit.line, hit.column))
+    except Exception:
+        return [AuditHit("unreadable", 1, 1)]  # fail closed: the text cannot be shown to be clean

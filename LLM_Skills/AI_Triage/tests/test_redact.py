@@ -1116,3 +1116,74 @@ def test_ruling_11_personal_names(name, expected):
 def test_report_gate_line_is_not_redacted():
     line = "- Gates passed: evidence, no_contradiction, rank"
     assert Redactor().text(line) == line
+
+
+# Ruling 1: never raise
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda r: r.text("password=ab\ud800cd"),
+        lambda r: r.value({"password": "x\udfff"}),
+        lambda r: r.value({"m": '{"password": "a\\ud800b"}'}),
+        lambda r: r.text('{"token": "\udc80' + PW + '"}'),
+        lambda r: r.value(["--password", "a\ud800"]),
+    ],
+)
+def test_lone_surrogates_never_raise_and_never_leak(call):
+    out = call(Redactor())
+    assert "\ud800cd" not in repr(out) and PW not in repr(out)
+
+
+def test_random_surrogate_strings_never_raise():
+    import random
+
+    rng = random.Random(4)
+    alphabet = ["password=", "token: ", '{"a": "', '"}', "[", "]", "\ud800", "\udfff", "x", " ", "%40", "\x1b[0m"]
+    redactor = Redactor()
+    for _ in range(2000):
+        source = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 12)))
+        assert isinstance(redactor.text(source), str)
+        redactor.value({"k": source, "password": source})
+        audit_text(source)
+
+
+def test_unexpected_error_yields_a_whole_string_placeholder(monkeypatch):
+    def broken(text):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(redact_module, "SECRET_RULES", (("broken", broken),))
+    redactor = Redactor()
+    source = f"password={PW} and more"
+    assert redactor.text(source) == "<UNREADABLE-1>"
+    assert redactor.text(source) == "<UNREADABLE-1>"
+    out = redactor.value({"note": source, "n": 3})
+    assert list(out.values()) == ["<UNREADABLE-1>", 3]  # keys go through text() too, so they are unreadable
+    assert redactor.value(source) == "<UNREADABLE-1>"
+    hits = audit_text(source)
+    assert [hit.category for hit in hits] == ["unreadable"]
+    assert PW not in repr(hits)
+
+
+def test_object_whose_str_raises_does_not_crash_value():
+    class Hostile:
+        def __str__(self):
+            raise RuntimeError("no")
+
+    out = Redactor().value({"password": Hostile()})
+    assert out["password"].startswith("<UNREADABLE-")
+
+
+# Ruling 2: cost
+
+MEGABYTE = 1_000_000
+
+
+@pytest.mark.parametrize("shape", ["[]", "{}", '["a"] ', "[{}]", "{[]}", '{"a":', "\\'", "\x1b[0m", "%41", "+1 "])
+def test_one_megabyte_bracket_shapes_are_fast(shape):
+    source = shape * (MEGABYTE // len(shape))
+    for call in (Redactor().text, lambda s: Redactor().value({"m": s}), audit_text):
+        started = time.perf_counter()
+        call(source)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 2, (shape, elapsed)
