@@ -6,6 +6,7 @@ text, stores each request and answer, and composes labels from the stored answer
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 from pathlib import Path
@@ -56,6 +57,17 @@ def prepare_state(value: Any, config: TriageConfig, redactor: Redactor) -> Any:
     return redactor.value(_replace_accounts(value, aliases))
 
 
+def _json_safe(value: Any) -> Any:
+    """Copy of the value where a non-finite float becomes its name as text, so every stored file is valid JSON."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return "NaN" if math.isnan(value) else ("Infinity" if value > 0 else "-Infinity")
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 class JudgmentStore:
     """Writes judgments/<nnn>-<kind>.json, numbered from 001 in the order asked."""
 
@@ -73,7 +85,7 @@ class JudgmentStore:
             "kind": kind, "subject": subject, "state": state, "questions": questions,
             "answers": reply.answers, "model": reply.model, "request_id": reply.request_id, "usage": reply.usage,
         }
-        path.write_text(json.dumps(record, indent=2) + "\n")
+        path.write_text(json.dumps(_json_safe(record), indent=2, allow_nan=False) + "\n")
         return path
 
 
@@ -100,7 +112,8 @@ class JudgeSession:
 def _evidence_of(finding: dict, facts: dict[str, dict]) -> list[dict]:
     cited = [facts[fact_id] for fact_id in finding.get("fact_ids", []) if fact_id in facts]
     if not cited:
-        return [{"summary": summary, "excerpt": ""} for summary in finding.get("fact_summaries", [])]
+        summaries = finding.get("fact_summaries")
+        return [{"summary": summary, "excerpt": ""} for summary in (summaries.values() if isinstance(summaries, dict) else [])]
     return [{"summary": fact.get("summary", ""), "excerpt": fact.get("excerpt", "")} for fact in cited]
 
 
@@ -119,7 +132,7 @@ def judge_findings(
         finding = findings[finding_id]
         state = {"claim": finding["claim"], "evidence": _evidence_of(finding, facts)}
         answer = session.ask("finding", finding_id, state, {"evidence_relation": questions["evidence_relation"]}).answers["evidence_relation"]
-        results[finding_id] = {"relation": answer["choice"], "confidence": answer["confidence"],
+        results[finding_id] = {"relation": answer["choice"], "confidence": compose.probability(answer["confidence"]),
                                "verdict": compose.finding_verdict(answer, thresholds)}
     return results
 
@@ -190,12 +203,13 @@ def match_resource(
     except JudgeUnavailable as unavailable:
         return {"decision": "ask", "confidence": None, "probabilities": {},
                 "reason": f"TypeSafe is unavailable: {unavailable.reason}"}
-    decision, confidence = answer["choice"], answer["confidence"]
-    result = {"decision": decision, "confidence": confidence, "probabilities": answer["probabilities"]}
+    decision, confidence = answer["choice"], compose.probability(answer["confidence"])
+    probabilities = {name: compose.probability(value) for name, value in answer["probabilities"].items()}
+    result = {"decision": decision, "confidence": confidence, "probabilities": probabilities}
     if decision not in candidates:
         result.update(decision="ask", reason="No candidate clearly matches the incident")
-    elif confidence < thresholds["ask_engineer_below"]:
-        result.update(decision="ask", reason=f"The best match has confidence {compose.number(confidence)}, below {compose.number(thresholds['ask_engineer_below'])}")
+    elif confidence is None or not confidence >= thresholds["ask_engineer_below"]:
+        result.update(decision="ask", reason=f"The best match has confidence {compose.number(answer['confidence'])}, below {compose.number(thresholds['ask_engineer_below'])}")
     return result
 
 
@@ -311,11 +325,12 @@ def _verdict(verdicts: dict[str, dict], finding_id: str) -> str:
 
 def _cause_gates(
     cause: dict, verdicts: dict[str, dict], findings: dict[str, dict], incident_start, thresholds: dict,
-    rank: dict, fit: float, scope: str,
-) -> tuple[dict[str, bool], bool, float, list[str]]:
+    rank: dict, fit: float | None, scope: str,
+) -> tuple[dict[str, bool], bool, float | None, list[str]]:
     """The six gates of a cause, whether the ranking picked it twice, its lower ranking probability, and reasons."""
     cause_id, supporting = cause["id"], cause.get("supporting", [])
-    low = min(answer["probabilities"].get(cause_id, 0.0) for answer in rank["answers"])
+    picked = [compose.probability(answer["probabilities"].get(cause_id)) for answer in rank["answers"]]
+    low = None if None in picked else min(picked)
     top = rank["choices"] == [cause_id, cause_id]
     timing = compose.timing_gate(cause, findings, incident_start)
     unverified = [finding_id for finding_id in supporting if _verdict(verdicts, finding_id) != "verified"]
@@ -324,9 +339,9 @@ def _cause_gates(
     gates = {
         "evidence": bool(supporting) and not unverified,
         "no_contradiction": not contradicted and not opposed,
-        "rank": top and low >= thresholds["cause_top_probability"],
+        "rank": top and low is not None and low >= thresholds["cause_top_probability"],
         "timing": timing is True,
-        "symptom_fit": fit >= compose.SYMPTOM_FIT_MIN,
+        "symptom_fit": fit is not None and fit >= compose.SYMPTOM_FIT_MIN,
         "scope": scope == "matches",
     }
     reasons = []
@@ -361,7 +376,7 @@ def _compose_summary(
     for cause in report["causes"]:
         answers = cause_answers[cause["id"]]
         score = answers["symptom_fit"]
-        fit = score["score"] / (score["levels"] - 1)
+        fit = compose.symptom_fit_value(score)
         scope = answers["scope_fit"]["choice"]
         gates, top, low, reasons = _cause_gates(cause, verdicts, findings, incident_start, thresholds, rank, fit, scope)
         summary["causes"][cause["id"]] = {
@@ -378,8 +393,8 @@ def _compose_summary(
         cause_label = summary["causes"].get(action.get("cause"), {}).get("label", "candidate")
         label, reasons = compose.action_label(cause_label, answers["target"], answers["specific"]["noul"])
         summary["actions"][action["id"]] = {
-            "label": label, "target": answers["target"]["choice"], "target_confidence": answers["target"]["confidence"],
-            "specific": answers["specific"]["noul"], "reasons": reasons,
+            "label": label, "target": answers["target"]["choice"], "target_confidence": compose.probability(answers["target"]["confidence"]),
+            "specific": compose.probability(answers["specific"]["noul"]), "reasons": reasons,
             "digest": action_digest(action),
         }
     return summary
@@ -388,7 +403,7 @@ def _compose_summary(
 def write_summary(case_dir: Path, summary: dict) -> Path:
     path = Path(case_dir) / "judgments" / SUMMARY_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(summary, indent=2) + "\n")
+    path.write_text(json.dumps(_json_safe(summary), indent=2, allow_nan=False) + "\n")
     return path
 
 
@@ -457,4 +472,4 @@ def run_adhoc(case_dir: Path, session: JudgeSession, config: TriageConfig, docum
         summary = _base_summary(config, "available", reply.model, judged=False)
     summary.setdefault("adhoc", []).append({"id": question_id, "reason": reason})
     write_summary(case_dir, summary)
-    return {"id": question_id, "answer": reply.answers[question_id]}
+    return {"id": question_id, "answer": _json_safe(reply.answers[question_id])}

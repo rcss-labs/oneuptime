@@ -1,6 +1,7 @@
 """Turn stored TypeSafe answers into verdicts, gates, and labels with explicit rules."""
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 
 from triage.window import parse_time
@@ -14,8 +15,27 @@ TIMING_TOLERANCE_SECONDS = 300
 MAX_FINDINGS_JUDGED = 40
 
 
+def probability(value: object) -> float | None:
+    """The value when it is a finite number from 0 to 1, else None. Every comparison goes through this."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return value if 0 <= value <= 1 else None
+
+
+def symptom_fit_value(answer: dict) -> float | None:
+    """The score as a share of its highest level, or None when the score or levels are not usable."""
+    score, levels = answer.get("score"), answer.get("levels")
+    if isinstance(levels, bool) or not isinstance(levels, int) or levels < 2:
+        return None
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+        return None
+    return score / (levels - 1) if 0 <= score <= levels - 1 else None
+
+
 def finding_verdict(answer: dict, thresholds: dict) -> str:
-    choice, confidence = answer["choice"], answer["confidence"]
+    choice, confidence = answer.get("choice"), probability(answer.get("confidence"))
+    if not isinstance(choice, str) or confidence is None:
+        return "uncertain"
     supports_at = thresholds["evidence_supports"]
     if choice == "supports" and confidence >= supports_at:
         return "verified"
@@ -50,18 +70,20 @@ def cause_label(gates: dict[str, bool], top_choice: bool = True) -> str:
     return "probable" if sum(1 for passed in gates.values() if not passed) == 1 else "candidate"
 
 
-def action_label(cause_label: str, target: dict, specific: float) -> tuple[str, list[str]]:
+def action_label(cause_label: str, target: dict, specific: object) -> tuple[str, list[str]]:
     reasons = []
+    original_specific = specific
+    confidence, specific = probability(target.get("confidence")), probability(specific)
     if cause_label != "confirmed":
         reasons.append(f"The cause is labelled {cause_label}, not confirmed")
-    if target["choice"] != "addresses_cause":
-        reasons.append(f"The change was judged as {target['choice']}, not as addressing the cause")
-    elif target["confidence"] < ACTION_TARGET_CONFIDENCE:
+    if target.get("choice") != "addresses_cause":
+        reasons.append(f"The change was judged as {target.get('choice')}, not as addressing the cause")
+    elif confidence is None or not confidence >= ACTION_TARGET_CONFIDENCE:
         reasons.append(
-            f"The change addresses the cause with confidence {number(target['confidence'])}, below {number(ACTION_TARGET_CONFIDENCE)}"
+            f"The change addresses the cause with confidence {number(target.get('confidence'))}, below {number(ACTION_TARGET_CONFIDENCE)}"
         )
-    if specific < ACTION_SPECIFIC_MIN:
-        reasons.append(f"The action is specific with probability {number(specific)}, below {number(ACTION_SPECIFIC_MIN)}")
+    if specific is None or not specific >= ACTION_SPECIFIC_MIN:
+        reasons.append(f"The action is specific with probability {number(original_specific)}, below {number(ACTION_SPECIFIC_MIN)}")
     return ("candidate" if reasons else "recommended"), reasons
 
 
@@ -71,4 +93,6 @@ def cap_label(label: str, cap: str) -> str:
 
 def number(value: float) -> str:
     """A probability as short text, for example 0.48 or 0.6."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "invalid"
     return f"{round(value, 2):g}"

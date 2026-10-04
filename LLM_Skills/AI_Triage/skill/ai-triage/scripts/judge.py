@@ -83,7 +83,7 @@ def _locate(args: argparse.Namespace, config, judge: Judge | None) -> int:
         raise JudgmentError(["case.json lists no candidates to choose between"])
     result = match_resource(_session(args, config, judge), questions, incident_state(args.case_dir), candidates,
                             _rng(args.case_dir), config.typesafe_thresholds)
-    print(json.dumps(result, indent=2))
+    print(json.dumps(result, indent=2, allow_nan=False))
     return 0
 
 

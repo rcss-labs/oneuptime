@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from triage import compose
 from triage.compose import (
     ACTION_SPECIFIC_MIN,
     ACTION_TARGET_CONFIDENCE,
@@ -164,3 +165,50 @@ def test_action_reports_every_miss():
 def test_cap_label_never_raises_a_label(label, cap, expected):
     assert cap_label(label, cap) == expected
 
+
+
+# fail closed on answers that are not probabilities
+
+NOT_PROBABILITIES = [float("nan"), float("inf"), float("-inf"), -0.1, 1.01, 7.0, True, "0.9", None]
+
+
+@pytest.mark.parametrize("bad", NOT_PROBABILITIES)
+def test_a_confidence_that_is_not_a_probability_is_uncertain(bad):
+    for name in ("supports", "contradicts", "says_nothing"):
+        assert finding_verdict(relation(name, bad), THRESHOLDS) == "uncertain"
+
+
+def test_a_choice_that_is_not_text_is_uncertain():
+    assert finding_verdict({"choice": None, "confidence": 0.99}, THRESHOLDS) == "uncertain"
+    assert finding_verdict({"choice": ["supports"], "confidence": 0.99}, THRESHOLDS) == "uncertain"
+
+
+@pytest.mark.parametrize("bad", NOT_PROBABILITIES)
+def test_an_action_target_confidence_that_is_not_a_probability_is_a_miss(bad):
+    label, reasons = action_label("confirmed", {**CONFIRMED_TARGET, "confidence": bad}, 0.9)
+    assert label == "candidate" and len(reasons) == 1
+
+
+@pytest.mark.parametrize("bad", NOT_PROBABILITIES)
+def test_an_action_specificity_that_is_not_a_probability_is_a_miss(bad):
+    label, reasons = action_label("confirmed", CONFIRMED_TARGET, bad)
+    assert label == "candidate" and len(reasons) == 1
+
+
+def test_probability_accepts_the_closed_unit_interval_only():
+    assert [compose.probability(value) for value in (0, 0.0, 0.5, 1, 1.0)] == [0, 0.0, 0.5, 1, 1.0]
+    assert all(compose.probability(value) is None for value in NOT_PROBABILITIES)
+
+
+def test_symptom_fit_value_needs_a_score_inside_its_levels():
+    good = {"score": 2.0, "levels": 4}
+    assert compose.symptom_fit_value(good) == pytest.approx(2 / 3)
+    for bad in ({"score": 9.0, "levels": 4}, {"score": -1.0, "levels": 4}, {"score": float("nan"), "levels": 4},
+                {"score": 1.0, "levels": 1}, {"score": 1.0, "levels": 0}, {"score": 1.0, "levels": "4"},
+                {"score": True, "levels": 4}, {"levels": 4}, {}):
+        assert compose.symptom_fit_value(bad) is None
+
+
+def test_number_text_never_raises_on_odd_values():
+    assert compose.number(0.48) == "0.48" and compose.number(0.6) == "0.6"
+    assert compose.number(None) == "invalid" and compose.number("x") == "invalid"

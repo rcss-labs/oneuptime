@@ -59,18 +59,22 @@ def build_case(tmp_path, config, extra_facts=0, labels=("confirmed", "candidate"
 
     findings = [
         finding(1, CLAIM_1, "ecs-0001", "exited with code 137", "incident_time", "2026-10-04T10:41:10Z"),
-        finding(2, CLAIM_2, "ecs-0002", "running 0", "current", None),
-        finding(3, CLAIM_3, "ecs-0003", "unchanged", "incident_time", "2026-10-04T10:50:00Z"),
-        finding(4, "Nobody lists this one", "ecs-0001", "code 137", "incident_time", None),
+        finding(2, CLAIM_2, "ecs-0002", "0 running tasks", "current", None),
+        finding(3, CLAIM_3, "ecs-0003", "policy unchanged", "incident_time", "2026-10-04T10:50:00Z"),
+        finding(4, "Nobody lists this one", "ecs-0001", "with code 137", "incident_time", None),
     ]
     (tmp_path / "findings").mkdir()
     (tmp_path / "findings" / "compute.json").write_text(json.dumps({"analyst": "compute", "findings": findings}))
     assert check_findings(tmp_path)["rejected"] == []
 
     (tmp_path / "case.json").write_text(json.dumps({
-        "incident": {"number": "INC-123", "title": "Checkout API is down"},
+        "case_dir": str(tmp_path),
+        "incident": {"number": "INC-123", "title": "Checkout API is down", "url": "", "severity": "", "state": "",
+                     "declared_at": "2026-10-04T10:45:00Z", "impact_started_at": "2026-10-04T10:42:00Z", "resolved_at": None},
         "incident_start": "2026-10-04T10:42:00Z",
+        "window": {"start": "2026-10-04T09:42:00Z", "end": "2026-10-04T11:00:00Z"},
         "match": {"status": "many", "candidates": []},
+        "target": None,
     }))
     account = config.accounts["prod-main"]
     action = {"type": "mitigation", "label": "recommended", "title": "Raise the memory limit",
@@ -204,6 +208,33 @@ def test_store_continues_after_existing_files(tmp_path):
 
 
 # what is asked
+
+def test_a_bare_fact_id_shared_by_two_evidence_files_is_judged_from_the_cited_file(tmp_path, config):
+    from triage.findings import load_facts, valid_findings
+    first = Evidence("ecs", "prod-main", "eu-west-1", WINDOW)
+    first.add(kind=INCIDENT_TIME, resource="svc", summary="Container exited with code 137 in Ireland", time="2026-10-04T10:41:00Z")
+    first_path = first.write(tmp_path, "")
+    second = Evidence("ecs", "prod-main", "eu-central-1", WINDOW)
+    second.add(kind=INCIDENT_TIME, resource="svc", summary="Container exited with code 137 in Frankfurt", time="2026-10-04T10:41:00Z")
+    second_path = second.write(tmp_path, "")
+    cited = f"{second_path.stem}:ecs-0001"
+    (tmp_path / "findings").mkdir()
+    (tmp_path / "findings" / "compute.json").write_text(json.dumps({"analyst": "compute", "findings": [{
+        "id": "compute-9", "claim": "Frankfurt tasks were killed", "fact_ids": [cited], "excerpt": "exited with code 137 in Frankfurt",
+        "provenance": "incident_time", "confidence": "high", "time": None}]}))
+    assert check_findings(tmp_path)["rejected"] == []
+    assert first_path.stem != second_path.stem
+    judge = FakeJudge(make_responder())
+    judge_findings(session_for(tmp_path, config, judge), QUESTIONS, valid_findings(tmp_path), load_facts(tmp_path), ["compute-9"], limit=40)
+    assert judge.calls[0][0]["evidence"] == [{"summary": "Container exited with code 137 in Frankfurt", "excerpt": ""}]
+
+
+def test_a_finding_whose_facts_are_gone_falls_back_to_its_stored_summaries(tmp_path, config):
+    finding = {"claim": "c", "fact_ids": ["gone:ecs-0001"], "fact_summaries": {"gone:ecs-0001": "Stored summary"}}
+    judge = FakeJudge(make_responder())
+    judge_findings(session_for(tmp_path, config, judge), QUESTIONS, {"f-1": finding}, {}, ["f-1"], limit=40)
+    assert judge.calls[0][0]["evidence"] == [{"summary": "Stored summary", "excerpt": ""}]
+
 
 def test_findings_are_asked_one_request_each_with_only_their_own_facts(tmp_path, config):
     case_dir = build_case(tmp_path, config, extra_facts=30)
@@ -402,6 +433,63 @@ def test_symptom_fit_and_scope_gates_use_the_answers(tmp_path, config):
     assert cause["gates"]["symptom_fit"] is False and cause["gates"]["scope"] is False
     assert cause["label"] == "candidate" and cause["scope"] == "broader"
     assert len(cause["reasons"]) == 2
+
+
+# answers that are not probabilities fail closed
+
+def strict_json(path):
+    def refuse(constant):
+        raise AssertionError(f"{path} holds the non-JSON constant {constant}")
+    return json.loads(path.read_text(), parse_constant=refuse)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), 1.7, -0.2])
+def test_a_specificity_that_is_not_a_probability_never_recommends(tmp_path, config, bad):
+    case_dir = build_case(tmp_path, config)
+    summary = run(case_dir, config, FakeJudge(make_responder(specific=bad)))
+    assert summary["actions"]["A1"]["label"] == "candidate" and summary["actions"]["A1"]["specific"] is None
+    strict_json(case_dir / "judgments" / "summary.json")
+    for path in (case_dir / "judgments").glob("0*.json"):
+        strict_json(path)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), 1.7])
+def test_a_target_confidence_that_is_not_a_probability_never_recommends(tmp_path, config, bad):
+    summary = run(build_case(tmp_path, config), config, FakeJudge(make_responder(target=("addresses_cause", bad))))
+    assert summary["actions"]["A1"]["label"] == "candidate" and summary["actions"]["A1"]["target_confidence"] is None
+
+
+@pytest.mark.parametrize("bad", [float("nan"), 1.7])
+def test_a_ranking_probability_that_is_not_a_probability_fails_the_rank_gate(tmp_path, config, bad):
+    case_dir = build_case(tmp_path, config)
+    summary = run(case_dir, config, FakeJudge(make_responder(rank=(("C1", bad), ("C1", 0.9)))))
+    cause = summary["causes"]["C1"]
+    assert cause["gates"]["rank"] is False and cause["label"] != "confirmed" and cause["rank_probability"] is None
+    strict_json(case_dir / "judgments" / "summary.json")
+
+
+@pytest.mark.parametrize("bad", [9.0, -1.0, float("nan")])
+def test_a_symptom_score_outside_its_levels_fails_the_fit_gate(tmp_path, config, bad):
+    summary = run(build_case(tmp_path, config), config, FakeJudge(make_responder(fit=bad)))
+    cause = summary["causes"]["C1"]
+    assert cause["gates"]["symptom_fit"] is False and cause["symptom_fit"] is None and cause["label"] != "confirmed"
+
+
+@pytest.mark.parametrize("bad", [float("nan"), 7.0])
+def test_a_finding_confidence_that_is_not_a_probability_is_uncertain(tmp_path, config, bad):
+    case_dir = build_case(tmp_path, config)
+    summary = run(case_dir, config, FakeJudge(make_responder(relations={CLAIM_1: ("supports", bad), CLAIM_3: ("says_nothing", 0.9)})))
+    assert summary["findings"]["compute-1"]["verdict"] == "uncertain" and summary["findings"]["compute-1"]["confidence"] is None
+    assert summary["causes"]["C1"]["gates"]["evidence"] is False
+    strict_json(case_dir / "judgments" / "summary.json")
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), 1.7, -0.1])
+def test_locate_asks_when_the_confidence_is_not_a_probability(tmp_path, config, bad):
+    judge = FakeJudge(locate_answer("checkout-api/prod", bad))
+    result = locate(tmp_path, config, judge)
+    assert result["decision"] == "ask" and result["confidence"] is None
+    json.dumps(result, allow_nan=False)
 
 
 # the cap
