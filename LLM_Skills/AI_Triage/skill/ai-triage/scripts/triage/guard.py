@@ -9,6 +9,7 @@ from pathlib import Path
 from triage.config import TriageConfig
 from triage.guard_aws import check_aws
 from triage.guard_kubectl import check_kubectl
+from triage.guard_paths import protected_write_tripwire
 from triage.shell_parse import Segment, Unparseable, split_command
 from triage.verdict import ALLOW, ASK, DENY, PASS, Verdict, strictest
 
@@ -62,6 +63,7 @@ class GuardContext:
     kube_contexts: frozenset[str]
     opensearch_hosts: frozenset[str]
     skill_dir: str
+    cases_dir: str = ""
 
 
 def context_from_config(config: TriageConfig, skill_dir: Path) -> GuardContext:
@@ -71,6 +73,7 @@ def context_from_config(config: TriageConfig, skill_dir: Path) -> GuardContext:
         kube_contexts=config.kube_contexts(),
         opensearch_hosts=config.opensearch_hosts(),
         skill_dir=str(skill_dir),
+        cases_dir=str(config.cases_dir),
     )
 
 
@@ -260,8 +263,15 @@ def _own_script_verdict(segment: Segment, name: str) -> Verdict:
     return Verdict(ALLOW, f"triage script {name}" if name != OPENSEARCH_SCRIPT else "OpenSearch query through the triage tool")
 
 
-def decide(command: str, context: GuardContext | None, context_error: str = "") -> Verdict:
-    """Return allow, deny, ask, or pass for a whole command line."""
+def decide(command: str, context: GuardContext | None, context_error: str = "", cwd: str = "") -> Verdict:
+    """Return allow, deny, ask, or pass for a whole command line run in cwd."""
+    verdict = _decide_command(command, context, context_error)
+    skill_dir, cases_dir = (context.skill_dir, context.cases_dir) if context else ("", "")
+    tripwire = protected_write_tripwire(command, skill_dir, cases_dir, cwd)
+    return strictest([verdict, Verdict(ASK, tripwire)]) if tripwire else verdict
+
+
+def _decide_command(command: str, context: GuardContext | None, context_error: str) -> Verdict:
     if context is None:
         if is_sensitive(command):
             return Verdict(DENY, f"the triage guard has no valid config ({context_error}); fix it before running this")

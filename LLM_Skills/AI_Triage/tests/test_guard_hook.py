@@ -297,3 +297,11 @@ def test_file_tools_still_protect_the_skill_folder_without_a_config(tmp_path):
 def test_read_is_still_ignored(skill_with_cases):
     skill, run = skill_with_cases
     assert guard_hook.evaluate(file_payload("Read", {"file_path": str(run / "case.json")}), skill) == ""
+
+
+def test_bash_tripwire_uses_the_hook_cwd(skill_with_cases):
+    skill, run = skill_with_cases
+    command = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm case.json"},
+                          "cwd": str(run)})
+    assert decision(guard_hook.evaluate(command, skill))["permissionDecision"] == "ask"
+    assert guard_hook.evaluate(payload("rm case.json"), skill) == ""

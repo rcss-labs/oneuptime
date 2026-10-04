@@ -85,7 +85,8 @@ def evaluate(stdin_text: str, skill_dir: Path) -> str:
             context, error = context_from_config(load_config(default_config_path(skill_dir)), skill_dir), ""
         except ConfigError as exc:
             context, error = None, exc.errors[0]
-        return render(decide(command, context, error))
+        cwd = payload.get("cwd")
+        return render(decide(command, context, error, cwd if isinstance(cwd, str) else ""))
     except Exception as exc:  # fail closed for anything that touches aws or kubectl
         return _fail_closed(stdin_text, f"internal error ({exc})")
 

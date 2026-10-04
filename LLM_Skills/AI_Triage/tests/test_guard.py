@@ -552,3 +552,73 @@ def test_publish_without_accept_hits_keeps_its_answer(monkeypatch):
     monkeypatch.setenv("HOME", "/home/eng")
     command = f'"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/publish.py" confluence --case-dir c --accept-hits {HEX}'
     assert kind(command) == ASK
+
+
+# ---- guard additions, item 2: a tripwire for writes to protected paths --------
+
+CASE_RUN = "/home/eng/.ai-triage/cases/INC-1/20261004-101500"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f'rm -rf "$HOME/.ai-triage/cases/INC-1/20261004-101500/evidence"',
+        f"cp /tmp/x {SKILL}/config/service-map.yaml",
+        "sed -i '' s/a/b/ ~/.claude/skills/ai-triage/scripts/triage/guard.py",
+        f"echo x > {CASE_RUN}/case.json",
+        f"echo x >> {CASE_RUN}/audit.json",
+        f"jq . x | tee {CASE_RUN}/findings/checked.json",
+        f"mv /tmp/r.md {CASE_RUN}/report.md",
+        f"truncate -s 0 {CASE_RUN}/judgments/q1.json",
+        f"dd if=/dev/zero of={SKILL}/scripts/guard_hook.py",
+        f"chmod 777 {SKILL}/scripts",
+        f"ln -sf /tmp/evil {SKILL}/scripts/triage/guard.py",
+        f'cat "$HOME/.claude/skills/ai-triage/SKILL.md" > /tmp/copy',
+    ],
+)
+def test_a_write_word_next_to_a_protected_path_asks(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    verdict = decide(command, CONTEXT)
+    assert verdict.kind == ASK, command
+    assert "protected" in verdict.reason
+
+
+def test_bare_protected_names_count_only_when_cwd_is_inside_a_protected_folder(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert decide("rm case.json", CONTEXT, cwd=CASE_RUN).kind == ASK
+    assert decide("rm -r evidence", CONTEXT, cwd=CASE_RUN).kind == ASK
+    assert decide("rm x.stale", CONTEXT, cwd=CASE_RUN).kind == ASK
+    assert decide("rm case.json", CONTEXT, cwd="/home/eng/project").kind == PASS
+    assert decide("rm case.json", CONTEXT).kind == PASS
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"cat {SKILL}/config/service-map.yaml",
+        f"ls {CASE_RUN}/evidence",
+        f"{PY} {SCRIPT}/collect.py --case-dir {CASE_RUN} 2>/dev/null",
+        f"kubectl {KUBE_HOME} get pods 2>&1 | head -3",
+        f"kubectl {KUBE_HOME} get pods >/dev/null",
+    ],
+)
+def test_reads_of_protected_paths_keep_their_answer(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert "protected" not in decide(command, CONTEXT).reason
+
+
+def test_the_tripwire_never_lowers_a_deny_and_works_without_a_config(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert kind(f"aws ecs stop-task --task t {AWS_OK} && rm {SKILL}/x") == DENY
+    assert decide("rm -rf /home/eng/.claude/skills/ai-triage", None, "no config").kind == ASK
+
+
+def test_a_configured_case_root_is_protected_too():
+    context = GuardContext(**{**CONTEXT.__dict__, "cases_dir": "/data/cases"})
+    assert decide("rm /data/cases/INC-1/run/audit.json", context).kind == ASK
+    assert decide("rm /data/other/audit.json", context).kind == PASS
+
+
+def test_context_carries_the_case_root(config_data, tmp_path):
+    config_data["cases_dir"] = "/data/cases"
+    assert context_from_config(parse_config(config_data), tmp_path).cases_dir == "/data/cases"
