@@ -1,4 +1,5 @@
 import json
+import re
 
 from fakes import FakeAws, access_denied
 from helpers import WINDOW_START, assert_read_only, fact_summaries, make_context
@@ -125,26 +126,34 @@ def error_file(name, offset_millis):
     return {"LogFileName": name, "LastWritten": WINDOW_START_MILLIS + offset_millis, "Size": 10}
 
 
-def test_error_log_file_is_read_and_filtered(config_data, tmp_path):
-    files = [error_file("error/postgresql.log.2026-10-04-11", 3_600_000), error_file("error/postgresql.log.2026-10-04-10", 60_000)]
+def hourly(hour, last_written_minute=59):
+    """A PostgreSQL hourly error file: covers [hour, hour + 1) and was last written near its end."""
+    millis = WINDOW_START_MILLIS + (hour - 10) * 3_600_000 + last_written_minute * 60_000
+    return {"LogFileName": f"error/postgresql.log.2026-10-04-{hour:02d}", "LastWritten": millis, "Size": 10}
+
+
+def downloaded(aws):
+    return [c[c.index("--log-file-name") + 1] for c in aws.called("rds", "download-db-log-file-portion")]
+
+
+def test_error_log_files_are_read_and_filtered(config_data, tmp_path):
     data = "\n".join([
         "2026-10-04 10:41:00 UTC::@:[1]:LOG:  checkpoint complete",
         "2026-10-04 10:42:11 UTC:10.0.0.5(1234):app@orders:[7]:ERROR:  deadlock detected",
         "plain line with FATAL: too many connections",
         "2026-10-04 10:43:00 UTC::@:[1]:LOG:  all fine",
     ])
-    ctx, aws = run(config_data, tmp_path, log_answers(files, data))
+    ctx, aws = run(config_data, tmp_path, log_answers([hourly(10), hourly(11)], data))
     download = aws.called("rds", "download-db-log-file-portion")
-    assert len(download) == 1
-    assert download[0][download[0].index("--log-file-name") + 1] == "error/postgresql.log.2026-10-04-11"
+    assert len(download) == 2
     assert download[0][download[0].index("--number-of-lines") + 1] == "200"
     assert "--no-paginate" in download[0]
     listing = aws.called("rds", "describe-db-log-files")[0]
     assert listing[listing.index("--file-last-written") + 1] == str(WINDOW_START_MILLIS)
     assert listing[listing.index("--filename-contains") + 1] == "error"
     assert "--max-items" in listing
-    timed = next(f for f in ctx.evidence.facts if "deadlock detected" in f.excerpt)
-    assert timed.kind == "incident_time" and timed.time == "2026-10-04T10:42:11Z"
+    timed = [f for f in ctx.evidence.facts if "deadlock detected" in f.excerpt]
+    assert timed and timed[0].kind == "incident_time" and timed[0].time == "2026-10-04T10:42:11Z"
     assert not any("too many connections" in f.excerpt for f in ctx.evidence.facts)
     assert not any("checkpoint complete" in f.excerpt or "all fine" in f.excerpt for f in ctx.evidence.facts)
     assert_read_only(ctx, aws)
@@ -164,13 +173,34 @@ def test_empty_listing_states_no_error_log(config_data, tmp_path):
     assert aws.called("rds", "download-db-log-file-portion") == []
 
 
-def test_the_file_active_at_window_end_is_read(config_data, tmp_path):
-    window_end = 7_200_000
-    files = [error_file("error/early.log", 60_000), error_file("error/active.log", window_end + 600_000),
-             error_file("error/later.log", window_end + 9_000_000)]
-    _, aws = run(config_data, tmp_path, log_answers(files, ""))
-    download = aws.called("rds", "download-db-log-file-portion")[0]
-    assert download[download.index("--log-file-name") + 1] == "error/active.log"
+def test_a_window_ending_on_a_rotation_boundary_does_not_read_the_next_hours_file(config_data, tmp_path):
+    line = "2026-10-04 11:59:58 UTC::@:[1]:ERROR:  late in window"
+    _, aws = run(config_data, tmp_path, log_answers([hourly(10), hourly(11), hourly(12)], line))
+    assert downloaded(aws) == ["error/postgresql.log.2026-10-04-10", "error/postgresql.log.2026-10-04-11"]
+
+
+def test_a_file_that_ends_exactly_at_the_window_start_is_not_read(config_data, tmp_path):
+    _, aws = run(config_data, tmp_path, log_answers([hourly(9), hourly(10)], ""))
+    assert downloaded(aws) == ["error/postgresql.log.2026-10-04-10"]
+
+
+def test_a_file_without_an_hour_in_its_name_covers_the_hour_before_it_was_last_written(config_data, tmp_path):
+    early = {"LogFileName": "error/early.log", "LastWritten": WINDOW_START_MILLIS + 60_000, "Size": 1}
+    active = {"LogFileName": "error/active.log", "LastWritten": WINDOW_START_MILLIS + 7_200_000 + 600_000, "Size": 1}
+    later = {"LogFileName": "error/later.log", "LastWritten": WINDOW_START_MILLIS + 7_200_000 + 9_000_000, "Size": 1}
+    _, aws = run(config_data, tmp_path, log_answers([early, active, later], ""))
+    assert downloaded(aws) == ["error/early.log", "error/active.log"]
+
+
+def test_no_line_in_the_window_is_stated_with_the_files_that_were_read(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, log_answers([hourly(11)], "2026-10-04 18:05:00 UTC::@:[1]:ERROR:  much later"))
+    fact = by_summary(ctx, "No error line inside the window")[0]
+    assert fact.kind == "derived" and "error/postgresql.log.2026-10-04-11" in fact.summary and fact.command
+
+
+def test_no_such_fact_when_a_line_inside_the_window_was_found(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, log_answers([hourly(11)], "2026-10-04 11:05:00 UTC::@:[1]:ERROR:  in window"))
+    assert by_summary(ctx, "No error line inside the window") == []
 
 
 def test_log_lines_outside_the_window_are_dropped(config_data, tmp_path):
@@ -198,23 +228,59 @@ def test_data_values_never_reach_a_log_fact(config_data, tmp_path):
     ctx, _ = run(config_data, tmp_path, log_answers(files, data))
     document = ctx.evidence.to_json()
     assert phone not in document and name not in document
-    assert "users_phone_key" in document and "Key (phone)=(?)" in document
+    assert "violates unique constraint" in document and "users_phone_key" not in document and "Key (phone)=(<value>)" in document
 
 
-def test_mask_values_hides_quoted_strings():
-    assert _mask_values("ERROR: INSERT INTO t (a, b) VALUES ('x y', 'it''s') failed") == "ERROR: INSERT INTO t (a, b) VALUES ('?', '?') failed"
+def test_mask_values_hides_single_quoted_strings_with_both_escapes():
+    assert _mask_values("ERROR: INSERT INTO t (a, b) VALUES ('x y', 'it''s') failed") == "ERROR: INSERT INTO t (a, b) VALUES (<value>, <value>) failed"
+    line = "ERROR: Duplicate entry 'O" + "\\'" + "Brien-" + "5550" + "199' for key 'users.name'"
+    assert _mask_values(line) == "ERROR: Duplicate entry <value> for key <value>"
 
 
-def test_mask_values_hides_key_value_groups():
-    assert _mask_values("ERROR: Key (email)=(a.b@example.org) already exists") == "ERROR: Key (email)=(?) already exists"
+def test_mask_values_hides_the_escape_string_form():
+    line = "ERROR: bad literal E'123-45-" + "\\'" + "67" + "89' near"
+    assert _mask_values(line) == "ERROR: bad literal <value> near"
 
 
-def test_mask_values_hides_an_unterminated_quote_to_the_end():
-    assert _mask_values("ERROR: syntax error near 'secret value") == "ERROR: syntax error near '?'"
+def test_mask_values_hides_double_quoted_values():
+    assert _mask_values('ERROR:  invalid input syntax for type integer: "' + "4111" * 4 + '"') == "ERROR:  invalid input syntax for type integer: <value>"
+    assert _mask_values('ERROR: value "a ""quoted"" one" and "b' + "\\" + '"c" end') == "ERROR: value <value> and <value> end"
+
+
+def test_mask_values_hides_backtick_quoted_text():
+    assert _mask_values("ERROR: unknown column `secret col` in table") == "ERROR: unknown column <value> in table"
+
+
+def test_mask_values_hides_dollar_quoted_strings():
+    line = "ERROR: near $$Dollar Secret Value$$, $tag$tagged Value$tag$ and more"
+    assert _mask_values(line) == "ERROR: near <value>, <value> and more"
+    assert _mask_values("ERROR: near $1 and $2") == "ERROR: near $1 and $2"
+
+
+def test_mask_values_masks_an_unterminated_quote_to_the_end_of_the_line():
+    assert _mask_values("ERROR: syntax error near 'secret value") == "ERROR: syntax error near <value>"
+    assert _mask_values('ERROR: near "secret value') == "ERROR: near <value>"
+
+
+def test_mask_values_hides_the_row_in_a_detail_line_but_keeps_the_column_list():
+    phone = "+44 7700 900" + "123"
+    assert _mask_values(f"DETAIL:  Key (phone)=({phone}) already exists.") == "DETAIL:  Key (phone)=(<value>) already exists."
+    assert _mask_values("DETAIL:  Failing row contains (1, " + "Ada" + ", x@example.org).") == "DETAIL:  Failing row contains (<value>)."
+
+
+def test_mask_values_hides_nested_parentheses_in_a_key_group():
+    line = "ERROR: Key (name)=(Bob (Jr) +44 7700 900" + "123) already exists"
+    assert _mask_values(line) == "ERROR: Key (name)=(<value>) already exists"
+
+
+def test_mask_values_hides_long_digit_runs_but_keeps_the_leading_timestamp():
+    assert _mask_values("2026-10-04 10:42:11.123456 UTC ERROR: user " + "12345678" + " missing, retry 3 of 4") == \
+        "2026-10-04 10:42:11.123456 UTC ERROR: user <value> missing, retry 3 of 4"
+    assert not re.search(r"\d{5}", _mask_values("ERROR: ref 4111-1111 9999 and 55501999 and +1 555 0199"))
 
 
 def test_mask_values_leaves_a_line_without_values_alone():
-    line = "FATAL: too many connections for role app"
+    line = "2026-10-04 10:42:11 UTC ERROR: too many connections for role app, limit 100"
     assert _mask_values(line) == line
 
 

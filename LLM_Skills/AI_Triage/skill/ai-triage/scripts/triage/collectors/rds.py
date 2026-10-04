@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from triage.collectors import Collector
 from triage.collectors.common import newest_in_window, parse_iso, was_not_found
@@ -22,8 +22,13 @@ CLUSTER_NOT_FOUND = ("DBClusterNotFound", "DBClusterNotFoundFault")
 LOG_LINES_TO_READ = "200"
 TOP_WAIT_EVENTS = 5
 PROBLEM_LINE = re.compile(r"ERROR|FATAL|PANIC|(?i:deadlock)")
-QUOTED_STRING = re.compile(r"'(?:[^']|'')*'|'[^']*$")
-KEY_VALUE_GROUP = re.compile(r"=\([^)]*\)")
+MASK = "<value>"
+MAX_LOG_FILES_READ = 3
+LEADING_TIMESTAMP = re.compile(r"\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?")
+FILE_HOUR = re.compile(r"(\d{4}-\d{2}-\d{2})[-.](\d{2})(?!\d)")
+DOLLAR_TAG = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+PHONE_SHAPE = re.compile(r"\+?\d{1,4}(?:[ -]\d{2,4}){2,}")
+LONG_DIGITS = re.compile(r"\d{5,}")
 LOG_TIMESTAMP = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})")
 METRICS = (
     ("CPUUtilization", "Average"), ("DatabaseConnections", "Maximum"), ("FreeStorageSpace", "Minimum"),
@@ -76,21 +81,106 @@ def _add_events(ctx: CollectContext, name: str, source_type: str, noun: str) -> 
         )
 
 
+def _quoted_end(line: str, start: int) -> int | None:
+    """Index just past the quoted span that opens at line[start], or None when it is never closed."""
+    quote, index = line[start], start + 1
+    while index < len(line):
+        if line[index] == "\\" and quote != "`":
+            index += 2
+        elif line[index] == quote:
+            if line[index + 1:index + 2] == quote:
+                index += 2
+            else:
+                return index + 1
+        else:
+            index += 1
+    return None
+
+
+def _mask_quoted(line: str) -> str:
+    out, index = [], 0
+    while index < len(line):
+        char = line[index]
+        if char in "'\"`":
+            end = _quoted_end(line, index)
+            if out and out[-1] in "Ee" and (len(out) == 1 or not out[-2].isalnum()) and char == "'":
+                out.pop()
+            out.append(MASK)
+            if end is None:
+                break
+            index = end
+            continue
+        tag = DOLLAR_TAG.match(line, index) if char == "$" else None
+        if tag:
+            close = line.find(tag.group(0), tag.end())
+            out.append(MASK)
+            if close < 0:
+                break
+            index = close + len(tag.group(0))
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _balanced_end(text: str, start: int) -> int:
+    """Index just past the parenthesis that closes the one at text[start]; len(text) when it never closes."""
+    depth = 0
+    for index in range(start, len(text)):
+        depth += {"(": 1, ")": -1}.get(text[index], 0)
+        if depth == 0:
+            return index + 1
+    return len(text)
+
+
+def _mask_last_group(text: str, start: int) -> str:
+    """Replace what lies between the first ( at or after start and the last ) of the text."""
+    first, last = text.find("(", start), text.rfind(")")
+    return text if first < 0 or last <= first else text[:first + 1] + MASK + text[last:]
+
+
+def _mask_row_values(line: str) -> str:
+    start = line.find("DETAIL:")
+    if start >= 0:
+        position = start + len("DETAIL:")
+        key = re.compile(r"\s*Key \(").match(line, position)
+        line = _mask_last_group(line, _balanced_end(line, key.end() - 1) if key else position)
+    equals = line.find("=(")
+    return _mask_last_group(line, equals + 1) if equals >= 0 else line
+
+
 def _mask_values(line: str) -> str:
-    """Hide data values in a log line: quoted strings become '?' and =(...) groups become =(?)."""
-    return KEY_VALUE_GROUP.sub("=(?)", QUOTED_STRING.sub("'?'", line))
+    """Hide data values in a log line, keeping the error text and the leading timestamp.
+
+    Quoted spans, row values in parentheses, and runs of five or more digits become <value>.
+    """
+    stamp = LEADING_TIMESTAMP.match(line)
+    head, rest = (line[:stamp.end()], line[stamp.end():]) if stamp else ("", line)
+    rest = _mask_row_values(_mask_quoted(rest))
+    rest = LONG_DIGITS.sub(MASK, PHONE_SHAPE.sub(MASK, rest))
+    return head + rest
 
 
 def _error_files(files: list[dict]) -> list[dict]:
     return [f for f in files if "error" in f.get("LogFileName", "").lower()]
 
 
-def _choose_log_file(files: list[dict], window_end_millis: int) -> dict:
-    """The file that was being written when the window ended, else the newest one."""
-    active_at_end = [f for f in files if f.get("LastWritten", 0) >= window_end_millis]
-    if active_at_end:
-        return min(active_at_end, key=lambda f: f.get("LastWritten", 0))
-    return max(files, key=lambda f: f.get("LastWritten", 0))
+def _file_span(file: dict) -> tuple[datetime, datetime]:
+    """The hour a log file covers: from its name when it carries one, else the hour before it was last written."""
+    match = FILE_HOUR.search(file.get("LogFileName", ""))
+    if match:
+        begin = parse_iso(f"{match.group(1)}T{match.group(2)}:00:00Z")
+        if begin is not None:
+            return begin, begin + timedelta(hours=1)
+    written = datetime.fromtimestamp(file.get("LastWritten", 0) / 1000, tz=timezone.utc)
+    return written - timedelta(hours=1), written
+
+
+def _files_overlapping_window(files: list[dict], window) -> list[dict]:
+    """Files whose hour overlaps the window, whose end is exclusive; the newest few, oldest first."""
+    overlapping = [f for f in files if _file_span(f)[0] < window.end and _file_span(f)[1] > window.start]
+    overlapping.sort(key=lambda f: f.get("LastWritten", 0))
+    return overlapping[-MAX_LOG_FILES_READ:]
 
 
 def _line_time(line: str) -> datetime | None:
@@ -99,32 +189,46 @@ def _line_time(line: str) -> datetime | None:
 
 
 def _add_log_lines(ctx: CollectContext, name: str) -> None:
-    window_start_millis, window_end_millis = ctx.window.epoch_millis()
     listing = ctx.aws("rds", "describe-db-log-files", [
         "--db-instance-identifier", name, "--filename-contains", "error",
-        "--file-last-written", str(window_start_millis), "--max-items", MAX_LOG_FILES,
+        "--file-last-written", str(ctx.window.epoch_millis()[0]), "--max-items", MAX_LOG_FILES,
     ])
     if listing is None:
         return
-    files = _error_files(listing.get("DescribeDBLogFiles", []))
+    files = _files_overlapping_window(_error_files(listing.get("DescribeDBLogFiles", [])), ctx.window)
     if not files:
         ctx.evidence.add(
             kind=DERIVED, resource=f"db/{name}", command=ctx.last_command,
             summary=f"No error log of {name} was written in the window",
         )
         return
-    file_name = _choose_log_file(files, window_end_millis).get("LogFileName", "")
-    portion = ctx.aws("rds", "download-db-log-file-portion", [
-        "--db-instance-identifier", name, "--log-file-name", file_name, "--number-of-lines", LOG_LINES_TO_READ,
-        "--no-paginate",
-    ])
-    lines = ((portion or {}).get("LogFileData") or "").splitlines()
-    timed = [(_line_time(line), line) for line in lines if PROBLEM_LINE.search(line)]
-    inside = [(moment, line) for moment, line in timed if moment is not None and ctx.window.contains(moment)]
-    for moment, line in inside[-MAX_LOG_LINES:]:
+    inside, read_names, command = [], [], ctx.last_command
+    for file in files:
+        file_name = file.get("LogFileName", "")
+        portion = ctx.aws("rds", "download-db-log-file-portion", [
+            "--db-instance-identifier", name, "--log-file-name", file_name, "--number-of-lines", LOG_LINES_TO_READ,
+            "--no-paginate",
+        ])
+        if portion is None:
+            continue
+        command = ctx.last_command
+        read_names.append(file_name)
+        for line in (portion.get("LogFileData") or "").splitlines():
+            moment = _line_time(line)
+            if PROBLEM_LINE.search(line) and moment is not None and ctx.window.start <= moment < ctx.window.end:
+                inside.append((moment, file_name, line))
+    for moment, file_name, line in inside[-MAX_LOG_LINES:]:
         ctx.evidence.add(
-            kind=INCIDENT_TIME, resource=f"db/{name}", time=moment, command=ctx.last_command,
+            kind=INCIDENT_TIME, resource=f"db/{name}", time=moment, command=command,
             summary=f"Database log line in {file_name}", excerpt=_mask_values(line.strip()),
+        )
+    if not inside and read_names:
+        ctx.evidence.add(
+            kind=DERIVED, resource=f"db/{name}", command=command,
+            summary=(
+                f"No error line inside the window was found in the last {LOG_LINES_TO_READ} lines read from "
+                f"{', '.join(read_names)}; earlier lines of those files were not read"
+            ),
         )
 
 
