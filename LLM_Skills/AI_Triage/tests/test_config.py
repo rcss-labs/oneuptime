@@ -182,8 +182,14 @@ def test_opensearch_cluster_name_must_be_a_simple_name(config_data, bad):
     assert any(f"opensearch_clusters.{bad}" in e and "name" in e for e in errors_for(config_data))
 
 
-@pytest.mark.parametrize("bad", ["Platform", "platform_prod", "platform prod", "-p"])
-def test_eks_cluster_name_must_be_a_simple_name(config_data, bad):
+@pytest.mark.parametrize("name", ["Platform_Prod", "prod_cluster", "PlatformProd", "a", "9lives-X_y"])
+def test_eks_cluster_name_may_be_a_real_aws_cluster_name(config_data, name):
+    config_data["eks_clusters"][name] = config_data["eks_clusters"].pop("platform-prod")
+    assert name in parse_config(config_data).eks_clusters
+
+
+@pytest.mark.parametrize("bad", ["platform prod", "-p", "_p", "a,b", "a:b", "a.b", "p\n"])
+def test_eks_cluster_name_must_be_an_aws_cluster_name(config_data, bad):
     config_data["eks_clusters"][bad] = config_data["eks_clusters"].pop("platform-prod")
     assert any(f"eks_clusters.{bad}" in e and "name" in e for e in errors_for(config_data))
 

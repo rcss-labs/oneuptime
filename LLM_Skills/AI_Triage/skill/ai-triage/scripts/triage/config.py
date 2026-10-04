@@ -14,6 +14,8 @@ REGION_RE = re.compile(r"[a-z]{2}(-[a-z]+)+-\d")
 # Names the guard trusts when it compares them with a command line.
 SIMPLE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 # One index name or one trailing-star pattern: no commas, no remote clusters, no bare stars.
+# An EKS cluster name is the real AWS name, which may hold upper-case letters and underscores.
+EKS_CLUSTER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 INDEX_PATTERN_RE = re.compile(r"[a-z0-9][a-z0-9._-]{2,}\*?")
 PROFILE_PREFIX = "triage-"
 DEFAULT_PERMISSION_SET = "ai-triage-read-only"
@@ -228,7 +230,8 @@ def _parse_eks(raw: dict[str, Any], accounts: dict[str, Account], errors: list[s
     clusters: dict[str, EksCluster] = {}
     for name, body in raw.items():
         where = f"eks_clusters.{name}"
-        _check_name(str(name), where, errors)
+        if EKS_CLUSTER_NAME_RE.fullmatch(str(name)) is None:
+            errors.append(f"{where}: name must be an EKS cluster name: letters, digits, dashes, and underscores, starting with a letter or digit")
         if not isinstance(body, dict):
             errors.append(f"{where}: must be a mapping")
             continue
