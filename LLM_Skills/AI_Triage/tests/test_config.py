@@ -4,6 +4,11 @@ import pytest
 
 from triage.config import ConfigError, load_config, parse_config
 
+INDEX_PATTERN_ERROR = (
+    "must start with a lower-case letter or digit, hold at least three characters from a-z, 0-9, "
+    "dot, underscore, and dash, and may end in one *, for example app-logs-*"
+)
+
 
 def test_example_config_is_valid(config_data):
     cfg = parse_config(config_data)
@@ -48,7 +53,7 @@ def test_all_problems_are_reported_together(config_data):
         (lambda d: d["accounts"]["staging"].update(profile="triage-prod-main"), "used by more than one account"),
         (lambda d: d["opensearch_clusters"]["logs-prod"].update(account="nope"), "unknown account 'nope'"),
         (lambda d: d["opensearch_clusters"]["logs-prod"].update(endpoint="opensearch.internal"), "must be an http or https URL"),
-        (lambda d: d["opensearch_clusters"]["logs-prod"].update(allowed_index_patterns=["*"]), "must be at least three characters from a-z, 0-9, dot, underscore, and dash, optionally ending in one *, for example app-logs-*"),
+        (lambda d: d["opensearch_clusters"]["logs-prod"].update(allowed_index_patterns=["*"]), INDEX_PATTERN_ERROR),
         (lambda d: d["eks_clusters"]["platform-prod"].update(region="us-west-2"), "is not listed for account"),
         (lambda d: d["eks_clusters"]["platform-prod"].update(context="admin"), "context: must start with 'triage-'"),
         (lambda d: d.pop("confluence"), "confluence: missing"),
@@ -145,10 +150,6 @@ def test_wrong_connection_setting_is_reported_with_other_problems(config_data):
     assert "accounts.prod-main.account_id" in joined
 
 
-INDEX_PATTERN_ERROR = (
-    "must be at least three characters from a-z, 0-9, dot, underscore, and dash, "
-    "optionally ending in one *, for example app-logs-*"
-)
 
 
 def errors_for(config_data):

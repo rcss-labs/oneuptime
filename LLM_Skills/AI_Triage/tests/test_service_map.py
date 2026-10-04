@@ -97,7 +97,10 @@ def test_comma_list_or_odd_index_pattern_is_rejected(map_data, config, pattern):
     _prod_resources(map_data, "checkout-api", "opensearch")["index_pattern"] = pattern
     with pytest.raises(MapError) as excinfo:
         parse_map(map_data, config)
-    assert "must be a single index pattern such as app-logs-*" in "\n".join(excinfo.value.errors)
+    assert (
+        "must start with a lower-case letter or digit, hold at least three characters from a-z, 0-9, "
+        "dot, underscore, and dash, and may end in one *, for example app-logs-*"
+    ) in "\n".join(excinfo.value.errors)
 
 
 def test_index_pattern_outside_the_cluster_patterns_is_rejected(map_data, config):

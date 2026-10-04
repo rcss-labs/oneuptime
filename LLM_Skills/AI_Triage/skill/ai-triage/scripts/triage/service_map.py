@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from triage.config import TriageConfig, is_index_pattern, is_simple_name
+from triage.config import INDEX_PATTERN_RULE, TriageConfig, is_index_pattern, is_simple_name
 
 MAP_FILE_NAME = "service-map.yaml"
 SOURCES = ("confirmed", "discovered")
@@ -134,7 +134,7 @@ def _check_resources(resources: dict[str, Any], where: str, config: TriageConfig
                 errors.append(f"{where}.resources.opensearch.cluster: unknown cluster '{search.get('cluster')}'")
             if not is_index_pattern(pattern):
                 errors.append(
-                    f"{where}.resources.opensearch.index_pattern: {pattern!r} must be a single index pattern such as app-logs-*"
+                    f"{where}.resources.opensearch.index_pattern: {pattern!r} {INDEX_PATTERN_RULE}"
                 )
             elif cluster is not None and not any(fnmatchcase(pattern, allowed) for allowed in cluster.allowed_index_patterns):
                 errors.append(

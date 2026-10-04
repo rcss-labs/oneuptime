@@ -17,6 +17,10 @@ SIMPLE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 # An EKS cluster name is the real AWS name, which may hold upper-case letters and underscores.
 MAX_EKS_CLUSTER_NAME_LENGTH = 100
 EKS_CLUSTER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+INDEX_PATTERN_RULE = (
+    "must start with a lower-case letter or digit, hold at least three characters from a-z, 0-9, "
+    "dot, underscore, and dash, and may end in one *, for example app-logs-*"
+)
 INDEX_PATTERN_RE = re.compile(r"[a-z0-9][a-z0-9._-]{2,}\*?")
 PROFILE_PREFIX = "triage-"
 DEFAULT_PERMISSION_SET = "ai-triage-read-only"
@@ -218,8 +222,7 @@ def _parse_opensearch(raw: dict[str, Any], accounts: dict[str, Account], errors:
             patterns = []
         for pattern in patterns:
             if not is_index_pattern(pattern):
-                errors.append(f"{where}.allowed_index_patterns: {pattern!r} must be at least three characters from a-z, 0-9, dot, underscore, "
-                    "and dash, optionally ending in one *, for example app-logs-*")
+                errors.append(f"{where}.allowed_index_patterns: {pattern!r} {INDEX_PATTERN_RULE}")
         time_field = _text(body, "time_field", where, errors)
         verify_tls = body.get("verify_tls", True)
         if not isinstance(verify_tls, bool):
