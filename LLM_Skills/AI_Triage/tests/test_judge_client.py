@@ -247,6 +247,44 @@ def test_score_confidence_nan_is_malformed():
     assert_malformed(content, "q3")
 
 
+def test_choice_probabilities_summing_to_1_8_are_malformed():
+    content = body_with("q2", probabilities={"supports": 0.9, "contradicts": 0.9, "says_nothing": 0.0})
+    assert_malformed(content, "q2")
+
+
+def test_choice_that_is_not_the_most_probable_option_is_malformed():
+    content = body_with("q2", choice="contradicts", probabilities={"supports": 0.7, "contradicts": 0.2, "says_nothing": 0.1})
+    assert_malformed(content, "q2")
+
+
+def test_choice_tied_for_most_probable_is_accepted():
+    content = body_with("q2", choice="contradicts", probabilities={"supports": 0.5, "contradicts": 0.5, "says_nothing": 0.0})
+    assert ask_with_raw_body(content).answers["q2"]["choice"] == "contradicts"
+
+
+def test_sum_within_the_tolerance_is_accepted():
+    content = body_with("q2", probabilities={"supports": 0.97, "contradicts": 0.0, "says_nothing": 0.0})
+    assert ask_with_raw_body(content).answers["q2"]["choice"] == "supports"
+
+
+def test_score_probabilities_summing_to_0_4_are_malformed():
+    content = body_with("q3", probabilities={"0": 0.1, "1": 0.1, "2": 0.1, "3": 0.1})
+    assert_malformed(content, "q3")
+
+
+def test_sdk_error_is_not_reachable_from_the_raised_exception():
+    secret = "body-text-" + "x" * 8
+    judge = TypeSafeJudge("m", transport=transport_returning(500, {"error": secret}))
+    with pytest.raises(JudgeUnavailable) as caught:
+        judge.ask({}, QUESTIONS)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    link, seen = caught.value, 0
+    while link is not None and seen < 20:
+        assert secret not in repr(link)
+        link, seen = link.__cause__ or link.__context__, seen + 1
+
+
 def test_malformed_reason_holds_no_answer_text():
     with pytest.raises(JudgeUnavailable) as caught:
         ask_with_raw_body(body_with("q2", choice="secret-looking-choice"))

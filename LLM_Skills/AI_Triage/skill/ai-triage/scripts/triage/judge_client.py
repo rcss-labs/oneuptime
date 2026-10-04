@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 API_KEY_VARIABLE = "TYPESAFE_API_KEY"
+PROBABILITY_SUM_TOLERANCE = 0.05
 
 
 class JudgeUnavailable(Exception):
@@ -68,13 +69,17 @@ class TypeSafeJudge:
         if not os.environ.get(API_KEY_VARIABLE, "").strip():
             raise JudgeUnavailable(f"{API_KEY_VARIABLE} is not set")
 
+        reason = None
         try:
             sdk_questions = {question_id: _build_question(typesafe_sdk, question) for question_id, question in questions.items()}
             with typesafe_sdk.TypeSafeClient(transport=self._transport) as client:
                 result = client.system_one(state, sdk_questions, model=self.model, timeout=self.timeout)
-            return self._reply(result, questions)
         except typesafe_sdk.TypeSafeError as error:
-            raise JudgeUnavailable(_reason(error)) from None
+            reason = _reason(error)
+        if reason is not None:
+            # Raised outside the except block so the SDK error is not kept as __context__.
+            raise JudgeUnavailable(reason)
+        return self._reply(result, questions)
 
     def _reply(self, result: Any, questions: dict[str, dict]) -> JudgeReply:
         answers = {}
@@ -108,9 +113,13 @@ def _is_well_formed(answer: Any, question: dict) -> bool:
     probabilities = answer.probabilities
     if not all(_is_probability(value) for value in probabilities.values()):
         return False
+    if not math.isclose(sum(probabilities.values()), 1.0, abs_tol=PROBABILITY_SUM_TOLERANCE):
+        return False
     if kind == "choice":
         options = set(question["criteria"])
-        return answer.choice in options and set(probabilities) == options
+        if answer.choice not in options or set(probabilities) != options:
+            return False
+        return probabilities[answer.choice] >= max(probabilities.values())
     levels = len(question["criteria"])
     return _is_number_between(answer.score, 0, levels - 1) and set(probabilities) == set(range(levels))
 
