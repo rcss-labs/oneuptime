@@ -72,8 +72,10 @@ DENY_NAME_PARTS = ("secret-value", "password", "credentials", "token", "login")
 REVEALING_FLAGS = frozenset({"--with-decryption", "--include-value", "--include-values"})
 # The AWS CLI accepts any unique prefix of a long option, so these could hide behind a shortened spelling.
 CHECKED_OPTIONS = frozenset(
-    {"--profile", "--region", "--endpoint-url", "--debug", "--with-decryption", "--include-value", "--include-values", "--no-verify-ssl"}
+    {"--profile", "--region", "--endpoint-url", "--debug", "--with-decryption", "--include-value", "--include-values", "--no-verify-ssl", "--ca-bundle"}
 ) | {option for option in VALUE_OPTIONS if option.startswith("--")}
+# Options that change how the triage credentials' requests are routed or protected.
+ASK_OPTIONS = {"--endpoint-url": "redirects the request", "--no-verify-ssl": "turns off TLS verification", "--ca-bundle": "changes which certificates are trusted"}
 LOCAL_READS = frozenset({("configure", "list"), ("configure", "list-profiles")})
 
 
@@ -119,8 +121,9 @@ def check_aws(argv: tuple[str, ...], env: tuple[str, ...], profiles: frozenset[s
         return Verdict(ASK, f"option {abbreviated} could be an abbreviation the guard cannot check")
     if "--debug" in argv:
         return Verdict(DENY, "--debug prints request signing details")
-    if _option_values(argv, "--endpoint-url"):
-        return Verdict(ASK, "--endpoint-url redirects the request")
+    for option, effect in ASK_OPTIONS.items():
+        if any(word == option or word.startswith(option + "=") for word in argv):
+            return Verdict(ASK, f"{option} {effect}")
 
     service, operation = _service_and_operation(argv)
     if service is None:

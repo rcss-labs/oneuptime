@@ -206,3 +206,24 @@ def test_classify_denies_a_secret_read_and_value_revealing_flags():
     assert classify("ssm", "get-parameter", ["--with-decryption"]).kind == DENY
     assert classify("ssm", "get-parameter", ["--name", "x"]).kind == ALLOW
     assert classify("apigateway", "get-api-keys", ["--include-values"]).kind == DENY
+
+
+# ---- fix round 2 ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"aws ecs list-clusters {OK} --no-verify-ssl",
+        f"aws ecs list-clusters {OK} --ca-bundle /tmp/ca.pem",
+        f"aws ecs list-clusters {OK} --ca-bundle=/tmp/ca.pem",
+        f"aws ecs list-clusters {OK} --ca-bun /tmp/ca.pem",
+        f"aws ecs list-clusters {OK} --ca /tmp/ca.pem",
+    ],
+)
+def test_tls_options_ask(command):
+    assert verdict(command).kind == ASK
+
+
+def test_tls_options_do_not_hide_a_deny():
+    assert verdict(f"aws ecs stop-task {OK} --no-verify-ssl").kind == ASK  # asked, never allowed
