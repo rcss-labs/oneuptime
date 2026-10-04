@@ -136,3 +136,55 @@ def test_history_failure_is_recorded_and_collection_continues(config_data, tmp_p
     ctx, _ = run(config_data, tmp_path, answers, {"alarm_names": "cpu-high"})
     assert ctx.evidence.errors[0]["code"] == "AccessDeniedException"
     assert len([f for f in ctx.evidence.facts if f.kind == "current"]) == 1
+
+
+def composite(name, state="ALARM"):
+    return {"AlarmName": name, "StateValue": state, "StateReason": "child alarms in ALARM",
+            "AlarmRule": "ALARM(cpu-high) AND ALARM(mem-high)"}
+
+
+def test_composite_alarm_by_name_asks_for_both_types_and_reads_composites(config_data, tmp_path):
+    answers = {"cloudwatch describe-alarms": {"MetricAlarms": [], "CompositeAlarms": [composite("service-down")]},
+               "cloudwatch describe-alarm-history": {"AlarmHistoryItems": []}}
+    ctx, aws = run(config_data, tmp_path, answers, {"alarm_names": "service-down"})
+    call = aws.called("cloudwatch", "describe-alarms")[0]
+    at = call.index("--alarm-types")
+    assert call[at + 1: at + 3] == ["CompositeAlarm", "MetricAlarm"]
+    current = [f for f in ctx.evidence.facts if f.kind == "current"]
+    assert len(current) == 1
+    assert "service-down" in current[0].summary and "ALARM" in current[0].summary
+    assert "ALARM(cpu-high) AND ALARM(mem-high)" in current[0].summary
+    assert "child alarms in ALARM" in current[0].excerpt
+    assert "threshold" not in current[0].summary
+    assert_read_only(ctx, aws)
+
+
+def test_composite_alarm_by_prefix(config_data, tmp_path):
+    answers = {"cloudwatch describe-alarms": {"MetricAlarms": [alarm("svc-cpu")], "CompositeAlarms": [composite("svc-down")]},
+               "cloudwatch describe-alarm-history": {"AlarmHistoryItems": []}}
+    ctx, aws = run(config_data, tmp_path, answers, {"name_prefix": "svc-"})
+    call = aws.called("cloudwatch", "describe-alarms")[0]
+    assert "--alarm-types" in call and "CompositeAlarm" in call and "MetricAlarm" in call
+    assert len([f for f in ctx.evidence.facts if f.kind == "current"]) == 2
+
+
+def test_history_is_requested_oldest_first(config_data, tmp_path):
+    answers = {"cloudwatch describe-alarms": {"MetricAlarms": [alarm("cpu-high")]},
+               "cloudwatch describe-alarm-history": {"AlarmHistoryItems": [history(IN_WINDOW, "OK", "ALARM")]}}
+    ctx, aws = run(config_data, tmp_path, answers, {"alarm_names": "cpu-high"})
+    call = aws.called("cloudwatch", "describe-alarm-history")[0]
+    assert call[call.index("--scan-by") + 1] == "TimestampAscending"
+    assert "CompositeAlarm" in call
+    first = [f for f in ctx.evidence.facts if f.kind == "derived"]
+    assert "cpu-high" in first[0].summary and "2026-10-04T10:42:10Z" in first[0].summary
+    assert_read_only(ctx, aws)
+
+
+def test_oldest_first_history_gives_earliest_alarm_time(config_data, tmp_path):
+    items = [history("2026-10-04T10:30:00+00:00", "OK", "ALARM"), history("2026-10-04T10:31:00+00:00", "ALARM", "OK"),
+             history("2026-10-04T10:50:00+00:00", "OK", "ALARM")]
+    answers = {"cloudwatch describe-alarms": {"MetricAlarms": [alarm("cpu-high")]},
+               "cloudwatch describe-alarm-history": {"AlarmHistoryItems": items}}
+    ctx, _ = run(config_data, tmp_path, answers, {"alarm_names": "cpu-high"})
+    first = [f for f in ctx.evidence.facts if f.kind == "derived"]
+    assert "2026-10-04T10:30:00Z" in first[0].summary

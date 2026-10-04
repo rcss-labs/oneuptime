@@ -14,6 +14,8 @@ MAX_ALARMS = 50
 MAX_HISTORY_ALARMS = 20
 MAX_HISTORY_ITEMS = "20"
 MISSING_TARGET = "MissingTarget"
+# Without --alarm-types the CLI returns metric alarms only.
+ALARM_TYPES = ["--alarm-types", "CompositeAlarm", "MetricAlarm"]
 
 
 def _split(text: str | None) -> list[str]:
@@ -29,7 +31,7 @@ def _describe(ctx: CollectContext, names: list[str], prefix: str | None) -> list
     if prefix:
         queries.append(["--alarm-name-prefix", prefix, "--max-items", str(MAX_ALARMS)])
     for args in queries:
-        reply = ctx.aws("cloudwatch", "describe-alarms", args)
+        reply = ctx.aws("cloudwatch", "describe-alarms", [*args, *ALARM_TYPES])
         for alarm in (reply or {}).get("MetricAlarms", []) + (reply or {}).get("CompositeAlarms", []):
             alarms.setdefault(alarm.get("AlarmName", ""), (alarm, ctx.last_command))
     return list(alarms.values())
@@ -37,13 +39,15 @@ def _describe(ctx: CollectContext, names: list[str], prefix: str | None) -> list
 
 def _add_current(ctx: CollectContext, alarm: dict, command: str) -> None:
     name = alarm.get("AlarmName", "")
-    what = alarm.get("MetricName") or "a composite rule"
-    threshold = (
-        f", threshold {alarm.get('ComparisonOperator')} {alarm.get('Threshold')}" if "Threshold" in alarm else ""
-    )
+    if "AlarmRule" in alarm:
+        what = f"composite rule {alarm['AlarmRule']}"
+    else:
+        what = f"metric {alarm.get('MetricName') or 'math expression'}"
+        if "Threshold" in alarm:
+            what += f", threshold {alarm.get('ComparisonOperator')} {alarm.get('Threshold')}"
     ctx.evidence.add(
         kind=CURRENT, resource=f"alarm/{name}", command=command,
-        summary=f"Alarm {name} is {alarm.get('StateValue')}: metric {what}{threshold}",
+        summary=f"Alarm {name} is {alarm.get('StateValue')}: {what}",
         excerpt=alarm.get("StateReason") or "",
     )
 
@@ -62,7 +66,7 @@ def _add_history(ctx: CollectContext, name: str) -> list[tuple[datetime, str]]:
     reply = ctx.aws(
         "cloudwatch", "describe-alarm-history",
         ["--alarm-name", name, "--history-item-type", "StateUpdate", "--start-date", start, "--end-date", end,
-         "--max-items", MAX_HISTORY_ITEMS],
+         "--scan-by", "TimestampAscending", "--max-items", MAX_HISTORY_ITEMS, *ALARM_TYPES],
     )
     changes = []
     for item in (reply or {}).get("AlarmHistoryItems", []):
