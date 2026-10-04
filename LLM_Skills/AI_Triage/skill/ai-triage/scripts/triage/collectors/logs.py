@@ -143,7 +143,7 @@ def _add_buckets(ctx: CollectContext, resource: str, rows: list[dict[str, str]])
         summary=(
             f"Peak bucket starts {format_time(peak[0])} with {peak[1]} matching log lines; "
             f"the first bucket with matches starts {format_time(first[0])} with {first[1]}"
-            + (f"; {left_out} buckets with the lowest counts were left out" if left_out else "")
+            + (f"; {left_out} other buckets were left out" if left_out else "")
         ),
     )
     return True

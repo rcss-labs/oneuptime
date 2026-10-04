@@ -266,7 +266,7 @@ def test_bucket_facts_are_capped_at_sixty_keeping_the_highest_counts(config_data
     assert 1 in counts and 11 not in counts and 12 in counts and max(counts) == 70
     derived = [f.summary for f in ctx.evidence.facts if "Peak" in f.summary]
     assert len(derived) == 1
-    assert "10 buckets" in derived[0] and "left out" in derived[0]
+    assert "10 other buckets were left out" in derived[0] and "lowest" not in derived[0]
     assert "with 70" in derived[0] and "first bucket with matches starts 2026-10-04T10:00:00Z" in derived[0]
 
 
