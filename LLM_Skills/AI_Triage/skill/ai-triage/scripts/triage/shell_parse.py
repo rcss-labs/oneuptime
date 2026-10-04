@@ -3,7 +3,8 @@
 This is a small quote-aware scanner, not a shell. It accepts only text whose
 meaning it fully understands. Anything bash would expand, substitute, or
 reinterpret in a way the guard cannot see raises Unparseable, and the guard then
-refuses to auto-approve the command.
+refuses to auto-approve the command. The scanner targets bash and zsh as Claude
+Code invokes them.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ BLANKS = " \t"
 UNQUOTED_REFUSED = frozenset("{}*?[]#()")
 # What may follow $HOME, or ~, for the expansion to be a plain path prefix.
 AFTER_HOME = frozenset("/'\" \t\n")
+DIGITS_RE = re.compile(r"^[0-9]+$")
 WORD_SPLITTING_OR_GLOB = frozenset(" \t\n*?[]{}~")
 
 
@@ -122,8 +124,11 @@ class _Scanner:
     def scan_operator(self, index: int) -> int:
         text = self.text
         char = text[index]
-        if char in "<>" and self.in_word and self.first_quote is None and "".join(self.chars) in ("1", "2"):
-            self.chars, self.in_word = [], False  # a file descriptor number such as the 2 in 2>/dev/null
+        if char in "<>" and self.in_word and self.first_quote is None and DIGITS_RE.match("".join(self.chars)):
+            # Digits written right against a redirect are a descriptor, never an argument.
+            if "".join(self.chars) not in ("1", "2"):
+                raise Unparseable("unusual file descriptor in a redirect")
+            self.chars, self.in_word = [], False
         self.end_word()
         following = text[index + 1] if index + 1 < len(text) else ""
         if char == ";":
@@ -198,6 +203,10 @@ class _Scanner:
                 raise Unparseable(f"contains {char}")
             elif char in ";&|<>":
                 index = self.scan_operator(index)
+            elif ord(char) < 0x20 or ord(char) == 0x7F or (ord(char) > 0x7F and char.isspace()):
+                raise Unparseable("contains a control character or unusual whitespace")
+            elif char == "=" and not self.in_word:
+                raise Unparseable("a word starting with = is expanded by zsh")
             else:
                 self.chars.append(char)
                 self.in_word = True
@@ -212,6 +221,8 @@ def _is_assignment(word: _Word) -> bool:
 
 
 def split_command(command: str) -> list[Segment]:
+    if "\x00" in command:
+        raise Unparseable("contains a NUL character")
     tokens = _Scanner(command.strip(" \t\n")).scan()
 
     segments: list[Segment] = []

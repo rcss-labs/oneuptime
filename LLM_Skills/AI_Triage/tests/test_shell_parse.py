@@ -206,7 +206,8 @@ def test_descriptor_digit_is_not_an_argument_only_when_attached():
     spaced = split_command("aws a b 2 > /dev/null")[0]
     assert spaced.argv == ("aws", "a", "b", "2") and spaced.writes_file is False
     assert split_command("aws a b 1>out.txt")[0].writes_file is True
-    assert split_command("aws a b 3>out.txt")[0].argv == ("aws", "a", "b", "3")
+    with pytest.raises(Unparseable):  # round 2: any descriptor other than 1 or 2 is refused
+        split_command("aws a b 3>out.txt")
     assert split_command("echo a2>f")[0].argv == ("echo", "a2")
 
 
@@ -228,7 +229,8 @@ def test_input_redirect_sets_reads_file_and_not_writes_file():
     assert segment.reads_file is True and segment.writes_file is False
     assert segment.argv == ("grep", "x")
     assert split_command("grep x")[0].reads_file is False
-    assert split_command("grep x 0<f")[0].reads_file is True
+    with pytest.raises(Unparseable):  # round 2: descriptor 0 is refused
+        split_command("grep x 0<f")
 
 
 def test_pipe_ampersand_and_clobber_operators():
@@ -253,3 +255,58 @@ def test_hash_inside_a_word_is_never_a_comment():
     with pytest.raises(Unparseable):
         split_command("echo a#b")
     assert argvs("echo 'a#b'") == [("echo", "a#b")]
+
+
+# ---- fix round 2 ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["echo a 0<f", "echo a 3>f", "echo a 9>/dev/null b", "echo a 12>/dev/null", "echo a 0< f", "echo a 10<&0", "echo a 99>&1"],
+)
+def test_a_descriptor_other_than_1_or_2_is_unparseable(command):
+    with pytest.raises(Unparseable):
+        split_command(command)
+
+
+def test_descriptors_1_and_2_are_dropped_and_a_spaced_digit_is_an_argument():
+    assert split_command("echo a 2>/dev/null")[0].argv == ("echo", "a")
+    assert split_command("echo a 1>/dev/null")[0].argv == ("echo", "a")
+    assert split_command("echo a 9 >/dev/null")[0].argv == ("echo", "a", "9")
+    assert split_command("echo a 12 > /dev/null")[0].argv == ("echo", "a", "12")
+
+
+def test_a_quoted_digit_before_a_redirect_is_an_ordinary_argument():
+    assert split_command("echo a '9'>/dev/null")[0].argv == ("echo", "a", "9")
+    assert split_command('echo a "12">/dev/null')[0].argv == ("echo", "a", "12")
+    assert split_command("echo a \\9>/dev/null")[0].argv == ("echo", "a", "9")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo a\rb",
+        "echo a\x0bb",
+        "echo a\x0cb",
+        "echo a\x00b",
+        "echo a\x7fb",
+        "echo a\x1bb",
+        "echo a\u00a0b",
+        "echo a\u2003b",
+        "echo a\u3000b",
+        "echo =ls",
+        "=ls",
+        "echo a =ls",
+        "echo 'a\x00b'",
+        'echo "a\x00b"',
+    ],
+)
+def test_control_characters_odd_whitespace_and_a_leading_equals_are_unparseable(command):
+    with pytest.raises(Unparseable):
+        split_command(command)
+
+
+def test_quoted_non_ascii_whitespace_and_equals_in_the_middle_are_literal():
+    assert split_command("echo 'a\u00a0b' x=y a=b")[0].argv == ("echo", "a\u00a0b", "x=y", "a=b")
+    assert split_command("echo '=ls'")[0].argv == ("echo", "=ls")
+    assert split_command("echo é")[0].argv == ("echo", "é")
