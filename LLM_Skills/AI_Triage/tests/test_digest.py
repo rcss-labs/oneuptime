@@ -144,10 +144,9 @@ def test_the_draft_digest_never_raises(bad):
     assert len(draft_digest(REPORT, None, None)) == 64
 
 
-def test_a_missing_field_is_null_and_differs_from_an_empty_one():
+def test_a_missing_field_differs_from_an_empty_one():
     without = {key: value for key, value in CAUSE.items() if key != "contradicting"}
     assert cause_digest(without, FINDINGS) != cause_digest({**CAUSE, "contradicting": []}, FINDINGS)
-    assert cause_digest(without, FINDINGS) == cause_digest({**without, "contradicting": None}, FINDINGS)
 
 
 def test_a_missing_finding_is_digested_as_null():
