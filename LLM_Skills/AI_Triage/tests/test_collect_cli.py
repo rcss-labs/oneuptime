@@ -274,3 +274,33 @@ def test_global_region_is_allowed_for_any_account(skill_dir, fake_collector):
     argv = args(skill_dir, "--target", "thing=x", "--region", "us-east-1")
     argv[argv.index("prod-main")] = "staging"
     assert collect.main(argv, runner=FakeAws({})) == 0
+
+
+def test_one_of_whitespace_value_counts_as_missing(skill_dir, one_of_collector):
+    assert collect.main(args(skill_dir, "--target", "a= ", name="pick")) == 4
+
+
+def test_duplicate_target_key_exits_4(skill_dir, fake_collector, capsys):
+    assert collect.main(args(skill_dir, "--target", "thing=a", "--target", "thing=b")) == 4
+    assert "thing" in capsys.readouterr().err
+
+
+def test_empty_required_target_exits_4(skill_dir, fake_collector):
+    assert collect.main(args(skill_dir, "--target", "thing=")) == 4
+    assert collect.main(args(skill_dir, "--target", "thing=  ")) == 4
+
+
+def test_collector_error_has_no_command(skill_dir, monkeypatch, capsys):
+    def run(ctx, targets):
+        ctx.aws("ecs", "list-clusters")
+        raise KeyError("unknown EKS cluster")
+
+    monkeypatch.setattr(collect, "all_collectors", lambda: {"boom": Collector("boom", "d", (), (), run)})
+    collect.main(args(skill_dir, name="boom"), runner=FakeAws({}))
+    assert json.loads(capsys.readouterr().out)["errors"][0]["command"] == ""
+
+
+def test_context_gets_a_clock(skill_dir, fake_collector):
+    collect.main(args(skill_dir, "--target", "thing=x"), runner=FakeAws({}))
+    assert fake_collector[0][0].now is not None
+    assert fake_collector[0][0].now.tzinfo is not None

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from triage.awscli import Runner, subprocess_runner
@@ -28,14 +29,18 @@ def _list_line(collector: Collector) -> str:
     return f"{collector.name}  {keys}{one_of}  {collector.description}"
 
 
-def _parse_targets(pairs: list[str]) -> dict[str, str] | None:
-    targets = {}
+def _parse_targets(pairs: list[str]) -> tuple[dict[str, str], list[str]] | None:
+    """The targets and the keys given more than once; None when a pair is not KEY=VALUE."""
+    targets: dict[str, str] = {}
+    repeated: list[str] = []
     for pair in pairs:
         key, separator, value = pair.partition("=")
         if not separator or not key:
             return None
+        if key in targets and key not in repeated:
+            repeated.append(key)
         targets[key] = value
-    return targets
+    return targets, repeated
 
 
 def _target_problem(collector: Collector, targets: dict[str, str]) -> str | None:
@@ -44,7 +49,10 @@ def _target_problem(collector: Collector, targets: dict[str, str]) -> str | None
     unknown = [key for key in targets if key not in collector.required + collector.optional]
     if missing:
         return f"{collector.name} needs target {', '.join(missing)} ({keys})"
-    if collector.one_of and not any(targets.get(key) for key in collector.one_of):
+    empty = [key for key in collector.required if not targets[key].strip()]
+    if empty:
+        return f"{collector.name} target {', '.join(empty)} must not be empty ({keys})"
+    if collector.one_of and not any(targets.get(key, "").strip() for key in collector.one_of):
         return f"{collector.name} needs at least one of these targets: {', '.join(collector.one_of)} ({keys})"
     if unknown:
         return f"{collector.name} has no target {', '.join(unknown)} ({keys})"
@@ -94,9 +102,12 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     collector = collectors.get(args.name)
     if collector is None:
         return _fail(f"unknown collector {args.name}; available: {', '.join(sorted(collectors))}", 4)
-    targets = _parse_targets(args.target)
-    if targets is None:
+    parsed = _parse_targets(args.target)
+    if parsed is None:
         return _fail("--target must look like KEY=VALUE", 2)
+    targets, repeated = parsed
+    if repeated:
+        return _fail(f"target {', '.join(repeated)} was given more than once", 4)
     problem = _target_problem(collector, targets)
     if problem:
         return _fail(problem, 4)
@@ -115,13 +126,14 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     ctx = CollectContext(
         config, account, region, window, evidence, args.skill_dir,
         runner=runner or subprocess_runner, kube_runner=kube_runner or subprocess_runner,
+        now=datetime.now(timezone.utc),
     )
     try:
         collector.run(ctx, targets)
     except SignInExpired as expired:
         return _fail(f"Sign-in expired. Run: aws sso login --profile {expired.profile}", 3)
     except Exception as error:  # noqa: BLE001 - one bad field must not cost the evidence already collected
-        evidence.add_error(ctx.last_command, "CollectorError", f"{type(error).__name__}: {error}")
+        evidence.add_error("", "CollectorError", f"{type(error).__name__}: {error}")
     if args.case_dir:
         path = evidence.write(args.case_dir, args.suffix)
         print(f"{path} facts={len(evidence.facts)} errors={len(evidence.errors)} truncated={evidence.truncated}")
