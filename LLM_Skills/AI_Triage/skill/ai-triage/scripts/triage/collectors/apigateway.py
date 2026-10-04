@@ -152,7 +152,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     deployments_command = ctx.last_command
     if targets.get("stage"):
         stages = [stage for stage in stages if stage.name == targets["stage"]]
-        if not stages:
+        if not stages and stages_reply is not None:
             ctx.evidence.add(
                 kind=CURRENT, resource=resource, command=stage_command,
                 summary=f"Stage {targets['stage']} was not found on API {api_id}",

@@ -185,3 +185,10 @@ def test_newest_five_in_window_deployments_are_picked_in_code(config_data, tmp_p
 def test_unknown_stage_is_stated(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, rest_answers(), {**REST, "stage": "nope"})
     assert by_summary(ctx, "Stage nope was not found")
+
+
+def test_failed_stage_lookup_is_an_error_not_a_missing_stage(config_data, tmp_path):
+    answers = rest_answers(**{"apigateway get-stages": access_denied("GetStages")})
+    ctx, _, _ = run(config_data, tmp_path, answers, {**REST, "stage": "prod"})
+    assert not by_summary(ctx, "was not found")
+    assert [e["code"] for e in ctx.evidence.errors] == ["AccessDeniedException"]
