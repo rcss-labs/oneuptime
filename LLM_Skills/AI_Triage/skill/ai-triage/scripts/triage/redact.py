@@ -12,6 +12,8 @@ import json
 import re
 import threading
 import warnings
+
+import yaml
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -146,6 +148,41 @@ def looks_personal_key(key: str) -> bool:
     return any(part in PERSONAL_WORDS for part in _name_parts(key))
 
 
+# --- plain words: what file paths and identifiers are made of ---------------------------------
+
+_SUBPART_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+")
+_HEX_RE = re.compile(r"[0-9a-fA-F]+")
+_PIECE_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
+_PLAIN_PATH_RE = re.compile(r"~?/[\w.\-/]*")
+
+
+def _plain_piece(piece: str) -> bool:
+    """Whether a run of letters and digits reads like a word, a number or a short id, not key material."""
+    if len(piece) <= 3 or piece.isdigit():
+        return True
+    single_case = piece.islower() or piece.isupper()
+    if single_case and (len(piece) <= 12 or (_HEX_RE.fullmatch(piece) and len(piece) < 40)):
+        return True
+    subparts = _SUBPART_RE.findall(piece)
+    if "".join(subparts) != piece or any(len(part) == 1 and part.isalpha() for part in subparts):
+        return False
+    return len(subparts) * 3 <= len(piece)
+
+
+def _plain_words(text: str) -> bool:
+    return all(_plain_piece(piece) for piece in _PIECE_SPLIT_RE.split(text) if piece)
+
+
+def _is_plain_path(value: str) -> bool:
+    """An absolute file path whose parts are plain words: /etc/ssl/private/server.key."""
+    return bool(_PLAIN_PATH_RE.fullmatch(value)) and _plain_words(value)
+
+
+def _harmless_secret_value(value: str) -> bool:
+    """Values that are not secrets even under a secret name: literals and plain absolute paths."""
+    return value.lower() in LITERAL_VALUES or _is_plain_path(value)
+
+
 # --- span rules: each returns the spans of text that are secret --------------------------
 
 def _usable(text: str, span: Span | None) -> bool:
@@ -215,11 +252,11 @@ KV_START_RE = re.compile(
     r"""(?<![\w.\-/:@])(?P<key>-{0,2}[A-Za-z_][\w.\-]*)(?P<quote>\\?["']?)(?P<sep>[ \t]*(?:=>|=|:)[ \t]*)"""
 )
 XML_PAIR_RE = re.compile(r"<(?P<key>[A-Za-z_][\w.\-]*)>(?P<value>[^<\n]+)</(?P=key)>")
-LITERAL_VALUES = frozenset({"null", "true", "false", "yes", "no", "none"})
-_VALUE_END_RE = re.compile(r'[),"]| \(')
+LITERAL_VALUES = frozenset({"null", "true", "false", "yes", "no", "none", "ok"})
+_VALUE_END_RE = re.compile(r"""[),"]| \(|'(?=[\s,;)\]}]|$)""")
 _SCHEME_AND_TOKEN_RE = re.compile(r"(?P<scheme>[A-Za-z][\w-]*)(?P<gap>[ \t]+)(?P<token>\S.*)", re.DOTALL)
 _BLOCK_SCALAR_RE = re.compile(r"[|>][+-]?\d?")
-_BARE_VALUE_RE = re.compile(r"""[^\s&,;"'}\]]+""")
+_BARE_VALUE_RE = re.compile(r"""[^\s&,;"'}\]\[{]+""")
 
 
 def _pem_spans(text: str) -> list[Span]:
@@ -247,14 +284,26 @@ def _aws_secret_key_spans(text: str) -> list[Span]:
 _line_cache = threading.local()
 
 
-def _line_end(text: str, start: int) -> int:
-    """Offset of the end of the line holding start. Newline offsets are computed once per text."""
+def _newlines(text: str) -> list[int]:
+    """Newline offsets of text, computed once per text."""
     if getattr(_line_cache, "text", None) is not text:
         _line_cache.text = text
         _line_cache.newlines = [m.start() for m in re.finditer("\n", text)]
-    newlines = _line_cache.newlines
+    return _line_cache.newlines
+
+
+def _line_end(text: str, start: int) -> int:
+    """Offset of the end of the line holding start."""
+    newlines = _newlines(text)
     index = bisect.bisect_left(newlines, start)
     return newlines[index] if index < len(newlines) else len(text)
+
+
+def _line_start(text: str, position: int) -> int:
+    """Offset of the start of the line holding position."""
+    newlines = _newlines(text)
+    index = bisect.bisect_left(newlines, position) - 1
+    return newlines[index] + 1 if index >= 0 else 0
 
 
 def _quoted_span(text: str, start: int) -> Span | None:
@@ -278,14 +327,14 @@ def _quoted_span(text: str, start: int) -> Span | None:
     return None
 
 
-def _block_scalar_span(text: str, after_line: int) -> Span | None:
-    """The indented lines that follow a YAML `key: |` line."""
+def _block_scalar_span(text: str, after_line: int, key_column: int) -> Span | None:
+    """The lines of a YAML `key: |` scalar: those indented deeper than the key itself."""
     first = last = None
     position = after_line + 1
     while position <= len(text):
         end = _line_end(text, position)
         line = text[position:end]
-        if line.strip() and not line[0] in " \t":
+        if line.strip() and len(line) - len(line.lstrip(" \t")) <= key_column:
             break
         if line.strip():
             if first is None:
@@ -308,10 +357,12 @@ def _kv_candidate_is_secret(key: str, quote: str, sep: str) -> bool:
     return True
 
 
-def _kv_value_span(text: str, start: int, quote: str, sep: str, stop_at_delimiters: bool = True) -> Span | None:
+def _kv_value_span(
+    text: str, start: int, quote: str, sep: str, stop_at_delimiters: bool = True, key_column: int = 0
+) -> Span | None:
     colon_only = "=" not in sep
-    if start >= len(text) or text[start] in "\r\n":
-        return None
+    if start >= len(text) or text[start] in "\r\n[{":
+        return None  # a nested structure is walked on its own; never consume its opening bracket
     quoted = _quoted_span(text, start)
     if quoted:
         return quoted
@@ -322,7 +373,7 @@ def _kv_value_span(text: str, start: int, quote: str, sep: str, stop_at_delimite
         while end > start and text[end - 1] in " \t\r":
             end -= 1
         if _BLOCK_SCALAR_RE.fullmatch(text[start:end]):
-            return _block_scalar_span(text, end)
+            return _block_scalar_span(text, end, key_column)
         if stop_at_delimiters:
             delimiter = _VALUE_END_RE.search(text, start, end)
             if delimiter:
@@ -343,12 +394,13 @@ def _key_value_spans(text: str) -> list[Span]:
         if not _kv_candidate_is_secret(key, quote, sep):
             position = match.end("key")
             continue
-        span = _kv_value_span(text, match.end(), quote, sep)
+        key_column = match.start("key") - _line_start(text, match.start("key"))
+        span = _kv_value_span(text, match.end(), quote, sep, key_column=key_column)
         position = max(match.end(), span[1]) if span else match.end()
         if not span or not _usable(text, span):
             continue
         value = text[span[0]:span[1]]
-        if _SCHEME_AND_PLACEHOLDER_RE.fullmatch(value) or value.lower() in LITERAL_VALUES:
+        if _SCHEME_AND_PLACEHOLDER_RE.fullmatch(value) or _harmless_secret_value(value):
             continue
         spans.append(span)
     for match in XML_PAIR_RE.finditer(text):
@@ -380,13 +432,15 @@ def _name_value_spans(text: str) -> list[Span]:
     for match in JSON_NAME_VALUE_RE.finditer(text):
         if looks_secret_key(match.group("name")):
             span = _quoted_span(text, match.end()) or (_BARE_VALUE_RE.match(text, match.end()) or match).span()
-            if span[0] >= match.end() and _usable(text, span) and text[span[0]:span[1]].lower() not in LITERAL_VALUES:
+            if span[0] >= match.end() and _usable(text, span) and not _harmless_secret_value(text[span[0]:span[1]]):
                 spans.append(span)
     for match in YAML_NAME_VALUE_RE.finditer(text):
         # The value key sits in the column of the name key itself, however many spaces follow the dash.
         if len(match.group("indent2")) == len(match.group("lead")) and looks_secret_key(match.group("name")):
-            span = _kv_value_span(text, match.end(), "", ": ", stop_at_delimiters=False)
-            if span and _usable(text, span) and text[span[0]:span[1]].lower() not in LITERAL_VALUES:
+            span = _kv_value_span(
+                text, match.end(), "", ": ", stop_at_delimiters=False, key_column=len(match.group("indent2"))
+            )
+            if span and _usable(text, span) and not _harmless_secret_value(text[span[0]:span[1]]):
                 spans.append(span)
     return _merge(spans)
 
@@ -415,7 +469,7 @@ def _flag_spans(text: str) -> list[Span]:
         if text[start] == "-" or not looks_secret_key(match.group("flag").lstrip("-")):
             continue
         span = _flag_value_span(text, start)
-        if _usable(text, span):
+        if _usable(text, span) and not _harmless_secret_value(text[span[0]:span[1]]):
             spans.append(span)
     return _merge(spans)
 
@@ -487,6 +541,119 @@ def _webhook_spans(text: str) -> list[Span]:
     return _group_rule(WEBHOOK_RE, "slack", "discord", "office")(text)
 
 
+def _argv_spans(items: list) -> dict[int, list[Span]]:
+    """Credential spans in an argument list read as one command line, by item index.
+
+    A leading CMD (Docker exec form) is skipped. A span runs to the end of its item: an argument
+    is one token, so the rest of it belongs to the credential.
+    """
+    if not items or not all(isinstance(item, str) for item in items):
+        return {}
+    offsets, position = [], 0
+    for item in items:
+        offsets.append(position)
+        position += len(item) + 1
+    line = " ".join(item.replace("\n", " ").replace("\r", " ") for item in items)
+    found: dict[int, list[Span]] = {}
+    for start, _ in _command_spans(line):
+        index = bisect.bisect_right(offsets, start) - 1
+        relative = start - offsets[index]
+        if 0 <= relative < len(items[index]):
+            found.setdefault(index, []).append((relative, len(items[index])))
+    return found
+
+
+_YAML_LIST_KEY_RE = re.compile(
+    r"^(?P<lead>[ \t]*(?:-[ \t]+)?)(?P<key>command|args|entrypoint|entryPoint|cmd|Cmd|Entrypoint)[ \t]*:[ \t]*(?P<rest>[^\r\n]*)$",
+    re.MULTILINE,
+)
+_YAML_ITEM_RE = re.compile(r"""^(?P<indent>[ \t]*)-[ \t]+(?P<item>[^\r\n]*?)[ \t]*$""", re.MULTILINE)
+_JSON_STRING = r'"(?:[^"\\\n]|\\.)*"'
+_JSON_STRING_RE = re.compile(_JSON_STRING)
+_JSON_STRING_ARRAY_RE = re.compile(r"\[[ \t]*" + _JSON_STRING + r"(?:[ \t]*,[ \t]*" + _JSON_STRING + r")*[ \t]*\]")
+
+
+def _json_array_argument_spans(text: str) -> list[Span]:
+    """Credentials in a JSON array of strings read as a command line (Docker exec form)."""
+    if '"' not in text or not _COMMAND_RE.search(text):
+        return []
+    spans: list[Span] = []
+    for match in _JSON_STRING_ARRAY_RE.finditer(text):
+        strings = list(_JSON_STRING_RE.finditer(text, match.start(), match.end()))
+        items = [found.group()[1:-1] for found in strings]
+        for index, item_spans in _argv_spans(items).items():
+            for start, stop in item_spans:
+                base = strings[index].start() + 1
+                spans.append((base + start, base + stop))
+    return _merge([span for span in spans if _usable(text, span)])
+
+
+def _unquoted(text: str, start: int, end: int) -> tuple[str, int]:
+    """A YAML scalar's value and where it starts, without matching quotes."""
+    if end - start >= 2 and text[start] in "\"'" and text[end - 1] == text[start]:
+        return text[start + 1:end - 1], start + 1
+    return text[start:end], start
+
+
+def _yaml_list_items(text: str, match: re.Match[str]) -> tuple[list[str], list[int], int]:
+    """The items of a YAML command/args list (block or flow style), their offsets and where it ends."""
+    rest = match.group("rest")
+    if rest.startswith("["):
+        try:
+            parsed = yaml.safe_load(rest)
+        except Exception:
+            return [], [], match.end()
+        if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+            return [], [], match.end()
+        items, offsets, position = [], [], match.start("rest")
+        for item in parsed:
+            found = text.find(item, position, match.end()) if item else -1
+            if found == -1:
+                return [], [], match.end()
+            items.append(item)
+            offsets.append(found)
+            position = found + len(item)
+        return items, offsets, match.end()
+    if rest.strip():
+        return [], [], match.end()
+    column = len(match.group("lead"))
+    items, offsets, position, end = [], [], match.end() + 1, match.end()
+    while position < len(text):
+        line_end = _line_end(text, position)
+        item = _YAML_ITEM_RE.match(text, position, line_end)
+        if not item or len(item.group("indent")) < column - (2 if match.group("lead").rstrip().endswith("-") else 0):
+            break
+        value, offset = _unquoted(text, item.start("item"), item.end("item"))
+        items.append(value)
+        offsets.append(offset)
+        end, position = line_end, line_end + 1
+    return items, offsets, end
+
+
+def _yaml_argument_spans(text: str) -> list[Span]:
+    """Credentials in YAML command/args lists, read together as one command line."""
+    if not _COMMAND_RE.search(text):
+        return []
+    spans: list[Span] = []
+    pending: dict[int, tuple[list[str], list[int], int]] = {}  # command lists by key column
+    for match in _YAML_LIST_KEY_RE.finditer(text):
+        items, offsets, end = _yaml_list_items(text, match)
+        if not items:
+            continue
+        column = len(match.group("lead"))
+        if match.group("key") == "args" and column in pending:
+            command_items, command_offsets, command_end = pending.pop(column)
+            between = text[command_end:match.start()]
+            if all(not line.strip() or len(line) - len(line.lstrip()) >= column for line in between.split("\n")[1:]):
+                items, offsets = command_items + items, command_offsets + offsets
+        elif match.group("key") != "args":
+            pending[column] = (items, offsets, end)
+        for index, item_spans in _argv_spans(items).items():
+            for start, stop in item_spans:
+                spans.append((offsets[index] + start, offsets[index] + stop))
+    return _merge([span for span in spans if _usable(text, span)])
+
+
 # (audit category, rule), in redaction order.
 SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("private_key", _pem_spans),
@@ -496,6 +663,7 @@ SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("secret_name_value", _name_value_spans),
     ("secret_flag", _flag_spans),
     ("secret_command", _command_spans),
+    ("secret_argument_list", lambda text: _merge(_yaml_argument_spans(text) + _json_array_argument_spans(text))),
     ("webhook_url", _webhook_spans),
     ("aws_access_key", lambda text: [m.span() for m in AWS_KEY_RE.finditer(text)]),
     ("vendor_token", lambda text: [m.span() for m in VENDOR_TOKEN_RE.finditer(text)]),
@@ -543,34 +711,6 @@ MAX_EMBEDDED_NESTING = 4         # text() -> structure -> string -> text() level
 DEEP_STRUCTURE_PLACEHOLDER = "<DEEP-STRUCTURE-OMITTED>"
 _BRACKET_RE = re.compile(r"[{}\[\]]")
 _CLOSERS = {"{": "}", "[": "]"}
-
-
-def _command_arguments(items: list) -> dict[int, str]:
-    """Positions of credential arguments in an exec-form command list, with how to redact each."""
-    if not items or not all(isinstance(item, str) for item in items):
-        return {}
-    command = items[0].rsplit("/", 1)[-1]
-    found: dict[int, str] = {}
-    for index, item in enumerate(items):
-        following = index + 1 < len(items)
-        if command in _COMMANDS_WITH_USER_FLAG:
-            if item in ("-u", "--user", "--proxy-user") and following:
-                found[index + 1] = "user"
-            elif item.startswith(("--user=", "--proxy-user=")):
-                found[index] = "user-equals"
-            elif item.startswith("-u") and len(item) > 2 and ":" in item:
-                found[index] = "user-attached"
-        elif command in _COMMANDS_WITH_ATTACHED_P:
-            if item.startswith("-p") and len(item) > 2 and item[2] != "-":
-                found[index] = "attached"
-        elif (command == "docker" and items[1:2] == ["login"]) or command == "sshpass":
-            if item == "-p" and following:
-                found[index + 1] = "whole"
-            elif item.startswith("-p") and len(item) > 2 and item[2] != "-":
-                found[index] = "attached"
-        elif command == "redis-cli" and item == "-a" and following:
-            found[index + 1] = "whole"
-    return found
 
 
 class _TooDeep(Exception):
@@ -841,7 +981,7 @@ class Redactor:
             obj = obj.decode("utf-8", errors="replace")
         if isinstance(obj, str):
             if secret:
-                if not obj or obj.lower() in LITERAL_VALUES:
+                if not obj or _harmless_secret_value(obj):
                     return obj
                 return self._authorization_value(obj) if authorization else self._secret_scalar(obj)
             structured = self._json_string(obj)
@@ -855,28 +995,22 @@ class Redactor:
             return self._walk_list(sorted(obj, key=repr), secret, immediate, authorization, keep)
         return self._walk_list(list(obj), secret, immediate, authorization, keep)
 
-    def _command_item(self, item: str, kind: str) -> str:
-        """Redact the credential part of one exec-form argument."""
-        if kind == "whole":
-            return self._secret_scalar(item)
-        if kind == "attached":  # -pVALUE
-            return item[:2] + self._secret_scalar(item[2:])
-        prefix = ""
-        if kind == "user-equals":  # --user=name:password
-            prefix, item = item[:item.index("=") + 1], item[item.index("=") + 1:]
-        elif kind == "user-attached":  # -uname:password
-            prefix, item = item[:2], item[2:]
-        colon = item.find(":")
-        if colon == -1 or colon == len(item) - 1:
-            return prefix + item
-        return prefix + item[:colon + 1] + self._secret_scalar(item[colon + 1:])
+    def _masked_item(self, item: str, spans: list[Span]) -> str:
+        """An argument with its credential spans replaced."""
+        for start, end in sorted(_merge(spans), reverse=True):
+            item = item[:start] + self._secret_scalar(item[start:end]) + item[end:]
+        return item
 
-    def _walk_list(self, items: list, secret: bool, immediate: bool, authorization: bool, keep: bool = False) -> list:
-        commands = {} if secret or keep else _command_arguments(items)
+    def _walk_list(
+        self, items: list, secret: bool, immediate: bool, authorization: bool, keep: bool = False,
+        argv: dict[int, list[Span]] | None = None,
+    ) -> list:
+        if argv is None:
+            argv = {} if secret or keep else _argv_spans(items)
         result, previous = [], None
         for index, item in enumerate(items):
-            if index in commands and isinstance(item, str):
-                result.append(self._command_item(item, commands[index]))
+            if index in argv and isinstance(item, str):
+                result.append(self.text(self._masked_item(item, argv[index])))
                 previous = item
                 continue
             follows_secret_flag = not keep and (
@@ -896,10 +1030,13 @@ class Redactor:
                 entry_name, entry_name_key, entry_value_key = obj[name_key], name_key, value_key
                 break
         entry_secret = entry_name is not None and looks_secret_key(entry_name) and not keep
+        command_args = None if secret or keep else self._command_and_args(obj)
         result = {}
         for key, item in obj.items():
             new_key = self.text(key) if isinstance(key, str) else key
-            if keep:
+            if command_args is not None and key in command_args:
+                result[new_key] = self._walk_list(item, False, False, False, argv=command_args[key])
+            elif keep:
                 result[new_key] = self._walk(item, False, False, False, True)
             elif key == REFERENCE_KEY:
                 result[new_key] = copy.deepcopy(item)
@@ -919,6 +1056,20 @@ class Redactor:
             else:
                 result[new_key] = self._walk(item, secret, False, False)
         return result
+
+    @staticmethod
+    def _command_and_args(obj: dict) -> dict[str, dict[int, list[Span]]] | None:
+        """Kubernetes command and args lists in one dict, read together as one command line."""
+        command, args = obj.get("command"), obj.get("args")
+        if not (isinstance(command, list) and isinstance(args, list)):
+            return None
+        found = _argv_spans(command + args)
+        if not found and not (command and args):
+            return None
+        return {
+            "command": {index: spans for index, spans in found.items() if index < len(command)},
+            "args": {index - len(command): spans for index, spans in found.items() if index >= len(command)},
+        }
 
     def counts(self) -> dict[str, int]:
         return {

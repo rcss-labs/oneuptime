@@ -1187,3 +1187,143 @@ def test_one_megabyte_bracket_shapes_are_fast(shape):
         call(source)
         elapsed = time.perf_counter() - started
         assert elapsed < 2, (shape, elapsed)
+
+
+# Ruling 3: YAML block scalars mask only their own lines
+
+def test_block_scalar_in_a_pod_spec_keeps_the_following_entries():
+    source = (
+        "spec:\n  containers:\n  - env:\n    - name: DB_PASSWORD\n      value: >-\n        " + PW + "\n"
+        "    - name: LOG_LEVEL\n      value: debug\n    image: api:1.2\n    resources:\n      limits:\n"
+        "        memory: 512Mi\nstatus: {}"
+    )
+    expected = source.replace(PW, "<SECRET-1>")
+    assert Redactor().text(source) == expected
+
+
+def test_block_scalar_in_a_config_map_keeps_sibling_keys():
+    source = (
+        "data:\n  password: |\n    " + PW + "\n    second line\n\n    third\n"
+        "  host: db.example.com\n  port: \"5432\"\n  replicas: 3\n"
+    )
+    expected = "data:\n  password: |\n    <SECRET-1>\n  host: db.example.com\n  port: \"5432\"\n  replicas: 3\n"
+    assert Redactor().text(source) == expected
+
+
+# Ruling 4: argument lists are command lines
+
+@pytest.mark.parametrize(
+    "obj, expected",
+    [
+        (
+            {"healthCheck": {"command": ["CMD", "mysqladmin", "ping", "-uroot", "-p" + PW]}},
+            {"healthCheck": {"command": ["CMD", "mysqladmin", "ping", "-uroot", "-p<SECRET-1>"]}},
+        ),
+        ({"command": ["mysql"], "args": ["-h", "db", "-p" + PW]}, {"command": ["mysql"], "args": ["-h", "db", "-p<SECRET-1>"]}),
+        ({"command": ["/usr/bin/redis-cli"], "args": ["-a", PW]}, {"command": ["/usr/bin/redis-cli"], "args": ["-a", "<SECRET-1>"]}),
+        ({"command": ["curl"], "args": ["-u", "admin:" + PW]}, {"command": ["curl"], "args": ["-u", "admin:<SECRET-1>"]}),
+        (["CMD", "curl", "--user=admin:" + PW], ["CMD", "curl", "--user=admin:<SECRET-1>"]),
+        ({"command": ["mysql"], "args": ["-h", "db"]}, {"command": ["mysql"], "args": ["-h", "db"]}),
+    ],
+)
+def test_exec_form_lists_and_command_with_args(obj, expected):
+    assert Redactor().value(obj) == expected
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (
+            '{"healthCheck":{"command":["CMD","mysqladmin","ping","-uroot","-p' + PW + '"]}}',
+            '{"healthCheck":{"command":["CMD","mysqladmin","ping","-uroot","-p<SECRET-1>"]}}',
+        ),
+        (
+            "containers:\n- name: db\n  command:\n  - mysql\n  args:\n  - -h\n  - db\n  - -p" + PW + "\n  image: mysql:8\n",
+            "containers:\n- name: db\n  command:\n  - mysql\n  args:\n  - -h\n  - db\n  - -p<SECRET-1>\n  image: mysql:8\n",
+        ),
+        (
+            'containers:\n- name: db\n  command: ["mysql"]\n  args: ["-h", "db", "-p' + PW + '"]\n',
+            'containers:\n- name: db\n  command: ["mysql"]\n  args: ["-h", "db", "-p<SECRET-1>"]\n',
+        ),
+        (
+            "  command:\n    - redis-cli\n    - -a\n    - " + PW + "\n    - ping\n",
+            "  command:\n    - redis-cli\n    - -a\n    - <SECRET-1>\n    - ping\n",
+        ),
+    ],
+)
+def test_argument_lists_in_text_are_read_as_command_lines(source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    assert audit_text(source) != [] and audit_text(out) == []
+
+
+# Ruling 9: false positives
+
+def test_names_whose_secret_word_only_qualifies_something_else_are_kept():
+    obj = {
+        "AttributeKey": "ReadOnly", "ParameterKey": "Stage", "TagKey": "team", "ApiKeySource": "HEADER",
+        "CredentialSource": "Ec2InstanceMetadata", "TokenEndpoint": "https://auth.example.com/oauth2/token",
+        "AuthFlow": "USER_PASSWORD_AUTH", "token_bucket_remaining": 42, "auth_latency_ms": 12,
+        "AuthTokenRequests": 5, "PasswordLastUsed": "2026-10-01T10:00:00Z", "KeyState": "Enabled",
+        "SecretArn": "arn:aws:secretsmanager:eu-west-1:111111111111:secret:db-AbCdEf", "KeyId": "k-1",
+        "SecretName": "db", "AuthType": "AWS_IAM", "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+        "TokenCount": 3, "PasswordPolicy": {"MinimumPasswordLength": 14},
+        "KeyUsage": "ENCRYPT_DECRYPT", "KeySpec": "SYMMETRIC_DEFAULT", "AccessKeyMetadata": [{"Status": "Active"}],
+    }
+    assert Redactor().value(obj) == obj
+
+
+def test_names_the_review_lists_as_correctly_hidden_stay_hidden():
+    obj = {"PasswordData": PW, "SecretString": PW, "SecretKey": PW, "KeyMaterial": PW, "authorizationToken": PW}
+    assert set(Redactor().value(obj).values()) == {"<SECRET-1>"}
+
+
+def test_lookup_attribute_on_a_command_line_is_kept():
+    source = "aws cloudtrail lookup-events --lookup-attributes AttributeKey=ReadOnly,AttributeValue=false"
+    assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize("literal", ["true", "FALSE", "Yes", "no", "ok", "OK", "none", "Null", "NONE"])
+def test_literal_values_under_a_secret_name_are_kept(literal):
+    assert Redactor().text(f"password: {literal}") == f"password: {literal}"
+    assert Redactor().text(f"token={literal}") == f"token={literal}"
+    assert Redactor().value({"password": literal}) == {"password": literal}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "ssl_key: /etc/ssl/private/server.key",
+        "ssl_key=/etc/ssl/private/server.key",
+        '{"ssl_key": "/etc/ssl/private/server.key"}',
+        "nginx --ssl-key /etc/nginx/certs/site.key --port 443",
+        "- name: TLS_KEY\n  value: /run/secrets/tls.key",
+    ],
+)
+def test_plain_absolute_paths_under_a_secret_name_are_kept(source):
+    assert Redactor().text(source) == source
+
+
+def test_path_value_is_kept_in_value_but_a_random_path_part_is_not():
+    assert Redactor().value({"ssl_key": "/etc/ssl/private/server.key"}) == {"ssl_key": "/etc/ssl/private/server.key"}
+    random_part = "Qx7" + "Lm2Rt9" + "Zp4Vb8"
+    assert random_part not in Redactor().text(f"password=/{random_part}")
+    assert random_part not in repr(Redactor().value({"password": "/tmp/" + random_part}))
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ('"Cookie":["<SECRET-1>"]', '"Cookie":["<SECRET-1>"]'),
+        ("{'creds': {", "{'creds': {"),
+        ("{ db: { creds: { password: '" + PW + "' } } }", "{ db: { creds: { password: '<SECRET-1>' } } }"),
+        (
+            "curl -H 'Private-Token: " + PW + "' https://gitlab.example.com/api/v4/projects",
+            "curl -H 'Private-Token: <SECRET-1>' https://gitlab.example.com/api/v4/projects",
+        ),
+        ("token: [", "token: ["),
+        ("password={", "password={"),
+    ],
+)
+def test_key_value_rule_never_eats_brackets_or_closing_quotes(source, expected):
+    assert Redactor().text(source) == expected
