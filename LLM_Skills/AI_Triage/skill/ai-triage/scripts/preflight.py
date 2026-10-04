@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     # In replay mode aws and kubectl are never run, so they count as present.
     which = (lambda name: f"replay/{name}") if replay else shutil.which
-    checks = run_preflight(args.skill_dir, args.account, runner=runner, which=which)
+    checks = run_preflight(args.skill_dir, args.account, runner=runner, which=which, replay=bool(replay))
     code = exit_code(checks)
     if args.json:
         print(json.dumps({"exit_code": code, "checks": as_dicts(checks)}, indent=2))

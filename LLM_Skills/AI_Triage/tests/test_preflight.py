@@ -178,7 +178,9 @@ def test_preflight_command_in_replay_mode_uses_fixtures_and_treats_tools_as_pres
     captured = capsys.readouterr()
     checks = {check["name"]: check for check in json.loads(captured.out)["checks"]}
     assert code == 0
-    assert checks["AWS CLI"]["status"] == OK and checks["kubectl"]["status"] == OK
+    assert checks["AWS CLI"]["status"] == OK
+    assert checks["kubectl"]["status"] == "skipped"
+    assert "replay" in checks["kubectl"]["detail"]
     assert checks["Sign-in: prod-main"]["status"] == OK
     assert captured.err.count("REPLAY MODE") == 1
     assert f"REPLAY MODE: answers come from {replay}; nothing is called." in captured.err
@@ -190,3 +192,11 @@ def test_preflight_command_with_a_bad_fixture_directory_exits_2(skill_dir, tmp_p
     monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path / "nowhere"))
     assert preflight.main(["--skill-dir", str(skill_dir)]) == 2
     assert "not a directory" in capsys.readouterr().err
+
+
+def test_replay_skips_the_kubeconfig_check_even_when_the_file_is_missing(skill_dir):
+    (skill_dir / "config" / "kubeconfig").unlink()
+    checks = run_preflight(skill_dir, runner=signed_in(), env={"TYPESAFE_API_KEY": "set"},
+                           which=lambda name: f"replay/{name}", replay=True)
+    assert by_name(checks)["kubectl"].status == "skipped"
+    assert exit_code(checks) == 0

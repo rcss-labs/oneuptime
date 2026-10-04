@@ -17,6 +17,7 @@ OK = "ok"
 WARN = "warn"
 FAIL = "fail"
 SIGN_IN = "sign-in"
+SKIPPED = "skipped"
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ def run_preflight(
     runner: Runner = subprocess_runner,
     env: Mapping[str, str] = os.environ,
     which: Callable[[str], str | None] = shutil.which,
+    replay: bool = False,
 ) -> list[Check]:
     config, checks = _load(skill_dir)
     if config is None:
@@ -75,7 +77,9 @@ def run_preflight(
 
     if config.eks_clusters:
         kubeconfig = skill_dir / "config" / KUBECONFIG_NAME
-        if which("kubectl") is None:
+        if replay:
+            checks.append(Check("kubectl", SKIPPED, "replay mode: kubectl is not run"))
+        elif which("kubectl") is None:
             checks.append(Check("kubectl", FAIL, "the kubectl command was not found", "Install kubectl."))
         elif not kubeconfig.is_file():
             checks.append(Check("kubectl", FAIL, "the triage kubeconfig does not exist", "Create it with the commands in the README."))
