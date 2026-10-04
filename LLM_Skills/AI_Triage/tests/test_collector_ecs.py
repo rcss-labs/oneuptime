@@ -200,7 +200,7 @@ def test_task_definition_diff_by_name_without_values(config_data, tmp_path):
 def test_no_diff_for_revision_one(config_data, tmp_path):
     answers = healthy_answers(**{"ecs describe-services": service(taskDefinition=TASK_DEF_ARN.replace(":42", ":1"))})
     ctx, aws, _ = run(config_data, tmp_path, answers)
-    assert not any(f.kind == "derived" for f in ctx.evidence.facts)
+    assert by_summary(ctx, "compared with") == []
     assert len(aws.called("ecs", "describe-task-definition")) == 1
 
 
