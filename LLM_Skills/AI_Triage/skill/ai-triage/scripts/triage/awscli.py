@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-from triage.guard_aws import classify
+from triage.guard_aws import classify, global_option_in
 from triage.verdict import ALLOW
 
 SSO_EXPIRED = "SsoSessionExpired"
@@ -62,6 +62,9 @@ def run_aws(
     frozen = tuple(argv)
     if not profile.startswith(TRIAGE_PROFILE_PREFIX):
         return AwsResult(False, None, REFUSED, f"profile '{profile}' is not a triage profile (its name must start with {TRIAGE_PROFILE_PREFIX})", frozen)
+    global_option = global_option_in(args)
+    if global_option:
+        return AwsResult(False, None, REFUSED, f"option {global_option} is set by run_aws, not by the caller", frozen)
     verdict = classify(service, operation, args)
     if verdict.kind != ALLOW:
         return AwsResult(False, None, REFUSED, verdict.reason, frozen)

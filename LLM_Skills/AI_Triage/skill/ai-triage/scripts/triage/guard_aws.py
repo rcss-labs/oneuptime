@@ -113,6 +113,19 @@ def _abbreviated_option(argv: tuple[str, ...]) -> str | None:
     return None
 
 
+GLOBAL_OPTIONS = ("--profile", "--region", "--endpoint-url", "--debug", "--no-verify-ssl", "--ca-bundle")
+
+
+def global_option_in(args: Sequence[str]) -> str | None:
+    """The first word that is, or could abbreviate, an option that run_aws must set itself."""
+    for word in args:
+        if word.startswith("--"):
+            name = word.split("=", 1)[0]
+            if any(option.startswith(name) for option in GLOBAL_OPTIONS):
+                return name
+    return None
+
+
 def check_aws(argv: tuple[str, ...], env: tuple[str, ...], profiles: frozenset[str]) -> Verdict:
     if any(assignment.startswith("AWS_") for assignment in env):
         return Verdict(ASK, "AWS_* environment variables are set on the command line")

@@ -1,5 +1,7 @@
 import subprocess
 
+import pytest
+
 from triage.awscli import REFUSED, AwsResult, run_aws
 
 
@@ -98,3 +100,42 @@ def test_a_read_with_a_triage_profile_still_runs():
     runner = runner_returning(0, "{}")
     result = run_aws("ecs", "describe-services", ["--cluster", "c"], profile="triage-a", region="eu-west-1", runner=runner)
     assert result.ok and runner.argv[:3] == ["aws", "ecs", "describe-services"]
+
+
+# ---- fix round 2 ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--profile", "admin"],
+        ["--profile=admin"],
+        ["--profil", "admin"],
+        ["--prof=admin"],
+        ["--region", "us-east-1"],
+        ["--regio=us-east-1"],
+        ["--reg", "x"],
+        ["--endpoint-url", "http://localhost:4566"],
+        ["--endpoint-url=http://localhost:4566"],
+        ["--endpoint", "http://x"],
+        ["--debug"],
+        ["--deb"],
+        ["--no-verify-ssl"],
+        ["--no-verify"],
+        ["--ca-bundle", "/tmp/ca.pem"],
+        ["--ca-bundle=/tmp/ca.pem"],
+        ["--ca"],
+        ["--max-items", "1", "--profile", "triage-b"],
+        ["--"],
+    ],
+)
+def test_global_options_in_args_are_refused_and_never_run(args):
+    result = run_aws("ecs", "list-clusters", args, profile="triage-a", region="eu-west-1", runner=refusing_runner())
+    assert result.ok is False and result.error_code == REFUSED
+    assert "run_aws" in result.error_message or "option" in result.error_message
+
+
+def test_ordinary_options_that_start_alike_are_not_refused():
+    runner = runner_returning(0, "{}")
+    args = ["--start-time", "1", "--end-time", "2", "--metric-data-queries", "x", "--max-items", "5", "--query", "q"]
+    assert run_aws("cloudwatch", "get-metric-data", args, profile="triage-a", region="eu-west-1", runner=runner).ok
