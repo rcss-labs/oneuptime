@@ -175,6 +175,21 @@ def test_prepare_state_leaves_longer_and_shorter_digit_runs(config):
     assert prepare_state(state, config, Redactor()) == state
 
 
+def test_prepare_state_redacts_before_it_replaces_account_numbers(config):
+    key = "AKIA" + "".join(str(digit) for digit in (*range(1, 10), 0, 1, 2)) + "ABCD"
+    assert any(run.isdigit() and len(run) == 12 for run in (key[4:16],))
+    result = prepare_state({"note": f"key {key} used"}, config, Redactor())
+    assert key not in json.dumps(result) and "AKIA" not in json.dumps(result)
+    assert "<ACCOUNT>" not in json.dumps(result)
+
+
+def test_prepare_state_replaces_account_ids_stored_as_json_numbers(config):
+    account_id = config.accounts["prod-main"].account_id
+    other = int(account_id) + 1234567
+    result = prepare_state({"OwnerId": int(account_id), "list": [other], "year": 2026}, config, Redactor())
+    assert result == {"OwnerId": "prod-main", "list": ["<ACCOUNT>"], "year": 2026}
+
+
 def test_prepare_state_does_not_mutate_its_input(config):
     account_id = config.accounts["prod-main"].account_id
     state = {"a": [f"x {account_id}", {"b": "y"}]}

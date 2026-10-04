@@ -42,6 +42,8 @@ class JudgmentError(Exception):
 # --- what is sent -----------------------------------------------------------------------
 
 def _replace_accounts(value: Any, aliases: dict[str, str]) -> Any:
+    if isinstance(value, int) and not isinstance(value, bool) and _ACCOUNT_NUMBER_RE.fullmatch(str(value)):
+        return aliases.get(str(value), "<ACCOUNT>")
     if isinstance(value, str):
         return _ACCOUNT_NUMBER_RE.sub(lambda match: aliases.get(match.group(), "<ACCOUNT>"), value)
     if isinstance(value, dict):
@@ -52,9 +54,12 @@ def _replace_accounts(value: Any, aliases: dict[str, str]) -> Any:
 
 
 def prepare_state(value: Any, config: TriageConfig, redactor: Redactor) -> Any:
-    """A redacted copy of the state: account ids become aliases, other 12-digit numbers <ACCOUNT>."""
+    """A redacted copy of the state: account ids become aliases, other 12-digit numbers <ACCOUNT>.
+
+    Redaction runs first; replacing numbers first would split secrets that contain 12 digits.
+    """
     aliases = {account.account_id: account.alias for account in config.accounts.values()}
-    return redactor.value(_replace_accounts(value, aliases))
+    return _replace_accounts(redactor.value(value), aliases)
 
 
 def _json_safe(value: Any) -> Any:
