@@ -8,7 +8,8 @@ from triage.evidence import CURRENT, DERIVED
 from triage.metrics import MetricSpec, add_metric_facts
 
 LOW_ADDRESS_COUNT = 10
-MAX_RULES_LISTED = 20
+MAX_RULES_LISTED = 50
+MAX_RULE_TEXT = 300
 # Rule numbers of the built-in "deny everything else" entries (IPv4, IPv6); nobody added them.
 DEFAULT_ACL_RULES = (32767, 32768)
 NAT_METRICS = (("ErrorPortAllocation", "Sum"), ("PacketsDropCount", "Sum"), ("ActiveConnectionCount", "Maximum"))
@@ -43,11 +44,13 @@ def _sources(permission: dict) -> list[str]:
     return [source for source in found if source]
 
 
-def _inbound_text(permissions: list[dict]) -> str:
-    parts = [f"{_port_text(p)} from {', '.join(_sources(p)) or 'no source'}" for p in permissions[:MAX_RULES_LISTED]]
-    if len(permissions) > MAX_RULES_LISTED:
-        parts.append(f"and {len(permissions) - MAX_RULES_LISTED} more")
-    return "; ".join(parts) or "none"
+def _rule_list(permissions: list[dict]) -> list[str]:
+    texts = [f"{_port_text(p)} from {', '.join(_sources(p)) or 'no source'}" for p in permissions[:MAX_RULES_LISTED]]
+    return [text if len(text) <= MAX_RULE_TEXT else text[: MAX_RULE_TEXT - 1] + "…" for text in texts]
+
+
+def _is_open_to_anywhere(permission: dict) -> bool:
+    return any(source.startswith("anywhere") for source in _sources(permission))
 
 
 def _add_not_found(ctx: CollectContext, kind: str, label: str, requested: list[str], found: set[str]) -> None:
@@ -66,11 +69,16 @@ def _add_security_groups(ctx: CollectContext, ids: list[str]) -> None:
     groups = reply.get("SecurityGroups", [])
     for group in groups:
         inbound, outbound = group.get("IpPermissions", []), group.get("IpPermissionsEgress", [])
+        open_count = sum(1 for p in inbound if _is_open_to_anywhere(p))
+        data: dict = {"rules": _rule_list(inbound)}
+        if len(inbound) > MAX_RULES_LISTED:
+            data["rules_omitted"] = len(inbound) - MAX_RULES_LISTED
         ctx.evidence.add(
-            kind=CURRENT, resource=f"security-group/{group.get('GroupId')}", command=ctx.last_command,
+            kind=CURRENT, resource=f"security-group/{group.get('GroupId')}", command=ctx.last_command, data=data,
             summary=(
-                f"Security group {group.get('GroupId')} ({group.get('GroupName')}) has {len(inbound)} inbound rules "
-                f"and {len(outbound)} outbound rules; inbound: {_inbound_text(inbound)}"
+                f"Security group {group.get('GroupId')} ({group.get('GroupName')}) has {len(inbound)} inbound rules, "
+                f"{open_count} of them open to anywhere, and {len(outbound)} outbound rules; "
+                "the inbound rules are listed in the data"
             ),
         )
     _add_not_found(ctx, "security-group", "Security group", ids, {g.get("GroupId") for g in groups})
@@ -134,7 +142,7 @@ def _explicit_subnets(table: dict) -> set[str]:
     return {a.get("SubnetId") for a in table.get("Associations", []) if a.get("SubnetId")}
 
 
-def _add_route_tables(ctx: CollectContext, subnet_vpcs: dict[str, str | None]) -> None:
+def _add_route_tables(ctx: CollectContext, subnet_vpcs: dict[str, str | None], default_vpc: str | None) -> None:
     subnet_ids = list(subnet_vpcs)
     reply = ctx.aws(
         "ec2", "describe-route-tables", ["--filters", f"Name=association.subnet-id,Values={','.join(subnet_ids)}"],
@@ -149,8 +157,18 @@ def _add_route_tables(ctx: CollectContext, subnet_vpcs: dict[str, str | None]) -
             summary=_route_summary(table, ""),
         )
     implicit = [identifier for identifier in subnet_ids if identifier not in explicit]
-    for vpc in sorted({subnet_vpcs[i] for i in implicit if subnet_vpcs[i]}):
-        _add_main_route_table(ctx, vpc, [i for i in implicit if subnet_vpcs[i] == vpc])
+    vpcs = {i: subnet_vpcs[i] or default_vpc for i in implicit}
+    unknown = [i for i, vpc in vpcs.items() if not vpc]
+    if unknown:
+        ctx.evidence.add(
+            kind=CURRENT, resource="route-table", command=ctx.last_command,
+            summary=(
+                f"The VPC of {', '.join(unknown)} is unknown because the subnet lookup failed, "
+                "so the main route table step was skipped for them"
+            ),
+        )
+    for vpc in sorted({v for v in vpcs.values() if v}):
+        _add_main_route_table(ctx, vpc, [i for i, v in vpcs.items() if v == vpc])
 
 
 def _add_main_route_table(ctx: CollectContext, vpc_id: str, subnets: list[str]) -> None:
@@ -234,7 +252,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         subnet_vpcs = _add_subnets(ctx, subnet_ids)
         vpc_id = vpc_id or next((v for v in subnet_vpcs.values() if v), None)
         if subnet_vpcs:
-            _add_route_tables(ctx, subnet_vpcs)
+            _add_route_tables(ctx, subnet_vpcs, vpc_id)
             _add_network_acls(ctx, list(subnet_vpcs))
     if vpc_id:
         _add_nat_gateways(ctx, vpc_id)

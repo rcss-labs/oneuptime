@@ -75,7 +75,9 @@ def test_healthy_network(config_data, tmp_path):
     group = by_summary(ctx, "Security group sg-0aaa1111")[0]
     assert group.kind == "current"
     assert "2 inbound rules" in group.summary and "1 outbound rules" in group.summary
-    assert "tcp 443 from anywhere (IPv4)" in group.summary and "tcp 5432 from sg-0bbb2222" in group.summary
+    assert "1 of them open to anywhere" in group.summary
+    assert "tcp 443 from anywhere (IPv4)" in group.data["rules"] and "tcp 5432 from sg-0bbb2222" in group.data["rules"]
+    assert "rules_omitted" not in group.data
     subnet = by_summary(ctx, "Subnet subnet-0aaa1111")[0]
     assert "eu-west-1a" in subnet.summary and "200 free addresses" in subnet.summary
     route = by_summary(ctx, "Route table rtb-0aaa")[0]
@@ -250,16 +252,37 @@ def test_built_in_default_deny_rules_are_not_listed(config_data, tmp_path):
     assert "outbound rule 90 deny udp port 53-53 to 10.9.0.0/16" in acl
 
 
-def test_icmp_prefix_lists_and_long_rule_lists_read_clearly(config_data, tmp_path):
+def test_icmp_and_prefix_lists_read_clearly_in_the_rule_list(config_data, tmp_path):
     inbound = [
         {"IpProtocol": "icmp", "FromPort": 8, "ToPort": -1, "IpRanges": [], "UserIdGroupPairs": [],
          "Ipv6Ranges": [], "PrefixListIds": [{"PrefixListId": "pl-0aaa"}]},
     ] + [permission(low=8000 + n, high=8000 + n, group="sg-0bbb2222") for n in range(30)]
     answers = healthy_answers(**{"ec2 describe-security-groups": {"SecurityGroups": [security_group(inbound=inbound)]}})
     ctx, _, _ = run(config_data, tmp_path, answers)
-    summary = by_summary(ctx, "Security group sg-0aaa1111")[0].summary
-    assert "icmp type 8 from prefix list pl-0aaa" in summary
-    assert "and 11 more" in summary and "8029" not in summary
+    fact = by_summary(ctx, "Security group sg-0aaa1111")[0]
+    assert "icmp type 8 from prefix list pl-0aaa" in fact.data["rules"]
+    assert len(fact.data["rules"]) == 31 and "31 inbound rules" in fact.summary
+    assert len(fact.summary) < 200
+
+
+def test_rule_list_is_capped_at_fifty_entries_of_300_characters(config_data, tmp_path):
+    many = [permission(low=n, high=n, group="sg-" + "b" * 400) for n in range(60)]
+    answers = healthy_answers(**{"ec2 describe-security-groups": {"SecurityGroups": [security_group(inbound=many)]}})
+    ctx, _, _ = run(config_data, tmp_path, answers)
+    data = by_summary(ctx, "Security group sg-0aaa1111")[0].data
+    assert len(data["rules"]) == 50 and data["rules_omitted"] == 10
+    assert all(len(entry) <= 300 for entry in data["rules"])
+
+
+def test_failed_subnet_lookup_is_noted_and_vpc_id_still_finds_the_main_route_table(config_data, tmp_path):
+    answers = healthy_answers(**{"ec2 describe-subnets": access_denied("DescribeSubnets"),
+                                 "ec2 describe-route-tables": {"RouteTables": []}})
+    ctx, aws, _ = run(config_data, tmp_path, answers, {"subnet_ids": SUBNET})
+    assert by_summary(ctx, "main route table step was skipped")
+    assert len(aws.called("ec2", "describe-route-tables")) == 1
+    ctx, aws, _ = run(config_data, tmp_path, answers, {"subnet_ids": SUBNET, "vpc_id": VPC})
+    assert not by_summary(ctx, "main route table step was skipped")
+    assert len(aws.called("ec2", "describe-route-tables")) == 2
 
 
 def test_endpoint_state_is_compared_ignoring_case(config_data, tmp_path):
