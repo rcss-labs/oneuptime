@@ -203,10 +203,34 @@ def test_adhoc_appends_to_an_existing_summary(command, skill_dir, case_dir, tmp_
     assert (case_dir / "judgments" / "010-adhoc.json").is_file()
 
 
-def test_adhoc_when_unavailable_prints_that_and_records_nothing(command, skill_dir, case_dir, tmp_path, capsys):
+def test_adhoc_when_unavailable_prints_that_and_records_it_in_a_minimal_summary(command, skill_dir, case_dir, tmp_path, capsys):
     assert invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", adhoc_file(tmp_path), judge=FakeJudge(fail_with="down")) == 0
     assert json.loads(capsys.readouterr().out) == {"id": "deploy_trigger", "unavailable": "down"}
-    assert not (case_dir / "judgments" / "summary.json").exists()
+    summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
+    assert summary["adhoc"] == [{"id": "deploy_trigger", "reason": "No fixed question covers deploy timing", "unavailable": "down"}]
+    assert summary["judged"] is False and summary["typesafe"] == "unavailable: down"
+
+
+def test_adhoc_when_unavailable_appends_to_an_existing_summary(command, skill_dir, case_dir, tmp_path):
+    invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=FakeJudge(make_responder()))
+    invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", adhoc_file(tmp_path), judge=FakeJudge(fail_with="down"))
+    summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
+    assert summary["typesafe"] == "available" and summary["causes"]["C1"]["label"] == "confirmed"
+    assert summary["adhoc"][0]["unavailable"] == "down"
+
+
+@pytest.mark.parametrize("fixed_id", ["evidence_relation", "symptom_fit", "cause_rank", "resource_match"])
+def test_adhoc_may_not_reuse_a_fixed_question_id(command, skill_dir, case_dir, tmp_path, fixed_id, capsys):
+    judge = adhoc_judge()
+    assert invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", adhoc_file(tmp_path, id=fixed_id), judge=judge) == 1
+    assert fixed_id in capsys.readouterr().err and judge.calls == []
+
+
+def test_adhoc_refuses_a_state_that_is_too_long(command, skill_dir, case_dir, tmp_path, capsys):
+    judge = adhoc_judge()
+    path = adhoc_file(tmp_path, state={"evidence": "word " * 3000})
+    assert invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", path, judge=judge) == 1
+    assert "8000" in capsys.readouterr().err and judge.calls == []
 
 
 @pytest.mark.parametrize("overrides", [

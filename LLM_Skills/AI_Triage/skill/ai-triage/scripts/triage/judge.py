@@ -19,7 +19,7 @@ from triage.config import TriageConfig
 from triage.digest import JUDGED_ACTION_FIELDS, JUDGED_CAUSE_FIELDS, action_digest, cause_digest
 from triage.findings import load_facts, valid_findings
 from triage.judge_client import Judge, JudgeReply, JudgeUnavailable
-from triage.questions import _check_question, build_choice
+from triage.questions import REQUIRED_IDS, _check_question, build_choice
 from triage.redact import Redactor
 from triage.service_map import ServiceMap
 from triage.window import parse_time
@@ -28,6 +28,8 @@ SUMMARY_NAME = "summary.json"
 UNAVAILABLE_NOTE = "TypeSafe was unavailable; this label is Claude's own estimate, capped at probable"
 UNAVAILABLE_ACTION_NOTE = "TypeSafe was unavailable; no action can be recommended without its checks"
 _ACCOUNT_NUMBER_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
+MAX_STATE_CHARS = 8000
+MAX_FACTS_PER_FINDING = 10
 _STORED_NAME_RE = re.compile(r"^(\d{3})-")
 _ACTION_STATE_FIELDS = tuple(name for name in JUDGED_ACTION_FIELDS if name not in ("id", "cause"))
 
@@ -119,6 +121,9 @@ class JudgeSession:
 
     def ask(self, kind: str, subject: str, state: Any, questions: dict[str, dict]) -> JudgeReply:
         prepared = prepare_state(state, self.config, self.redactor)
+        size = len(json.dumps(_json_safe(prepared)))
+        if size > MAX_STATE_CHARS:
+            raise JudgmentError([f"the state for {kind} {subject} is {size} characters, over the limit of {MAX_STATE_CHARS}; send less"])
         reply = self.judge.ask(prepared, questions)
         self.store.save(kind, subject, prepared, questions, reply)
         self.model = reply.model
@@ -454,6 +459,17 @@ def write_summary(case_dir: Path, summary: dict) -> Path:
     return path
 
 
+def _check_citation_counts(causes: list[dict], findings: dict[str, dict]) -> None:
+    """A finding that cites too many facts cannot be judged in one small state."""
+    errors = []
+    for finding_id in _finding_order(causes):
+        cited = len(findings.get(finding_id, {}).get("fact_ids", []))
+        if cited > MAX_FACTS_PER_FINDING:
+            errors.append(f"finding {finding_id} cites {cited} facts; the limit is {MAX_FACTS_PER_FINDING}. Split the finding or cite fewer facts")
+    if errors:
+        raise DraftRuleError(errors)
+
+
 def _reserved_ids(questions: dict[str, dict]) -> frozenset[str]:
     """Option names the code adds itself, which no cause id may use."""
     return frozenset(name for question_id in ("cause_rank", "resource_match") for name in questions[question_id].get("fallback", {}))
@@ -470,6 +486,7 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
     case = load_case(case_dir)
     report = load_report_draft(case_dir, _reserved_ids(questions))
     findings = valid_findings(case_dir)
+    _check_citation_counts(report["causes"], findings)
     session = JudgeSession(judge, JudgmentStore(case_dir), config, Redactor())
     causes, actions = report["causes"], report.get("actions", [])
     try:
@@ -504,6 +521,8 @@ def parse_adhoc(document: Any) -> tuple[str, str, Any, dict]:
     if not isinstance(question, dict):
         errors.append("question must be an object")
     elif isinstance(document.get("id"), str):
+        if document["id"] in REQUIRED_IDS:
+            errors.append(f"id {document['id']} belongs to a fixed question; choose another id")
         errors += _check_question(document["id"] or "question", question)
         if "criteria_from" in question:
             errors.append("an ad hoc question must list its options in criteria, not criteria_from")
@@ -518,7 +537,15 @@ def run_adhoc(case_dir: Path, session: JudgeSession, config: TriageConfig, docum
     try:
         reply = session.ask("adhoc", question_id, state, {question_id: session.prepare(question)})
     except JudgeUnavailable as unavailable:
+        _record_adhoc(case_dir, config, {"id": question_id, "reason": reason, "unavailable": unavailable.reason},
+                      f"unavailable: {unavailable.reason}", None)
         return {"id": question_id, "unavailable": unavailable.reason}
+    _record_adhoc(case_dir, config, {"id": question_id, "reason": reason}, "available", reply.model)
+    return {"id": question_id, "answer": _json_safe(reply.answers[question_id])}
+
+
+def _record_adhoc(case_dir: Path, config: TriageConfig, entry: dict, typesafe: str, model: str | None) -> None:
+    """Append the entry to the summary, creating a minimal one (judged false) when there is none."""
     path = Path(case_dir) / "judgments" / SUMMARY_NAME
     if path.is_file():
         try:
@@ -526,7 +553,6 @@ def run_adhoc(case_dir: Path, session: JudgeSession, config: TriageConfig, docum
         except ValueError as error:
             raise JudgmentError([f"{path}: not valid JSON ({error})"]) from error
     else:
-        summary = _base_summary(config, "available", reply.model, judged=False)
-    summary.setdefault("adhoc", []).append({"id": question_id, "reason": reason})
+        summary = _base_summary(config, typesafe, model, judged=False)
+    summary.setdefault("adhoc", []).append(entry)
     write_summary(case_dir, summary)
-    return {"id": question_id, "answer": _json_safe(reply.answers[question_id])}

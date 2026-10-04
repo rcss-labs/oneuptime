@@ -451,6 +451,38 @@ def test_a_run_that_succeeds_leaves_no_stale_file(tmp_path, config):
     assert not (case_dir / "judgments" / "summary.json.stale").exists()
 
 
+# size limits
+
+def test_a_state_over_the_limit_is_refused_before_it_is_sent(tmp_path, config):
+    from triage.judge import MAX_STATE_CHARS, JudgmentError
+    assert MAX_STATE_CHARS == 8000
+    judge = FakeJudge(make_responder())
+    session = session_for(tmp_path, config, judge)
+    session.ask("finding", "ok", {"claim": "x" * 100}, {"evidence_relation": QUESTIONS["evidence_relation"]})
+    with pytest.raises(JudgmentError, match="8000"):
+        session.ask("finding", "big", {"claim": "x" * 8001}, {"evidence_relation": QUESTIONS["evidence_relation"]})
+    assert len(judge.calls) == 1 and len(list((tmp_path / "judgments").glob("0*.json"))) == 1
+
+
+def test_a_finding_that_cites_more_than_ten_facts_is_a_draft_problem(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    checked = json.loads((case_dir / "findings" / "checked.json").read_text())
+    checked["valid"][0]["fact_ids"] = [f"ecs:ecs-{number:04d}" for number in range(11)]
+    (case_dir / "findings" / "checked.json").write_text(json.dumps(checked))
+    judge = FakeJudge(make_responder())
+    with pytest.raises(DraftRuleError, match="compute-1"):
+        run(case_dir, config, judge)
+    assert judge.calls == []
+
+
+def test_a_finding_that_cites_ten_facts_is_allowed(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    checked = json.loads((case_dir / "findings" / "checked.json").read_text())
+    checked["valid"][0]["fact_ids"] = checked["valid"][0]["fact_ids"] * 10
+    (case_dir / "findings" / "checked.json").write_text(json.dumps(checked))
+    assert run(case_dir, config, FakeJudge(make_responder()))["typesafe"] == "available"
+
+
 # digests
 
 def test_the_summary_stores_a_digest_beside_each_cause_and_action(tmp_path, config):
