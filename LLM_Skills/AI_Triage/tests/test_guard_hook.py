@@ -90,7 +90,8 @@ WRAPPER = SKILL_SRC / "scripts" / "guard_hook.sh"
 
 
 def run_wrapper(stdin, python_bin, **extra_env):
-    env = dict(os.environ, AI_TRIAGE_PYTHON=str(python_bin), **extra_env)
+    env = dict(os.environ, AI_TRIAGE_PYTHON=str(python_bin), AI_TRIAGE_TEST="1")
+    env.update(extra_env)
     return subprocess.run(["bash", str(WRAPPER)], input=stdin, capture_output=True, text=True, env=env)
 
 
@@ -220,3 +221,19 @@ def test_unreadable_input_is_matched_without_word_boundaries(skill_dir):
 def test_the_sensitive_check_in_the_wrapper_and_in_python_agree():
     assert guard_hook.FALLBACK_RE.search("x\\naws")
     assert not guard_hook.FALLBACK_RE.search("ls -la")
+
+
+def test_the_python_override_needs_the_test_flag(tmp_path):
+    # Without AI_TRIAGE_TEST the override is ignored: the (missing) skill venv is used and
+    # a sensitive command is denied as "not installed", not run by the override.
+    marker = tmp_path / "ran"
+    fake = tmp_path / "python"
+    fake.write_text(f"#!/usr/bin/env bash\ntouch {marker}\nexit 0\n")
+    fake.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k != "AI_TRIAGE_TEST"}
+    env["AI_TRIAGE_PYTHON"] = str(fake)
+    result = subprocess.run(["bash", str(WRAPPER)], input=payload("kubectl get pods"), capture_output=True, text=True, env=env)
+    assert not marker.exists()
+    assert result.returncode == 0
+    if not (SKILL_SRC / ".venv" / "bin" / "python").exists():
+        assert "not installed correctly" in decision(result.stdout)["permissionDecisionReason"]

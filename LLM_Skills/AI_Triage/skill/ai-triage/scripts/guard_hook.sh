@@ -20,7 +20,11 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 skill_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-python_bin="${AI_TRIAGE_PYTHON:-${skill_dir}/.venv/bin/python}"
+python_bin="${skill_dir}/.venv/bin/python"
+# A different interpreter is honoured only in tests.
+if [[ "${AI_TRIAGE_TEST:-}" == "1" && -n "${AI_TRIAGE_PYTHON:-}" ]]; then
+  python_bin="${AI_TRIAGE_PYTHON}"
+fi
 payload="$(cat)"
 
 # No word boundaries: JSON escapes such as \n or \t hide the boundary before the tool
