@@ -8,9 +8,13 @@ from triage.context import SignInExpired
 OUTSIDE = "2026-10-04T07:00:00+00:00"
 
 
-def health_event(service="EC2", start="2026-10-04T10:30:00+00:00", status="open", category="issue", region="eu-west-1"):
-    return {"arn": f"arn:aws:health:{region}::event/{service}/x", "service": service, "eventTypeCode": "AWS_EC2_OPERATIONAL_ISSUE",
+def health_event(service="EC2", start="2026-10-04T10:30:00+00:00", status="open", category="issue",
+                 region="eu-west-1", end=None):
+    event = {"arn": f"arn:aws:health:{region}::event/{service}/x", "service": service, "eventTypeCode": "AWS_EC2_OPERATIONAL_ISSUE",
             "eventTypeCategory": category, "region": region, "startTime": start, "statusCode": status}
+    if end:
+        event["endTime"] = end
+    return event
 
 
 def quota(name, value, usage=True):
@@ -34,7 +38,7 @@ def test_declares_its_targets():
 
 def test_health_events_inside_the_window_or_still_open(config_data, tmp_path):
     events = [
-        health_event(start="2026-10-04T10:30:00+00:00", status="closed"),
+        health_event(start="2026-10-04T10:30:00+00:00", end="2026-10-04T10:50:00+00:00", status="closed"),
         health_event(service="RDS", start=OUTSIDE, status="open", category="scheduledChange"),
         health_event(service="S3", start=OUTSIDE, status="closed"),
     ]
@@ -49,12 +53,32 @@ def test_health_events_inside_the_window_or_still_open(config_data, tmp_path):
     assert_read_only(ctx, aws, kube)
 
 
+def test_events_overlapping_the_window_are_kept(config_data, tmp_path):
+    events = [
+        health_event(service="EC2", start="2026-10-04T09:00:00+00:00", end="2026-10-04T10:30:00+00:00", status="closed"),
+        health_event(service="RDS", start="2026-10-04T08:00:00+00:00", end="2026-10-04T09:30:00+00:00", status="closed"),
+        health_event(service="S3", start="2026-10-04T12:30:00+00:00", status="upcoming"),
+        health_event(service="SQS", start="2026-10-04T08:00:00+00:00", end="2026-10-04T13:00:00+00:00", status="closed"),
+        health_event(service="ELB", start="2026-10-03T08:00:00+00:00", status="open"),
+    ]
+    ctx, _, _ = run(config_data, tmp_path, {"health describe-events": {"events": events}})
+    text = " ".join(f.summary for f in ctx.evidence.facts)
+    assert "EC2" in text and "SQS" in text and "ELB" in text
+    assert "RDS" not in text and "S3" not in text
+
+
+def test_health_facts_are_capped_at_thirty(config_data, tmp_path):
+    events = [health_event(service=f"SVC{n}") for n in range(60)]
+    ctx, _, _ = run(config_data, tmp_path, {"health describe-events": {"events": events}}, {"service_codes": "ecs"})
+    assert len([f for f in ctx.evidence.facts if f.resource.startswith("health/")]) == 30
+
+
 def test_health_call_uses_us_east_1_and_the_filter(config_data, tmp_path):
     ctx, aws, _ = run(config_data, tmp_path, {})
     call = aws.called("health", "describe-events")[0]
     assert call[call.index("--region") + 1] == "us-east-1"
     assert call[call.index("--filter") + 1] == "eventStatusCodes=open,closed,upcoming"
-    assert call[call.index("--max-items") + 1] == "30"
+    assert call[call.index("--max-items") + 1] == "100"
     assert aws.called("service-quotas", "list-service-quotas")[0][call.index("--region") + 1] == "eu-west-1"
 
 

@@ -2,35 +2,45 @@
 from __future__ import annotations
 
 from triage.collectors import Collector
-from triage.collectors.common import in_window
+from triage.collectors.common import parse_iso, split_csv, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
 
 DEFAULT_SERVICE_CODES = "ecs,lambda,ec2,rds,elasticloadbalancing"
 HEALTH_REGION = "us-east-1"
-HEALTH_ITEMS = "30"
+HEALTH_ITEMS = "100"
+MAX_HEALTH_FACTS = 30
 QUOTA_ITEMS = "50"
 MAX_QUOTAS_LISTED = 10
 SUBSCRIPTION_REQUIRED = "SubscriptionRequiredException"
+
+
+def _overlaps_window(ctx: CollectContext, event: dict) -> bool:
+    """Started before the window end, and either still open or ended after the window start."""
+    started = parse_iso(event.get("startTime"))
+    if started is None or started > ctx.window.end:
+        return False
+    if event.get("statusCode") == "open":
+        return True
+    ended = parse_iso(event.get("endTime"))
+    return ended is not None and ended >= ctx.window.start
 
 
 def _add_health(ctx: CollectContext) -> None:
     reply = ctx.aws(
         "health", "describe-events",
         ["--filter", "eventStatusCodes=open,closed,upcoming", "--max-items", HEALTH_ITEMS],
-        region=HEALTH_REGION,
+        region=HEALTH_REGION, not_found=(SUBSCRIPTION_REQUIRED,),
     )
     if reply is None:
-        if ctx.evidence.errors and ctx.evidence.errors[-1]["code"] == SUBSCRIPTION_REQUIRED:
-            ctx.evidence.errors.pop()
+        if was_not_found(ctx, (SUBSCRIPTION_REQUIRED,)):
             ctx.evidence.add(
                 kind=DERIVED, resource="aws-health", command=ctx.last_command,
                 summary="AWS Health events are not available: AWS Health needs a Business or Enterprise support plan",
             )
         return
-    for event in reply.get("events", []):
-        if not (in_window(ctx.window, event.get("startTime")) or event.get("statusCode") == "open"):
-            continue
+    overlapping = [e for e in reply.get("events", []) if _overlaps_window(ctx, e)]
+    for event in overlapping[:MAX_HEALTH_FACTS]:
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=f"health/{event.get('service')}", time=event.get("startTime"),
             command=ctx.last_command,
@@ -55,7 +65,7 @@ def _add_quotas(ctx: CollectContext, service_code: str) -> None:
 
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     _add_health(ctx)
-    codes = [c.strip() for c in (targets.get("service_codes") or DEFAULT_SERVICE_CODES).split(",") if c.strip()]
+    codes = split_csv(targets.get("service_codes") or DEFAULT_SERVICE_CODES)
     for code in codes:
         _add_quotas(ctx, code)
 
