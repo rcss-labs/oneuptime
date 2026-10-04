@@ -161,24 +161,26 @@ def _add_route_tables(ctx: CollectContext, subnet_vpcs: dict[str, str | None], d
     unknown = [i for i, vpc in vpcs.items() if not vpc]
     if unknown:
         ctx.evidence.add(
-            kind=CURRENT, resource="route-table", command=ctx.last_command,
+            kind=DERIVED, resource="route-table", command=ctx.last_command,
             summary=(
                 f"The VPC of {', '.join(unknown)} is unknown because the subnet lookup failed, "
                 "so the main route table step was skipped for them"
             ),
         )
     for vpc in sorted({v for v in vpcs.values() if v}):
-        _add_main_route_table(ctx, vpc, [i for i, v in vpcs.items() if v == vpc])
+        members = [i for i, v in vpcs.items() if v == vpc]
+        _add_main_route_table(ctx, vpc, members, assumed=any(subnet_vpcs[i] is None for i in members))
 
 
-def _add_main_route_table(ctx: CollectContext, vpc_id: str, subnets: list[str]) -> None:
+def _add_main_route_table(ctx: CollectContext, vpc_id: str, subnets: list[str], assumed: bool = False) -> None:
     """A subnet with no explicit association uses the VPC's main route table."""
     reply = ctx.aws(
         "ec2", "describe-route-tables",
         ["--filters", "Name=association.main,Values=true", f"Name=vpc-id,Values={vpc_id}"],
     )
     for table in (reply or {}).get("RouteTables", []):
-        used_by = f" (the main route table of {vpc_id}, used by {', '.join(subnets)} implicitly)"
+        note = f"; VPC {vpc_id} is assumed from the target, not read" if assumed else ""
+        used_by = f" (the main route table of {vpc_id}, used by {', '.join(subnets)} implicitly{note})"
         ctx.evidence.add(
             kind=CURRENT, resource=f"route-table/{table.get('RouteTableId')}", command=ctx.last_command,
             summary=_route_summary(table, used_by),

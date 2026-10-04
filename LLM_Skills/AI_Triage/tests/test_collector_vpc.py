@@ -278,7 +278,8 @@ def test_failed_subnet_lookup_is_noted_and_vpc_id_still_finds_the_main_route_tab
     answers = healthy_answers(**{"ec2 describe-subnets": access_denied("DescribeSubnets"),
                                  "ec2 describe-route-tables": {"RouteTables": []}})
     ctx, aws, _ = run(config_data, tmp_path, answers, {"subnet_ids": SUBNET})
-    assert by_summary(ctx, "main route table step was skipped")
+    note = by_summary(ctx, "main route table step was skipped")
+    assert len(note) == 1 and note[0].kind == "derived"
     assert len(aws.called("ec2", "describe-route-tables")) == 1
     ctx, aws, _ = run(config_data, tmp_path, answers, {"subnet_ids": SUBNET, "vpc_id": VPC})
     assert not by_summary(ctx, "main route table step was skipped")
@@ -305,3 +306,16 @@ def test_nat_metrics_for_all_gateways_are_one_call(config_data, tmp_path):
                                 {"NatGatewayId": "nat-0bbb", "State": "available"}]}
     _, aws, _ = run(config_data, tmp_path, healthy_answers(**{"ec2 describe-nat-gateways": gateways}))
     assert len(aws.called("cloudwatch", "get-metric-data")) == 2  # window and baseline, once for both gateways
+
+
+def test_a_vpc_taken_from_the_target_is_called_an_assumption(config_data, tmp_path):
+    main = {"RouteTables": [{"RouteTableId": "rtb-0main", "Associations": [{"Main": True}], "Routes": [
+        {"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-0aaa", "State": "active"}]}]}
+    answers = healthy_answers(**{"ec2 describe-subnets": access_denied("DescribeSubnets"),
+                                 "ec2 describe-route-tables": {"RouteTables": []}})
+    ctx, _, _ = make_context(config_data, tmp_path, answers, collector="vpc")
+    fake = MainTableAws(answers, main)
+    ctx.runner = fake
+    COLLECTOR.run(ctx, {"subnet_ids": SUBNET, "vpc_id": VPC})
+    fact = by_summary(ctx, "Route table rtb-0main")[0]
+    assert f"VPC {VPC} is assumed from the target, not read" in fact.summary
