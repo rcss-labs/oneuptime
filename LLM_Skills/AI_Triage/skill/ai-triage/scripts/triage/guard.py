@@ -81,7 +81,8 @@ def _own_script(argv: tuple[str, ...], context: GuardContext) -> str | None:
     """Return the script name when argv runs a listed skill script with the skill's Python."""
     if len(argv) < 2:
         return None
-    if not _same_path(argv[0], os.path.join(context.skill_dir, ".venv", "bin", "python")):
+    interpreters = (os.path.join(context.skill_dir, ".venv", "bin", name) for name in ("python", "python3"))
+    if not any(_same_path(argv[0], interpreter) for interpreter in interpreters):
         return None
     scripts_dir = os.path.join(context.skill_dir, "scripts")
     name = os.path.basename(os.path.normpath(argv[1]))

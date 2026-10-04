@@ -352,7 +352,8 @@ def test_environment_assignment_on_a_filter_is_not_allowed():
         f"{PY} {SCRIPT}/preflight.sh",
         f"python3 {SCRIPT}/preflight.py",
         f"/usr/bin/python3 {SCRIPT}/preflight.py",
-        f"{SKILL}/.venv/bin/python3 {SCRIPT}/preflight.py",
+        f"{SKILL}/.venv/bin/python3.11 {SCRIPT}/preflight.py",
+        f"{SKILL}/.venv/bin/pythonw {SCRIPT}/preflight.py",
         f"{PY} -c 'print(1)'",
         f"{PY} {SCRIPT}/../scripts/preflight.py",
         f"{PY} {SCRIPT}/sub/../preflight.py",
@@ -412,3 +413,14 @@ def test_a_multi_line_command_mentioning_aws_asks():
 
 def test_a_module_that_names_awscli_is_asked_about_not_passed():
     assert kind(f"{PY} {SCRIPT}/triage/awscli.py") == ASK
+
+
+# ---- fix round 2 ------------------------------------------------------------
+
+
+def test_the_skill_interpreter_may_be_named_python_or_python3():
+    assert kind(f"{SKILL}/.venv/bin/python3 {SCRIPT}/preflight.py") == ALLOW
+    assert kind(f"{SKILL}/.venv/bin/python {SCRIPT}/preflight.py") == ALLOW
+    assert kind(f"{SKILL}/.venv/bin/python3 {SCRIPT}/anything_new.py") == PASS
+    assert kind(f"FOO=1 {SKILL}/.venv/bin/python3 {SCRIPT}/preflight.py") == ASK
+    assert kind(f"{SKILL}/.venv/../.venv/bin/python3 {SCRIPT}/preflight.py") == PASS
