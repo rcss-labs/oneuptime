@@ -151,3 +151,11 @@ def test_api_gateway_usage_plans_and_keys_are_reported(policy, resource):
 def test_api_gateway_grant_has_no_usage_plan_resources(policy):
     statement = next(s for s in policy["Statement"] if "apigateway:GET" in s.get("Action", []))
     assert not [r for r in statement["Resource"] if "usageplans" in r or "apikeys" in r]
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["s3:GetObjec?", "dynamodb:GetIte?", "dynamodb:BatchGetIte?", "lambda:GetFunctio?", "ecr:GetAuthorizationToke?", "secretsmanager:GetSecretValu?", "logs:?etLogEvents"],
+)
+def test_single_character_wildcards_are_reported(policy, action):
+    assert any("uses a wildcard" in p for p in problems(allow(policy, action)))

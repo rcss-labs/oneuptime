@@ -115,7 +115,7 @@ def check_policy(document: Any, raw_text: str) -> list[str]:
             service, _, name = action.partition(":")
             if not service or not name:
                 problems.append(f"{where}: '{action}' is not a service:Action pair")
-            elif "*" in action:
+            elif "*" in action or "?" in action:
                 problems.append(f"{where}: '{action}' uses a wildcard")
             elif lowered in FORBIDDEN_LOWER or lowered.startswith(FORBIDDEN_ALLOW_PREFIXES):
                 problems.append(f"{where}: '{action}' must never be granted")
