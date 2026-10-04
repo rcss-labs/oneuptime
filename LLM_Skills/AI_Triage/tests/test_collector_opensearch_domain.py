@@ -171,3 +171,9 @@ def test_pending_change_without_a_start_time_is_a_current_fact(config_data, tmp_
     ctx, _ = run(config_data, tmp_path, healthy_answers(**{"opensearch describe-domain-change-progress": pending}))
     fact = by_summary(ctx, "configuration change")[0]
     assert fact.kind == "current" and fact.time is None
+
+
+def test_dual_stack_domain_reports_its_vpcv2_endpoint(config_data, tmp_path):
+    answers = healthy_answers(**{"opensearch describe-domain": domain(Endpoint=None, Endpoints={"vpcv2": "vpc-v2-logs.eu-west-1.es.example.com"})})
+    ctx, _ = run(config_data, tmp_path, answers)
+    assert "endpoint vpc-v2-logs.eu-west-1.es.example.com" in ctx.evidence.facts[0].summary

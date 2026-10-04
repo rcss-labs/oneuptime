@@ -20,7 +20,8 @@ METRICS = (
 
 
 def _endpoint(status: dict) -> str:
-    return status.get("Endpoint") or (status.get("Endpoints") or {}).get("vpc") or "none"
+    endpoints = status.get("Endpoints") or {}
+    return status.get("Endpoint") or endpoints.get("vpc") or next(iter(endpoints.values()), None) or "none"
 
 
 def _domain_summary(name: str, status: dict) -> str:
