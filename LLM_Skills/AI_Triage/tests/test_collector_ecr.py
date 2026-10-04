@@ -105,7 +105,7 @@ def test_without_a_target_the_five_newest_are_listed(config_data, tmp_path):
     ctx, aws, kube = run(config_data, tmp_path, {"ecr describe-images": {"imageDetails": images}})
     assert [f.summary.split("tags ")[1].split(",")[0] for f in ctx.evidence.facts] == ["v7", "v6", "v5", "v4", "v3"]
     call = aws.called("ecr", "describe-images")[0]
-    assert call[call.index("--max-items") + 1] == "50"
+    assert call[call.index("--max-items") + 1] == "1000"
     assert aws.called("ecr", "describe-image-scan-findings") == []
     assert_read_only(ctx, aws, kube)
 
@@ -144,3 +144,40 @@ def test_image_list_is_bounded_to_five_facts(config_data, tmp_path):
     images = [image(tags=(f"t{n}",), pushed=f"2026-10-04T10:{n:02d}:00+00:00") for n in range(50)]
     ctx, _, _ = run(config_data, tmp_path, {"ecr describe-images": {"imageDetails": images}})
     assert len(ctx.evidence.facts) == 5
+
+
+def test_scan_findings_call_is_bounded_to_the_first_page(config_data, tmp_path):
+    _, aws, _ = run(config_data, tmp_path, {
+        "ecr describe-images": {"imageDetails": [image()]},
+        "ecr describe-image-scan-findings": scan({"HIGH": 1}),
+    }, image_tag="v42")
+    call = aws.called("ecr", "describe-image-scan-findings")[0]
+    assert call[call.index("--max-items") + 1] == "1"
+
+
+def test_newest_of_many_images_is_found_even_when_listed_last(config_data, tmp_path):
+    # describe-images has no order; the newest push is the last of 300 here.
+    images = [image(tags=(f"t{n}",), pushed=f"2026-09-{1 + n % 28:02d}T08:00:00+00:00",
+                    digest="sha256:" + f"{n:04d}" * 16) for n in range(300)]
+    images.append(image(tags=("newest",), pushed="2026-10-04T11:00:00+00:00"))
+    ctx, _, _ = run(config_data, tmp_path, {"ecr describe-images": {"imageDetails": images}})
+    assert "newest" in ctx.evidence.facts[0].summary
+    assert not with_text(ctx, "more images")
+
+
+def test_a_full_page_of_images_is_reported_as_possibly_incomplete(config_data, tmp_path):
+    images = [image(tags=(f"t{n}",), pushed="2026-09-01T08:00:00+00:00") for n in range(1000)]
+    ctx, _, _ = run(config_data, tmp_path, {"ecr describe-images": {"imageDetails": images}})
+    derived = [f for f in ctx.evidence.facts if f.kind == "derived"]
+    assert len(derived) == 1 and "more images" in derived[0].summary and "1000" in derived[0].summary
+
+
+def test_not_found_names_the_region(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, {"ecr describe-images": not_found("ImageNotFoundException")}, image_tag="v43")
+    assert "eu-west-1" in ctx.evidence.facts[0].summary
+
+
+def test_access_denied_is_not_reported_as_a_missing_image(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, {"ecr describe-images": access_denied("DescribeImages")}, image_tag="v42")
+    assert ctx.evidence.facts == []
+    assert ctx.evidence.errors[0]["code"] == "AccessDeniedException"

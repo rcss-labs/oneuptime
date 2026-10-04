@@ -1,30 +1,16 @@
 """ECR collector: when images were pushed, whether a tag exists, and scan findings."""
 from __future__ import annotations
 
-from typing import Any
-
 from triage.collectors import Collector
-from triage.collectors.common import in_window, parse_iso
+from triage.collectors.common import in_window, parse_iso, was_not_found
 from triage.context import CollectContext
-from triage.evidence import CURRENT, INCIDENT_TIME
+from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
 
-MAX_ITEMS = "50"
+MAX_ITEMS = "1000"
 MAX_RECENT_IMAGES = 5
 IMAGE_NOT_FOUND = "ImageNotFoundException"
 REPOSITORY_NOT_FOUND = "RepositoryNotFoundException"
 SCAN_NOT_FOUND = "ScanNotFoundException"
-
-
-def _aws_expecting(ctx: CollectContext, args: list[str], operation: str, expected: set[str]) -> tuple[Any | None, str | None]:
-    """Call ECR; an error code listed in expected is returned to the caller instead of staying an evidence error."""
-    errors_before = len(ctx.evidence.errors)
-    reply = ctx.aws("ecr", operation, args)
-    if reply is None and len(ctx.evidence.errors) > errors_before:
-        code = ctx.evidence.errors[-1]["code"]
-        if code in expected:
-            ctx.evidence.errors.pop()
-            return None, code
-    return reply, None
 
 
 def _image_id(targets: dict[str, str]) -> str | None:
@@ -56,10 +42,12 @@ def _add_image(ctx: CollectContext, repository: str, image: dict) -> None:
 
 def _add_scan_findings(ctx: CollectContext, repository: str, image_id: str) -> None:
     resource = f"repository/{repository}"
-    reply, code = _aws_expecting(
-        ctx, ["--repository-name", repository, "--image-id", image_id], "describe-image-scan-findings", {SCAN_NOT_FOUND},
+    # The severity counts are on the first page; later pages only list individual findings.
+    reply = ctx.aws(
+        "ecr", "describe-image-scan-findings",
+        ["--repository-name", repository, "--image-id", image_id, "--max-items", "1"], not_found=(SCAN_NOT_FOUND,),
     )
-    if code:
+    if was_not_found(ctx, (SCAN_NOT_FOUND,)):
         ctx.evidence.add(
             kind=CURRENT, resource=resource, command=ctx.last_command,
             summary=f"Image {image_id} has no scan results",
@@ -83,20 +71,20 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     image_id = _image_id(targets)
     args = ["--repository-name", repository]
     args += ["--image-ids", image_id] if image_id else ["--max-items", MAX_ITEMS]
-    reply, code = _aws_expecting(ctx, args, "describe-images", {IMAGE_NOT_FOUND, REPOSITORY_NOT_FOUND})
-    if code == REPOSITORY_NOT_FOUND:
+    reply = ctx.aws("ecr", "describe-images", args, not_found=(IMAGE_NOT_FOUND, REPOSITORY_NOT_FOUND))
+    if was_not_found(ctx, (REPOSITORY_NOT_FOUND,)):
         ctx.evidence.add(
             kind=CURRENT, resource=resource, command=ctx.last_command,
-            summary=f"Repository {repository} was not found",
+            summary=f"Repository {repository} was not found in {ctx.region}",
         )
         return
     images = (reply or {}).get("imageDetails", [])
-    if code == IMAGE_NOT_FOUND or (reply is not None and not images):
+    if was_not_found(ctx, (IMAGE_NOT_FOUND,)) or (reply is not None and not images):
         if image_id:
             ctx.evidence.add(
                 kind=CURRENT, resource=resource, command=ctx.last_command,
                 summary=(
-                    f"Image {image_id.split('=', 1)[1]} does not exist in repository {repository}; "
+                    f"Image {image_id.split('=', 1)[1]} does not exist in repository {repository} in {ctx.region}; "
                     "a missing image is a common cause of failed deployments"
                 ),
             )
@@ -112,6 +100,14 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     images.sort(key=lambda image: parse_iso(image.get("imagePushedAt")) or epoch, reverse=True)
     for image in images[: 1 if image_id else MAX_RECENT_IMAGES]:
         _add_image(ctx, repository, image)
+    if not image_id and len(images) >= int(MAX_ITEMS):
+        ctx.evidence.add(
+            kind=DERIVED, resource=resource,
+            summary=(
+                f"Only {MAX_ITEMS} images were examined and the repository holds more images than that; "
+                "a newer push may exist that is not listed"
+            ),
+        )
     if image_id:
         _add_scan_findings(ctx, repository, image_id)
 
