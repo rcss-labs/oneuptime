@@ -22,6 +22,7 @@ from triage.publish import (
 
 NOW = datetime(2026, 10, 4, 12, 0, 0, tzinfo=timezone.utc)
 AWS_KEY = "AKIA" + "ABCDEFGHIJKLMNOP"
+HIGH_ENTROPY = "Zk3" + "vQ9xLm2" + "Pq7RtYw4" + "Nb8HdFs6Jc"
 
 
 def case_data(number="INC-123", title="Checkout API is down", **extra):
@@ -81,11 +82,16 @@ def test_published_files_are_the_three_documents():
     assert PUBLISHED_FILES == ("report.md", "work-order.json", "slack-message.md")
 
 
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def test_clean_files_give_a_clean_audit_that_is_written(run_dir):
     result = audit_case(run_dir)
-    digest = {name: hashlib.sha256((run_dir / name).read_bytes()).hexdigest() for name in ("report.md", "work-order.json")}
-    assert result == {"clean": True, "checked": ["report.md", "work-order.json"], "hits": [],
-                      "sha256": {**digest, "slack-message.md": None}}
+    digest = {name: sha(run_dir / name) for name in ("report.md", "work-order.json")}
+    assert result["clean"] is True and result["checked"] == ["report.md", "work-order.json"]
+    assert result["sha256"] == {**digest, "slack-message.md": None}
+    assert result["files"] == {name: {"sha256": digest[name], "redact_hits": [], "scan_hits": []} for name in digest}
     assert json.loads((run_dir / "audit.json").read_text()) == result
 
 
@@ -94,16 +100,101 @@ def test_a_secret_in_each_published_file_is_a_hit(run_dir, name):
     (run_dir / name).write_text("first line\nkey " + AWS_KEY + "\n")
     result = audit_case(run_dir)
     assert result["clean"] is False
-    assert len(result["hits"]) == 1
-    hit = result["hits"][0]
-    assert hit["file"] == name and hit["line"] == 2 and hit["column"] == 5 and hit["category"]
+    entry = result["files"][name]
+    assert entry["sha256"] == sha(run_dir / name)
+    for detector in ("redact_hits", "scan_hits"):
+        hit = entry[detector][0]
+        assert hit["line"] == 2 and hit["column"] == 5 and hit["kind"]
     assert name in result["checked"]
+
+
+def test_a_hit_found_only_by_the_second_detector_makes_the_audit_dirty(run_dir):
+    (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + " end\n")
+    entry = audit_case(run_dir)["files"]["report.md"]
+    assert entry["redact_hits"] == [] and entry["scan_hits"][0]["kind"] == "entropy"
+    assert not audit_case(run_dir)["clean"]
+
+
+def test_a_hit_found_only_by_the_redactor_makes_the_audit_dirty(run_dir, monkeypatch):
+    monkeypatch.setattr("triage.publish.scan", lambda text, allowed=frozenset(): [])
+    (run_dir / "report.md").write_text("password: " + HIGH_ENTROPY + "\n")
+    entry = audit_case(run_dir)["files"]["report.md"]
+    assert entry["redact_hits"] and entry["scan_hits"] == []
+    assert not audit_case(run_dir)["clean"]
+
+
+def test_audit_never_stores_or_prints_either_half_of_a_token(run_dir, capsys):
+    (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + " end\n")
+    audit_case(run_dir)
+    stored = (run_dir / "audit.json").read_text() + capsys.readouterr().out
+    for half in (HIGH_ENTROPY[:14], HIGH_ENTROPY[14:]):
+        assert half not in stored
 
 
 def test_audit_never_stores_the_matched_value(run_dir):
     (run_dir / "report.md").write_text("key " + AWS_KEY + "\n")
     audit_case(run_dir)
     assert AWS_KEY not in (run_dir / "audit.json").read_text()
+
+
+REALISTIC_REPORT = """# INC-123 Triage: Checkout API is down
+
+## Summary
+Checkout API returned 502 from 10:42Z. Task 0123456789abcdef0123456789abcdef stopped with code 137.
+
+| Resource | Value |
+| --- | --- |
+| ECS service | checkout/checkout-api |
+| Task definition | arn:aws:ecs:eu-west-1:<ACCOUNT>:task-definition/checkout-api:42 |
+| Request id | 3f2504e0-4f89-41d3-9a0c-0305e82c3301 |
+| Image | sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 |
+| Instance | i-0abc1234def567890 |
+| Load balancer | checkout-prod |
+| Config | <SECRET-1> and <EMAIL-1> from <IP-1> |
+
+Evidence: ecs-0004, compute-1. See https://oneuptime.example.com/dashboard/incidents/123.
+"""
+
+
+def test_an_ordinary_report_passes_both_detectors_through_the_gate(run_dir, config):
+    (run_dir / "report.md").write_text(REALISTIC_REPORT)
+    request = confluence_request(run_dir, config)
+    entry = json.loads((run_dir / "audit.json").read_text())["files"]["report.md"]
+    assert entry["redact_hits"] == [] and entry["scan_hits"] == []
+    assert request["body_sha256"] == sha(run_dir / "report.md")
+
+
+# accept_hits
+
+def test_a_wrong_or_missing_accept_value_never_proceeds(run_dir, config):
+    (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + "\n")
+    for wrong in (None, "", "0" * 64, sha(run_dir / "work-order.json")):
+        with pytest.raises(PublishError):
+            confluence_request(run_dir, config, accept_hits=wrong)
+        assert not audit_case(run_dir, accept_hits=wrong).get("accepted_by_flag")
+
+
+def test_the_right_accept_value_proceeds_and_is_recorded(run_dir, config):
+    (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + "\n")
+    digest = sha(run_dir / "report.md")
+    request = confluence_request(run_dir, config, accept_hits=digest)
+    audit = json.loads((run_dir / "audit.json").read_text())
+    assert request["body_sha256"] == digest
+    assert audit["accepted_by_flag"] is True and audit["accepted_sha256"] == digest
+    assert audit["clean"] is False
+
+
+def test_an_accept_value_for_old_bytes_does_not_cover_new_bytes(run_dir, config):
+    (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + "\n")
+    digest = sha(run_dir / "report.md")
+    (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + " changed\n")
+    with pytest.raises(PublishError):
+        confluence_request(run_dir, config, accept_hits=digest)
+
+
+def test_an_accept_value_is_ignored_when_there_are_no_hits(run_dir):
+    audit = audit_case(run_dir, accept_hits="0" * 64)
+    assert audit["clean"] and "accepted_by_flag" not in audit
 
 
 def test_audit_needs_report_md(run_dir):

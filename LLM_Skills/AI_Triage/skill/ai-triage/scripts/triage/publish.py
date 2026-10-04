@@ -11,6 +11,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from triage.audit_scan import scan
 from triage.case import save_case
 from triage.config import TriageConfig
 from triage.redact import Redactor, audit_text
@@ -125,30 +126,64 @@ def _decode(name: str, data: bytes) -> str:
         raise PublishError(f"{name}: not valid UTF-8 ({error.reason})") from error
 
 
-def _audit(case_dir: Path, title: str | None = None) -> dict:
-    """Read each published file once, audit those exact bytes, and write audit.json."""
+def _hit_records(redact_hits: list, scan_hits: list) -> tuple[list[dict], list[dict]]:
+    """Positions and kinds only. The redactor does not report a length, so its entries carry none."""
+    redact = [{"kind": h.category, "line": h.line, "column": h.column, "length": None} for h in redact_hits]
+    second = [{"kind": h.kind, "line": h.line, "column": h.column, "length": h.length} for h in scan_hits]
+    return redact, second
+
+
+def _file_entry(data: bytes, text: str) -> dict:
+    redact, second = _hit_records(audit_text(text), scan(text, frozenset()))
+    return {"sha256": hashlib.sha256(data).hexdigest(), "redact_hits": redact, "scan_hits": second}
+
+
+def _has_hits(entry: dict) -> bool:
+    return bool(entry["redact_hits"] or entry["scan_hits"])
+
+
+def _audit(case_dir: Path, title: str | None = None, accept_hits: str | None = None) -> dict:
+    """Read each published file once, run both detectors on those exact bytes, and write audit.json.
+
+    --accept-hits is honoured only when every audited item that has hits has exactly that sha256.
+    """
     contents = {name: _regular_file_bytes(case_dir, name) for name in PUBLISHED_FILES}
     if contents["report.md"] is None:
         raise PublishError(f"report.md: file not found in {case_dir}")
-    checked, hits, digests = [], [], {}
+    checked, files, digests = [], {}, {}
     for name, data in contents.items():
         digests[name] = None if data is None else hashlib.sha256(data).hexdigest()
         if data is None:
             continue
         checked.append(name)
-        for hit in audit_text(_decode(name, data)):
-            hits.append({"file": name, "line": hit.line, "column": hit.column, "category": hit.category})
+        files[name] = _file_entry(data, _decode(name, data))
     if title is not None:
-        for hit in audit_text(title):
-            hits.append({"file": "title", "line": hit.line, "column": hit.column, "category": hit.category})
-    result = {"clean": not hits, "checked": checked, "hits": hits, "sha256": digests}
+        files["title"] = _file_entry(title.encode("utf-8"), title)
+    with_hits = [entry for entry in files.values() if _has_hits(entry)]
+    result = {"clean": not with_hits, "checked": checked, "files": files, "sha256": digests}
+    if with_hits and accept_hits and all(entry["sha256"] == accept_hits for entry in with_hits):
+        result["accepted_by_flag"] = True
+        result["accepted_sha256"] = accept_hits
     _write_text(case_dir / "audit.json", json.dumps(result, indent=2) + "\n")
     return result
 
 
-def audit_case(case_dir: Path) -> dict:
+def audit_case(case_dir: Path, accept_hits: str | None = None) -> dict:
     """Audit every published file that exists and write audit.json. Reports positions, never values."""
-    return _audit(case_dir)
+    return _audit(case_dir, accept_hits=accept_hits)
+
+
+def may_proceed(result: dict) -> bool:
+    return bool(result["clean"] or result.get("accepted_by_flag"))
+
+
+def hit_lines(result: dict) -> list[str]:
+    """`<file>:<line>:<column> <kind>` for every hit of either detector, then the sha256 to accept."""
+    lines = []
+    for name, entry in result["files"].items():
+        for hit in entry["redact_hits"] + entry["scan_hits"]:
+            lines.append(f"{name}:{hit['line']}:{hit['column']} {hit['kind']}")
+    return lines
 
 
 def page_title(case: dict) -> str:
@@ -158,8 +193,10 @@ def page_title(case: dict) -> str:
     return _one_line(f"{incident['number']} Triage: {incident['title']}")[:TITLE_LIMIT]
 
 
-def _hit_lines(result: dict) -> str:
-    return "; ".join(f"{hit['file']}:{hit['line']}:{hit['column']} {hit['category']}" for hit in result["hits"])
+def _refusal(result: dict) -> str:
+    digests = sorted({entry["sha256"] for entry in result["files"].values() if _has_hits(entry)})
+    return ("the audit found secrets, nothing is prepared: " + "; ".join(hit_lines(result))
+            + "; sha256 of the audited bytes: " + ", ".join(digests))
 
 
 def _recorded_page(case: dict) -> dict | None:
@@ -192,15 +229,15 @@ def previous_page(case_dir: Path) -> dict | None:
     return None
 
 
-def confluence_request(case_dir: Path, config: TriageConfig) -> dict:
+def confluence_request(case_dir: Path, config: TriageConfig, accept_hits: str | None = None) -> dict:
     """Audit the files and the title now, and return the request only when the audit is clean.
 
     Nothing is trusted from an earlier audit: the request carries the sha256 of the report bytes audited here.
     """
     title = page_title(_load_case_file(case_dir))
-    result = _audit(case_dir, title)
-    if not result["clean"]:
-        raise PublishError("the audit found secrets, nothing is prepared: " + _hit_lines(result))
+    result = _audit(case_dir, title, accept_hits)
+    if not may_proceed(result):
+        raise PublishError(_refusal(result))
     return {
         "space_key": config.confluence_space_key,
         "parent_page_id": config.confluence_parent_page_id,

@@ -10,6 +10,7 @@ from triage.case import load_case, save_case
 
 COMMAND = SKILL_SRC / "scripts" / "publish.py"
 AWS_KEY = "AKIA" + "ABCDEFGHIJKLMNOP"
+HIGH_ENTROPY = "Zk3" + "vQ9xLm2" + "Pq7RtYw4" + "Nb8HdFs6Jc"
 CASE = {
     "skill_version": "0.1.0", "created_at": "2026-10-04T11:00:00Z", "case_dir": "",
     "incident": {"number": "INC-123", "title": "Checkout API is down", "url": "", "severity": "Critical",
@@ -72,7 +73,7 @@ def test_audit_prints_one_line_per_hit_and_never_the_value(skill_dir, case_dir):
     result = run(skill_dir, "audit", "--case-dir", str(case_dir))
     assert result.returncode == 1
     lines = result.stdout.strip().splitlines()
-    assert len(lines) == 1 and lines[0].startswith("report.md:2:5 ")
+    assert lines and all(line.startswith("report.md:2:5 ") for line in lines)
     assert AWS_KEY not in result.stdout + result.stderr
 
 
@@ -167,3 +168,47 @@ def test_audit_through_a_link_at_audit_json_exits_one(skill_dir, case_dir, tmp_p
     result = run(skill_dir, "audit", "--case-dir", str(case_dir))
     assert result.returncode == 1 and "audit.json" in result.stderr
     assert outside.read_text() == "keep"
+
+
+def _digest(path):
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_no_output_or_audit_json_holds_either_half_of_a_planted_token(skill_dir, case_dir):
+    (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    outputs = []
+    for args in (("audit",), ("confluence",), ("slack-message",)):
+        result = run(skill_dir, *args, "--case-dir", str(case_dir))
+        assert result.returncode == 1
+        outputs += [result.stdout, result.stderr, (case_dir / "audit.json").read_text()]
+    joined = "\n".join(outputs)
+    for half in (HIGH_ENTROPY[:14], HIGH_ENTROPY[14:]):
+        assert half not in joined
+    assert "report.md:2:7 entropy" in joined
+
+
+def test_confluence_proceeds_with_the_matching_accept_hits_flag(skill_dir, case_dir):
+    (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    digest = _digest(case_dir / "report.md")
+    result = run(skill_dir, "confluence", "--case-dir", str(case_dir), f"--accept-hits={digest}")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["body_sha256"] == digest
+    assert "report.md:2:7 entropy" in result.stderr and HIGH_ENTROPY[:14] not in result.stderr
+    assert json.loads((case_dir / "audit.json").read_text())["accepted_by_flag"] is True
+
+
+def test_the_confluence_request_alias_works_and_a_wrong_flag_refuses(skill_dir, case_dir):
+    (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    result = run(skill_dir, "confluence-request", "--case-dir", str(case_dir), "--accept-hits=" + "0" * 64)
+    assert result.returncode == 1 and result.stdout == ""
+
+
+def test_slack_message_proceeds_with_the_matching_accept_hits_flag(skill_dir, case_dir):
+    (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    refused = run(skill_dir, "slack-message", "--case-dir", str(case_dir), "--accept-hits=" + "0" * 64)
+    assert refused.returncode == 1 and refused.stdout == ""
+    digest = _digest(case_dir / "report.md")
+    result = run(skill_dir, "slack-message", "--case-dir", str(case_dir), f"--accept-hits={digest}")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("INC-123:") and "report.md:2:7 entropy" in result.stderr
