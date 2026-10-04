@@ -3,20 +3,27 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from triage.config import TriageConfig
 from triage.redact import Redactor
-from triage.service_map import MatchKeys, ServiceMap, match_incident
+from triage.service_map import MatchKeys, ServiceMap, _check_resources, match_incident
 from triage.window import WindowError, format_time, parse_time, window_around
 
 TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "templates" / "case.md"
 SUBFOLDERS = ("evidence", "findings", "judgments")
 INCIDENT_SUMMARY_KEYS = ("number", "title", "url", "severity", "state", "declared_at", "impact_started_at", "resolved_at")
-_UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_-]")
+NUMBER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+RUN_NAME_ATTEMPTS = 5
+SCALAR_RESOURCES = ("ecs_service", "auto_scaling_group", "load_balancer", "api_gateway", "cloudfront_distribution",
+                    "rds", "elasticache", "efs")
+LIST_RESOURCES = ("ec2_instances", "lambda_functions", "dynamodb_tables", "sqs_queues", "sns_topics", "log_groups")
+_WHITESPACE_RE = re.compile(r"\s+")
+_LEADING_NUMBER_RE = re.compile(r"(\d+)\.")
+_MARKER_START = ("#", ">", "-", "*", "+", "|", "```", "~~~")
 _BARE_HOST_RE = re.compile(r"[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
 
 
@@ -96,6 +103,8 @@ def parse_incident(data: Any) -> dict:
         "timeline": _object_list(data, "timeline", errors),
         "notes": _object_list(data, "notes", errors),
     }
+    if not errors and not NUMBER_RE.fullmatch(incident["number"]):
+        errors.append("number: must start with a letter or digit and use only letters, digits, '.', '_' and '-', at most 64 characters")
     if errors:
         raise CaseError(errors)
     return incident
@@ -124,10 +133,6 @@ def skill_version(skill_dir: Path) -> str:
     return path.read_text().strip() if path.is_file() else "unknown"
 
 
-def _folder_name(number: str) -> str:
-    return _UNSAFE_NAME_RE.sub("-", number)
-
-
 def _match_record(result: Any) -> dict:
     return {
         "status": result.status,
@@ -138,19 +143,35 @@ def _match_record(result: Any) -> dict:
     }
 
 
+def _make_run_folder(base: Path, now: datetime) -> Path:
+    """Create <base>/<run timestamp>, moving to the next second when that name is taken."""
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise CaseError([f"{base}: cannot create the case folder ({error.strerror or error})"]) from error
+    for attempt in range(RUN_NAME_ATTEMPTS):
+        case_dir = base / (now + timedelta(seconds=attempt)).strftime("%Y%m%d-%H%M%S")
+        try:
+            case_dir.mkdir()
+        except FileExistsError:
+            continue
+        except OSError as error:
+            raise CaseError([f"{case_dir}: cannot create the run folder ({error.strerror or error})"]) from error
+        return case_dir
+    raise CaseError([f"{base}: the run folder names for {RUN_NAME_ATTEMPTS} consecutive seconds are all taken"])
+
+
 def create_case(incident: dict, config: TriageConfig, service_map: ServiceMap, now: datetime, skill_dir: Path) -> Path:
     """Create the run folder and write incident.json, case.json, and case.md. Returns the folder."""
-    name = _folder_name(str(incident.get("number", "")))
-    if not name:
-        raise CaseError(["number: nothing usable for a folder name"])
+    number = str(incident.get("number", ""))
+    if not NUMBER_RE.fullmatch(number):
+        raise CaseError(["number: must start with a letter or digit and use only letters, digits, '.', '_' and '-', at most 64 characters"])
     incident_start = incident.get("impact_started_at") or incident["declared_at"]
     try:
         window = window_around(incident_start, incident.get("resolved_at"), now, config.limits["max_window_hours"])
     except WindowError as error:
         raise CaseError([f"window: {error}"]) from error
-    case_dir = config.cases_dir / name / now.strftime("%Y%m%d-%H%M%S")
-    if case_dir.exists():
-        raise CaseError([f"{case_dir}: this run folder already exists"])
+    case_dir = _make_run_folder(config.cases_dir / number, now)
     redactor = Redactor()
     safe_incident = redactor.value(incident)
     keys = incident_keys(incident)
@@ -164,29 +185,66 @@ def create_case(incident: dict, config: TriageConfig, service_map: ServiceMap, n
         "match": _match_record(match_incident(service_map, keys)),
         "target": None,
     }
-    case_dir.mkdir(parents=True)
-    for sub in SUBFOLDERS:
-        (case_dir / sub).mkdir()
-    (case_dir / "incident.json").write_text(json.dumps(safe_incident, indent=2) + "\n")
+    try:
+        for sub in SUBFOLDERS:
+            (case_dir / sub).mkdir()
+        (case_dir / "incident.json").write_text(json.dumps(safe_incident, indent=2) + "\n")
+    except OSError as error:
+        raise CaseError([f"{case_dir}: cannot write the case ({error.strerror or error})"]) from error
     save_case(case_dir, case)
     return case_dir
+
+
+def _check_case_shape(case: Any, path: Path) -> None:
+    def is_text_map(value: Any, *keys: str) -> bool:
+        return isinstance(value, dict) and all(key in value for key in keys)
+
+    target = case.get("target") if isinstance(case, dict) else None
+    sound = (
+        is_text_map(case, "case_dir", "incident", "incident_start", "window", "match", "target")
+        and is_text_map(case["incident"], *INCIDENT_SUMMARY_KEYS)
+        and is_text_map(case["window"], "start", "end")
+        and is_text_map(case["match"], "status", "candidates")
+        and isinstance(case["match"]["candidates"], list)
+        and all(is_text_map(c, "service", "environment", "reasons") for c in case["match"]["candidates"])
+        and (target is None or (is_text_map(target, "source", "account", "region", "resources")
+                                and isinstance(target["resources"], dict)))
+    )
+    if not sound:
+        raise CaseError([f"{path}: is not a valid case file"])
 
 
 def load_case(case_dir: Path) -> dict:
     path = case_dir / "case.json"
     if not path.is_file():
         raise CaseError([f"{path}: file not found"])
-    return json.loads(path.read_text())
+    try:
+        case = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        raise CaseError([f"{path}: cannot be read as JSON ({error})"]) from error
+    _check_case_shape(case, path)
+    return case
 
 
 def save_case(case_dir: Path, case: dict) -> None:
     """Write case.json and render case.md from it."""
-    (case_dir / "case.json").write_text(json.dumps(case, indent=2) + "\n")
-    (case_dir / "case.md").write_text(render_case(case))
+    try:
+        (case_dir / "case.json").write_text(json.dumps(case, indent=2) + "\n")
+        (case_dir / "case.md").write_text(render_case(case))
+    except OSError as error:
+        raise CaseError([f"{case_dir}: cannot write the case ({error.strerror or error})"]) from error
+
+
+def _line(value: Any) -> str:
+    """One line of text with any leading Markdown marker escaped, so a value cannot start a block."""
+    text = _WHITESPACE_RE.sub(" ", str(value)).strip()
+    if text.startswith(_MARKER_START):
+        return "\\" + text
+    return _LEADING_NUMBER_RE.sub(r"\1\\.", text, count=1) if _LEADING_NUMBER_RE.match(text) else text
 
 
 def _bullets(pairs: list[tuple[str, Any]]) -> str:
-    return "\n".join(f"- {label}: {value if value not in (None, '') else '-'}" for label, value in pairs)
+    return "\n".join(f"- {label}: {_line(value) if value not in (None, '') else '-'}" for label, value in pairs)
 
 
 def _describe_target(target: dict | None) -> str:
@@ -194,26 +252,27 @@ def _describe_target(target: dict | None) -> str:
         return "No target has been chosen yet."
     lines = [("Source", target["source"]), ("Service", target.get("service")), ("Environment", target.get("environment")),
              ("Account", target["account"]), ("Region", target["region"]),
-             ("Depends on", ", ".join(target.get("depends_on", [])))]
+             ("Depends on", ", ".join(str(d) for d in target.get("depends_on", [])))]
     text = _bullets(lines) + "\n- Resources:"
     resources = target.get("resources") or {}
     if not resources:
         return text + " none"
-    return text + "\n" + "\n".join(f"  - {key}: {json.dumps(value)}" for key, value in resources.items())
+    return text + "\n" + "\n".join(f"  - {_line(key)}: {_line(json.dumps(value))}" for key, value in resources.items())
 
 
 def _describe_match(match: dict) -> str:
-    lines = [f"Status: {match['status']}"]
+    lines = [f"Status: {_line(match['status'])}"]
     for candidate in match["candidates"]:
-        lines.append(f"- {candidate['service']} / {candidate['environment']} ({', '.join(candidate['reasons'])})")
+        reasons = ", ".join(str(r) for r in candidate["reasons"])
+        lines.append(f"- {_line(candidate['service'])} / {_line(candidate['environment'])} ({_line(reasons)})")
     return "\n".join(lines)
 
 
 def render_case(case: dict) -> str:
     incident = case["incident"]
     values = {
-        "number": incident["number"],
-        "case_dir": case["case_dir"],
+        "number": _line(incident["number"]),
+        "case_dir": _line(case["case_dir"]),
         "incident": _bullets([
             ("Title", incident["title"]), ("URL", incident["url"]), ("Severity", incident["severity"]),
             ("State", incident["state"]), ("Declared", incident["declared_at"]),
@@ -224,10 +283,8 @@ def render_case(case: dict) -> str:
         "match": _describe_match(case["match"]),
         "target": _describe_target(case["target"]),
     }
-    text = TEMPLATE_PATH.read_text()
-    for key, value in values.items():
-        text = text.replace("{{" + key + "}}", str(value))
-    return text
+    # One pass, so a value that contains {{name}} is never expanded.
+    return re.sub(r"\{\{(\w+)\}\}", lambda found: values.get(found.group(1), found.group(0)), TEMPLATE_PATH.read_text())
 
 
 def _store_target(case_dir: Path, target: dict) -> dict:
@@ -255,23 +312,58 @@ def set_target_from_map(case_dir: Path, service_map: ServiceMap, config: TriageC
     })
 
 
-def set_target_from_discovery(case_dir: Path, config: TriageConfig, discovery: dict) -> dict:
-    account, region = discovery.get("account"), discovery.get("region")
+def _text_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _discovery_shape_errors(resources: dict) -> list[str]:
     errors = []
-    if not account or not region:
-        errors.append("discovery: account and region must both be set")
+    for key in SCALAR_RESOURCES:
+        if key in resources and not (isinstance(resources[key], str) and resources[key].strip()):
+            errors.append(f"discovery.resources.{key}: must be a non-empty string")
+    for key in LIST_RESOURCES:
+        if key in resources and not _text_list(resources[key]):
+            errors.append(f"discovery.resources.{key}: must be a list of strings")
+    eks = resources.get("eks")
+    if isinstance(eks, dict) and "workloads" in eks and not _text_list(eks["workloads"]):
+        errors.append("discovery.resources.eks.workloads: must be a list of strings")
+    search = resources.get("opensearch")
+    if isinstance(search, dict) and not isinstance(search.get("filter", {}), dict):
+        errors.append("discovery.resources.opensearch.filter: must be a mapping")
+    return errors
+
+
+def _discovery_errors(config: TriageConfig, discovery: Any) -> list[str]:
+    if not isinstance(discovery, dict):
+        return ["discovery: must be a JSON object"]
+    account, region, resources = discovery.get("account"), discovery.get("region"), discovery.get("resources", {})
+    errors = []
+    if not isinstance(account, str) or not isinstance(region, str) or not account or not region:
+        errors.append("discovery: account and region must both be set as text")
     elif account not in config.accounts:
         errors.append(f"discovery: unknown account '{account}'")
     elif region not in config.accounts[account].regions:
         errors.append(f"discovery: region '{region}' is not listed for account '{account}'")
+    if resources is None:
+        resources = {}
+    if not isinstance(resources, dict):
+        return errors + ["discovery.resources: must be a mapping"]
+    errors += _discovery_shape_errors(resources)
+    # The same checks the service map applies to its own resources (cluster, namespace, index pattern).
+    _check_resources(resources, "discovery", config, errors)
+    return errors
+
+
+def set_target_from_discovery(case_dir: Path, config: TriageConfig, discovery: dict) -> dict:
+    errors = _discovery_errors(config, discovery)
     if errors:
         raise CaseError(errors)
     return _store_target(case_dir, {
         "source": "discovered",
         "service": None,
         "environment": None,
-        "account": account,
-        "region": region,
+        "account": discovery["account"],
+        "region": discovery["region"],
         "resources": dict(discovery.get("resources") or {}),
         "depends_on": [],
     })

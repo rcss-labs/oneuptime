@@ -63,7 +63,7 @@ def _read_json(path: Path):
         return json.loads(path.read_text())
     except OSError as error:
         raise CaseError([f"{path}: {error.strerror or error}"]) from error
-    except json.JSONDecodeError as error:
+    except ValueError as error:
         raise CaseError([f"{path}: not valid JSON ({error})"]) from error
 
 
@@ -89,7 +89,7 @@ def _target(args: argparse.Namespace, config) -> int:
         raise CaseError(["use either --service with --environment, or --discovery, not both"])
     if args.discovery:
         data = _read_json(args.discovery)
-        discovery = data.get("discovery", data) if isinstance(data, dict) else {}
+        discovery = data.get("discovery", data) if isinstance(data, dict) else data
         target = set_target_from_discovery(args.case_dir, config, discovery)
     elif args.service and args.environment:
         service_map = _service_map(args.skill_dir, config, required=True)
@@ -121,7 +121,9 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(default_config_path(args.skill_dir))
         return handler(args, config)
     except (ConfigError, MapError, CaseError) as error:
-        return _fail("\n".join(error.errors))
+        return _fail("; ".join(error.errors))
+    except OSError as error:
+        return _fail(str(error).replace("\n", " "))
     except WindowError as error:
         return _fail(str(error))
 

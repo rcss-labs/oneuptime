@@ -84,9 +84,15 @@ def test_init_usage_errors_exit_2(skill_dir, tmp_path, args):
     assert run(skill_dir, "init", *args).returncode == 2
 
 
-def test_init_twice_in_the_same_second_exits_2(skill_dir, tmp_path, case_dir):
+def test_init_in_the_same_second_takes_the_next_run_name(skill_dir, tmp_path, case_dir):
     result = run(skill_dir, "init", "--incident", write(tmp_path, "i.json", INCIDENT), "--now", NOW)
-    assert result.returncode == 2 and "already exists" in result.stderr
+    assert result.returncode == 0 and json.loads(result.stdout)["case_dir"].endswith("20261004-110001")
+
+
+def test_init_after_five_taken_names_exits_2(skill_dir, tmp_path, case_dir):
+    codes = [run(skill_dir, "init", "--incident", write(tmp_path, "i.json", INCIDENT), "--now", NOW) for _ in range(5)]
+    assert [c.returncode for c in codes] == [0, 0, 0, 0, 2]
+    assert len(codes[-1].stderr.strip().splitlines()) == 1
 
 
 def test_init_works_without_a_service_map(skill_dir, tmp_path):
@@ -163,3 +169,38 @@ def test_show_prints_case_json(skill_dir, case_dir):
 
 def test_show_with_a_missing_case_exits_2(skill_dir, tmp_path):
     assert run(skill_dir, "show", "--case-dir", str(tmp_path / "nowhere")).returncode == 2
+
+
+def assert_clean_exit_2(result):
+    assert result.returncode == 2, result.stderr
+    assert "Traceback" not in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1
+
+
+def test_a_very_long_incident_number_exits_2_in_one_line(skill_dir, tmp_path):
+    incident = {**INCIDENT, "number": "x" * 300}
+    assert_clean_exit_2(run(skill_dir, "init", "--incident", write(tmp_path, "i.json", incident), "--now", NOW))
+
+
+@pytest.mark.parametrize("discovery", ["text", ["x"], {"account": ["a"], "region": "r", "resources": {}},
+                                       {"account": "prod-main", "region": "eu-west-1", "resources": ["x"]},
+                                       {"discovery": "text"}, {"discovery": ["x"]}])
+def test_a_discovery_of_the_wrong_shape_exits_2_in_one_line(skill_dir, case_dir, tmp_path, discovery):
+    result = run(skill_dir, "target", "--case-dir", case_dir, "--discovery", write(tmp_path, "d.json", discovery))
+    assert_clean_exit_2(result)
+
+
+def test_a_discovery_file_that_is_not_utf8_exits_2(skill_dir, case_dir, tmp_path):
+    (tmp_path / "d.json").write_bytes(b"\xff\xfe\x00")
+    assert_clean_exit_2(run(skill_dir, "target", "--case-dir", case_dir, "--discovery", str(tmp_path / "d.json")))
+
+
+@pytest.mark.parametrize("subcommand", ["show", "plan"])
+def test_a_corrupt_case_json_exits_2_in_one_line(skill_dir, case_dir, subcommand):
+    Path(case_dir, "case.json").write_text("{not json")
+    assert_clean_exit_2(run(skill_dir, subcommand, "--case-dir", case_dir))
+
+
+def test_a_run_folder_that_cannot_be_created_exits_2(skill_dir, tmp_path):
+    (tmp_path / "cases").write_text("a file")
+    assert_clean_exit_2(run(skill_dir, "init", "--incident", write(tmp_path, "i.json", INCIDENT), "--now", NOW))
