@@ -48,7 +48,7 @@ def test_all_problems_are_reported_together(config_data):
         (lambda d: d["accounts"]["staging"].update(profile="triage-prod-main"), "used by more than one account"),
         (lambda d: d["opensearch_clusters"]["logs-prod"].update(account="nope"), "unknown account 'nope'"),
         (lambda d: d["opensearch_clusters"]["logs-prod"].update(endpoint="opensearch.internal"), "must be an http or https URL"),
-        (lambda d: d["opensearch_clusters"]["logs-prod"].update(allowed_index_patterns=["*"]), "must be a single index pattern such as app-logs-*"),
+        (lambda d: d["opensearch_clusters"]["logs-prod"].update(allowed_index_patterns=["*"]), "must be at least three characters from a-z, 0-9, dot, underscore, and dash, optionally ending in one *, for example app-logs-*"),
         (lambda d: d["eks_clusters"]["platform-prod"].update(region="us-west-2"), "is not listed for account"),
         (lambda d: d["eks_clusters"]["platform-prod"].update(context="admin"), "context: must start with 'triage-'"),
         (lambda d: d.pop("confluence"), "confluence: missing"),
@@ -145,7 +145,10 @@ def test_wrong_connection_setting_is_reported_with_other_problems(config_data):
     assert "accounts.prod-main.account_id" in joined
 
 
-INDEX_PATTERN_ERROR = "must be a single index pattern such as app-logs-*"
+INDEX_PATTERN_ERROR = (
+    "must be at least three characters from a-z, 0-9, dot, underscore, and dash, "
+    "optionally ending in one *, for example app-logs-*"
+)
 
 
 def errors_for(config_data):
@@ -239,3 +242,27 @@ def test_limits_have_upper_bounds(config_data, key, limit):
     assert parse_config(config_data).limits[key] == limit
     config_data["limits"][key] = limit + 1
     assert any(f"limits.{key}" in e and f"at most {limit}" in e for e in errors_for(config_data))
+
+
+NAME_RULE = "must start with a lower-case letter or digit and use only lower-case letters, digits, and dashes"
+
+
+@pytest.mark.parametrize(
+    "mutate, label",
+    [
+        (lambda d: d["accounts"].update({"-prod": d["accounts"].pop("staging")}), "accounts.-prod"),
+        (lambda d: d["opensearch_clusters"].update({"Logs": d["opensearch_clusters"].pop("logs-prod")}), "opensearch_clusters.Logs"),
+    ],
+)
+def test_name_errors_state_the_whole_rule(config_data, mutate, label):
+    mutate(config_data)
+    assert any(label in e and NAME_RULE in e for e in errors_for(config_data))
+
+
+def test_profile_and_context_errors_state_the_whole_rule(config_data):
+    config_data["accounts"]["prod-main"]["profile"] = "triage-Prod"
+    config_data["eks_clusters"]["platform-prod"]["context"] = "triage-a_b"
+    errors = errors_for(config_data)
+    rule = "must start with 'triage-' and use only lower-case letters, digits, and dashes"
+    assert any("profile" in e and rule in e for e in errors)
+    assert any("context" in e and rule in e for e in errors)

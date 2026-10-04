@@ -150,12 +150,12 @@ def is_simple_name(value: Any) -> bool:
 
 def _check_name(name: str, where: str, errors: list[str]) -> None:
     if not is_simple_name(name):
-        errors.append(f"{where}: name must use lower-case letters, digits, and dashes only")
+        errors.append(f"{where}: name must start with a lower-case letter or digit and use only lower-case letters, digits, and dashes")
 
 
 def _check_triage_name(value: str, where: str, errors: list[str]) -> None:
     if value and (not value.startswith(PROFILE_PREFIX) or not is_simple_name(value)):
-        errors.append(f"{where}: must start with '{PROFILE_PREFIX}' and use lower-case letters, digits, and dashes only")
+        errors.append(f"{where}: must start with '{PROFILE_PREFIX}' and use only lower-case letters, digits, and dashes")
 
 
 def _parse_accounts(raw: dict[str, Any], errors: list[str]) -> dict[str, Account]:
@@ -210,7 +210,8 @@ def _parse_opensearch(raw: dict[str, Any], accounts: dict[str, Account], errors:
             patterns = []
         for pattern in patterns:
             if not is_index_pattern(pattern):
-                errors.append(f"{where}.allowed_index_patterns: {pattern!r} must be a single index pattern such as app-logs-*")
+                errors.append(f"{where}.allowed_index_patterns: {pattern!r} must be at least three characters from a-z, 0-9, dot, underscore, "
+                    "and dash, optionally ending in one *, for example app-logs-*")
         time_field = _text(body, "time_field", where, errors)
         verify_tls = body.get("verify_tls", True)
         if not isinstance(verify_tls, bool):
