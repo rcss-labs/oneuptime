@@ -162,3 +162,26 @@ def test_window_around_rejects_incident_in_the_future():
 def test_describe_offset(event_offset, expected):
     reference = at(12)
     assert describe_offset(reference + event_offset, reference) == expected
+
+
+def test_window_around_rejects_incident_end_before_start():
+    with pytest.raises(WindowError):
+        window_around("2026-10-04T10:00:00Z", "2026-10-04T09:00:00Z", now=at(12), max_hours=6)
+
+
+def test_window_around_rejects_naive_now():
+    with pytest.raises(WindowError):
+        window_around("2026-10-04T10:00:00Z", None, now=datetime(2026, 10, 4, 12), max_hours=6)
+
+
+@pytest.mark.parametrize("max_hours", [0, -1])
+def test_max_hours_below_one_is_rejected(max_hours):
+    with pytest.raises(WindowError):
+        window_around("2026-10-04T10:00:00Z", None, now=at(12), max_hours=max_hours)
+    with pytest.raises(WindowError):
+        make_window("2026-10-04T10:00:00Z", "2026-10-04T11:00:00Z", max_hours=max_hours)
+
+
+def test_format_time_rejects_naive_datetime():
+    with pytest.raises(WindowError):
+        format_time(datetime(2026, 10, 4, 10))

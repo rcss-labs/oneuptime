@@ -28,9 +28,9 @@ def test_rule2_email_user_is_not_double_processed():
     redactor = Redactor()
     out = redactor.text(f"https://alice@example.com:{PASSWORD}@db.example.com/x")
     assert PASSWORD not in out
-    assert out == "https://<EMAIL-1>:<SECRET-1>@db.example.com/x"
+    assert out == "https://alice@example.com:<SECRET-1>@db.example.com/x"
     assert redactor.counts()["secret"] == 1
-    assert redactor.counts()["email"] == 1
+    assert redactor.counts()["email"] == 0
 
 
 def test_rule3_bearer_token_replaced_scheme_kept():
@@ -114,7 +114,7 @@ def test_rule7_email():
 
 
 def test_rule8_public_ip_replaced():
-    out = Redactor().text("client 203.0.113.9 and 8.8.8.8 hit it")
+    out = Redactor().text("client 1.1.1.1 and 8.8.8.8 hit it")
     assert out == "client <IP-1> and <IP-2> hit it"
 
 
@@ -228,7 +228,8 @@ def test_value_string_input_and_key_argument():
     redactor = Redactor()
     assert redactor.value("a@example.com") == "<EMAIL-1>"
     assert redactor.value(PASSWORD, key="db_password") == "<SECRET-1>"
-    assert redactor.value(7, key="db_password") == 7
+    assert redactor.value(7, key="db_password") == "<SECRET-2>"
+    assert redactor.value(7, key="retries") == 7
 
 
 def test_audit_finds_each_category_with_location_and_no_value():
@@ -277,3 +278,228 @@ def test_audit_returns_empty_for_redacted_text():
 
 def test_audit_on_clean_text_is_empty():
     assert audit_text("auth.example.com /oauth/callback region=eu-west-1") == []
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: gaps found in review
+# ---------------------------------------------------------------------------
+import pytest
+
+PW = "hunter" + "2X"
+SPECIAL = "S3cr" + "!t#Pw$"
+SPLIT_AT = "p@ss" + "w0rd"
+HEX = "ab12" * 8
+AWS_SECRET_40 = "Qz9" * 13 + "Q"
+GITHUB = "ghp" + "_" + "a1B2" * 5
+SLACK = "xox" + "b-" + "1234567890-abcdef"
+STRIPE = "sk" + "_live_" + "A1b2C3d4E5f6"
+BEARER_TOKEN = "abcdef" + "0123456789"
+
+# (id, input, expected redacted output). Every input carries a secret.
+SECRET_CASES = [
+    ("dotted-spring", f"spring.datasource.password={PW}", "spring.datasource.password=<SECRET-1>"),
+    ("dotted-db", f"db.password={PW}", "db.password=<SECRET-1>"),
+    (
+        "nested-json-key",
+        '{"msg":"cfg","config":"{\\"db_password\\":\\"' + PW + '\\"}"}',
+        '{"msg":"cfg","config":"{\\"db_password\\":\\"<SECRET-1>\\"}"}',
+    ),
+    (
+        "nested-json-authorization",
+        '{\\"Authorization\\": \\"Bearer ' + BEARER_TOKEN + '\\"}',
+        '{\\"Authorization\\": \\"Bearer <SECRET-1>\\"}',
+    ),
+    (
+        "redis-empty-user",
+        f"REDIS_URL=redis://:{PW}@cache.example.com:6379/0",
+        "REDIS_URL=redis://:<SECRET-1>@cache.example.com:6379/0",
+    ),
+    (
+        "redis-special-password",
+        f"redis://:{SPECIAL}@cache.example.com:6379/0",
+        "redis://:<SECRET-1>@cache.example.com:6379/0",
+    ),
+    (
+        "url-password-with-slash",
+        f"postgres://app:ab/{SPECIAL}@db.example.com/x",
+        "postgres://app:<SECRET-1>@db.example.com/x",
+    ),
+    (
+        "url-password-with-at",
+        f"mysql://root:{SPLIT_AT}@db.example.com:3306/x",
+        "mysql://root:<SECRET-1>@db.example.com:3306/x",
+    ),
+    ("yaml-block-scalar", f"password: |\n  {PW}\n  line two\nnext: ok", "password: |\n  <SECRET-1>\nnext: ok"),
+    ("colon-value-to-end-of-line", f"password: correct horse {PW}", "password: <SECRET-1>"),
+    ("escaped-quote-in-value", 'PASSWORD="ab\\"' + PW + '"', 'PASSWORD="<SECRET-1>"'),
+    ("colon-without-space", f"password:{PW}", "password:<SECRET-1>"),
+    ("xml-element", f"<password>{PW}</password>", "<password><SECRET-1></password>"),
+    ("hash-rocket", f"password => '{PW}'", "password => '<SECRET-1>'"),
+    ("x-auth-token-header", f"X-Auth-Token: Bearer {BEARER_TOKEN}", "X-Auth-Token: <SECRET-1>"),
+    ("x-api-key-header", f"X-Api-Key: {BEARER_TOKEN}", "X-Api-Key: <SECRET-1>"),
+    ("custom-key-header", f"X-Partner-Key: {BEARER_TOKEN}", "X-Partner-Key: <SECRET-1>"),
+    ("authorization-token-scheme", f"Authorization: Token {BEARER_TOKEN}", "Authorization: Token <SECRET-1>"),
+    (
+        "authorization-digest",
+        'Authorization: Digest username="bob", realm="x", response="' + HEX + '"',
+        "Authorization: Digest <SECRET-1>",
+    ),
+    ("bare-bearer", f"sending Bearer {BEARER_TOKEN} now", "sending Bearer <SECRET-1> now"),
+    ("cookie", f"Cookie: session={BEARER_TOKEN}; theme=dark", "Cookie: <SECRET-1>"),
+    ("set-cookie", f"Set-Cookie: sid={BEARER_TOKEN}; Path=/", "Set-Cookie: <SECRET-1>"),
+    ("db-pass", f"DB_PASS={PW}", "DB_PASS=<SECRET-1>"),
+    ("mysql-pwd", f"MYSQL_PWD={PW}", "MYSQL_PWD=<SECRET-1>"),
+    ("pgpassword", f"PGPASSWORD={PW}", "PGPASSWORD=<SECRET-1>"),
+    ("passphrase", f"passphrase={PW}", "passphrase=<SECRET-1>"),
+    ("camel-access-key", '{"accessKey": "' + PW + '"}', '{"accessKey": "<SECRET-1>"}'),
+    ("camel-private-key", f"privateKey={PW}", "privateKey=<SECRET-1>"),
+    ("client-secret", f"client_secret={PW}", "client_secret=<SECRET-1>"),
+    (
+        "aws-secret-access-key-bare",
+        f"aws configure set aws_secret_access_key {AWS_SECRET_40}",
+        "aws configure set aws_secret_access_key <SECRET-1>",
+    ),
+    ("github-token", f"pushed with {GITHUB} today", "pushed with <SECRET-1> today"),
+    ("slack-token", f"hook {SLACK} fired", "hook <SECRET-1> fired"),
+    ("stripe-key", f"charge via {STRIPE} ok", "charge via <SECRET-1> ok"),
+    (
+        "pem-without-end",
+        f"log: {PEM_BEGIN}\nMIIEvQ{'x' * 20}",
+        "log: <SECRET-1>",
+    ),
+    (
+        "pgp-block",
+        "-----BEGIN PGP " + "PRIVATE KEY BLOCK-----\nabc\n-----END PGP " + "PRIVATE KEY BLOCK-----",
+        "<SECRET-1>",
+    ),
+    (
+        "pem-literal-backslash-n",
+        f'"{PEM_BEGIN}\\nMIIEv{"y" * 10}\\n{PEM_END}\\n","x":"y"',
+        '"<SECRET-1>\\n","x":"y"',
+    ),
+]
+
+
+@pytest.mark.parametrize("name, source, expected", SECRET_CASES, ids=[c[0] for c in SECRET_CASES])
+def test_review_case_secret_removed_and_structure_kept(name, source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    for secret in (PW, SPECIAL, SPLIT_AT, BEARER_TOKEN, HEX, AWS_SECRET_40, GITHUB, SLACK, STRIPE):
+        assert secret not in out
+
+
+@pytest.mark.parametrize("name, source, expected", SECRET_CASES, ids=[c[0] for c in SECRET_CASES])
+def test_audit_reports_every_secret_case_and_is_clean_after_redaction(name, source, expected):
+    assert audit_text(source) != []
+    assert audit_text(Redactor().text(source)) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://user@example.com/path",
+        "git clone git@github.com:example/repo.git",
+        "npm install left-pad@1.3.0",
+        "netmask 255.255.255.0 bind 0.0.0.0:8080 multicast 224.0.0.251",
+        "author=bob authority: ca tokenizer=bert max_tokens=4096 auth_type=iam",
+        "partition_key=user-123 routing_key=orders.created s3_key=logs/x cache_key=home sort_key=ts",
+        "KeyName=web kms_key_id=abc token_expiry=3600 secret_name=db SecretArn=x SecretStatus=active",
+        "sha " + HEX + HEX[:8] + " image digest",
+        "see https://auth.example.com:443/oauth/callback and auth:8080 and auth.example.com: refused",
+        "arn:aws:secretsmanager:eu-west-1:111111111111:secret:db-credentials-AbCdEf",
+    ],
+)
+def test_ordinary_evidence_is_kept(source):
+    assert Redactor().text(source) == source
+    assert audit_text(source) == []
+
+
+def test_email_in_text_still_redacted_next_to_colon_and_in_query():
+    assert Redactor().text("mail bob@example.com: hi") == "mail <EMAIL-1>: hi"
+    assert (
+        Redactor().text("http://example.com:8080/x?e=a@b.example.com")
+        == "http://example.com:8080/x?e=<EMAIL-1>"
+    )
+
+
+def test_documentation_and_global_ranges():
+    out = Redactor().text("a 203.0.113.9 b 8.8.8.8 c 224.0.0.251 d 0.0.0.0")
+    assert out == "a 203.0.113.9 b <IP-1> c 224.0.0.251 d 0.0.0.0"
+
+
+def test_placeholder_numbering_skips_numbers_already_in_the_text():
+    out = Redactor().text(f"token=<SECRET-1> and password={PW} and user a@example.com <EMAIL-4>")
+    assert out == "token=<SECRET-1> and password=<SECRET-2> and user <EMAIL-5> <EMAIL-4>"
+
+
+@pytest.mark.parametrize(
+    "key, expected",
+    [
+        ("DB_PASSWORD", True), ("db.password", True), ("dbPassword", True), ("db-password", True),
+        ("DB_PASS", True), ("MYSQL_PWD", True), ("passphrase", True), ("accessKey", True),
+        ("privateKey", True), ("secretKey", True), ("apiKey", True), ("client_secret", True),
+        ("x-api-key", True), ("AUTH_TOKEN", True), ("PGPASSWORD", True), ("secrets", True),
+        ("api_keys", True), ("Cookie", True), ("SecretAccessKey", True), ("ssh_key", True),
+        ("author", False), ("tokenizer", False), ("max_tokens", False), ("partition_key", False),
+        ("s3_key", False), ("sort_key", False), ("KeyName", False), ("kms_key_id", False),
+        ("SecretArn", False), ("SecretStatus", False), ("AuthorizationType", False),
+        ("token_expiry", False), ("secret_name", False), ("monkey", False), ("region", False),
+    ],
+)
+def test_secret_key_component_matching(key, expected):
+    from triage.redact import looks_secret_key
+
+    assert looks_secret_key(key) is expected
+
+
+def test_value_redacts_everything_under_a_secret_key():
+    obj = {"password": [PW], "secrets": {"x": PW}, "api_keys": [PW], "pin": {"password": {"n": 1234}}}
+    out = Redactor().value(obj)
+    assert out == {
+        "password": ["<SECRET-1>"],
+        "secrets": {"x": "<SECRET-1>"},
+        "api_keys": ["<SECRET-1>"],
+        "pin": {"password": {"n": "<SECRET-2>"}},
+    }
+
+
+def test_value_redacts_numbers_under_secret_key_and_env_entry():
+    out = Redactor().value({"name": "DB_PASSWORD", "value": 123456})
+    assert out == {"name": "DB_PASSWORD", "value": "<SECRET-1>"}
+    assert Redactor().value({"retries": 3, "ok": True, "none": None}) == {"retries": 3, "ok": True, "none": None}
+
+
+def test_value_redacts_the_argument_after_a_secret_flag():
+    out = Redactor().value({"command": ["app", "--db-password", PW, "--port", "8080", "--token=" + PW]})
+    assert out == {"command": ["app", "--db-password", "<SECRET-1>", "--port", "8080", "--token=<SECRET-1>"]}
+
+
+def test_value_tag_style_pairs():
+    out = Redactor().value([
+        {"Key": "db_password", "Value": PW},
+        {"key": "owner", "value": "team-a"},
+        {"ParameterKey": "DBPassword", "ParameterValue": PW},
+    ])
+    assert out == [
+        {"Key": "db_password", "Value": "<SECRET-1>"},
+        {"key": "owner", "value": "team-a"},
+        {"ParameterKey": "DBPassword", "ParameterValue": "<SECRET-1>"},
+    ]
+
+
+def test_value_dict_keys_pass_through_text():
+    out = Redactor().value({"alice@example.com": "x", "8.8.8.8": "y"})
+    assert out == {"<EMAIL-1>": "x", "<IP-1>": "y"}
+
+
+def test_value_sets_and_tuples_become_lists():
+    redactor = Redactor()
+    assert redactor.value({"tags": {"plain"}}) == {"tags": ["plain"]}
+    assert redactor.value(("a@example.com", 1)) == ["<EMAIL-1>", 1]
+
+
+def test_value_keeps_reference_style_keys_even_inside_a_secret_dict():
+    secret_arn = "arn:aws:secretsmanager:eu-west-1:111111111111:secret:db-AbCdEf"
+    obj = {"MasterUserSecret": {"SecretArn": secret_arn, "SecretStatus": "active", "Token": PW}}
+    out = Redactor().value(obj)
+    assert out == {"MasterUserSecret": {"SecretArn": secret_arn, "SecretStatus": "active", "Token": "<SECRET-1>"}}

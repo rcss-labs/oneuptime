@@ -56,8 +56,19 @@ def parse_time(text: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _require_aware(moment: datetime, label: str) -> None:
+    if moment.tzinfo is None:
+        raise WindowError(f"{label} must include a timezone: {moment.isoformat()}")
+
+
 def format_time(moment: datetime) -> str:
+    _require_aware(moment, "time")
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _check_max_hours(max_hours: int) -> None:
+    if max_hours < 1:
+        raise WindowError(f"max_hours must be at least 1, got {max_hours}")
 
 
 def _check_length(window: Window, max_hours: int) -> None:
@@ -66,6 +77,7 @@ def _check_length(window: Window, max_hours: int) -> None:
 
 
 def make_window(start: str, end: str, max_hours: int) -> Window:
+    _check_max_hours(max_hours)
     window = Window(parse_time(start), parse_time(end))
     if window.end <= window.start:
         raise WindowError("window end must be after its start")
@@ -82,11 +94,17 @@ def window_around(
     tail_minutes: int = 15,
 ) -> Window:
     """Window from before the incident start to after its end (or now), cut to max_hours."""
-    start = parse_time(incident_start) - timedelta(minutes=lead_minutes)
+    _check_max_hours(max_hours)
+    _require_aware(now, "now")
+    incident_begin = parse_time(incident_start)
+    start = incident_begin - timedelta(minutes=lead_minutes)
     if incident_end is None:
         end = now
     else:
-        end = min(parse_time(incident_end) + timedelta(minutes=tail_minutes), now)
+        incident_finish = parse_time(incident_end)
+        if incident_finish < incident_begin:
+            raise WindowError("incident end is before its start")
+        end = min(incident_finish + timedelta(minutes=tail_minutes), now)
     if end <= start:
         raise WindowError("window end must be after its start")
     end = min(end, start + timedelta(hours=max_hours))
