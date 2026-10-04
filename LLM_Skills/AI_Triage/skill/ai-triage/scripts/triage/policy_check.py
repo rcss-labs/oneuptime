@@ -20,6 +20,9 @@ FORBIDDEN_ALLOWS = frozenset(
         "ecs:ExecuteCommand",
         "ec2:GetPasswordData",
         "lambda:GetFunction",
+        "lambda:GetLayerVersion",
+        "lambda:GetLayerVersionByArn",
+        "s3-object-lambda:GetObject",
         "s3:GetObject",
         "dynamodb:GetItem",
         "dynamodb:BatchGetItem",
@@ -47,6 +50,8 @@ REQUIRED_DENIES = frozenset(
 )
 # Action names are compared in lower case, as IAM does.
 FORBIDDEN_ALLOW_PREFIXES = ("s3:getobject",)
+# An action whose name holds one of these returns a secret, whatever it starts with.
+FORBIDDEN_NAME_PARTS = ("credentials", "token", "password", "secretvalue")
 # apigateway:GET on any other path can return API key values (/apikeys, /usageplans/*/keys).
 API_GATEWAY_PATH_PREFIXES = ("/restapis/", "/apis/", "/domainnames/")
 API_GATEWAY_EXACT_PATHS = ("/account",)
@@ -132,7 +137,11 @@ def check_policy(document: Any, raw_text: str) -> list[str]:
                 problems.append(f"{where}: '{action}' is not a service:Action pair")
             elif "*" in action or "?" in action:
                 problems.append(f"{where}: '{action}' uses a wildcard")
-            elif lowered in FORBIDDEN_LOWER or lowered.startswith(FORBIDDEN_ALLOW_PREFIXES):
+            elif (
+                lowered in FORBIDDEN_LOWER
+                or lowered.startswith(FORBIDDEN_ALLOW_PREFIXES)
+                or any(part in name.lower() for part in FORBIDDEN_NAME_PARTS)
+            ):
                 problems.append(f"{where}: '{action}' must never be granted")
             elif lowered not in READ_EXCEPTIONS_LOWER and not name.lower().startswith(READ_PREFIXES_LOWER):
                 problems.append(f"{where}: '{action}' is not a read action")

@@ -192,3 +192,21 @@ def test_api_gateway_resources_on_the_allowlist_are_accepted(policy, resource):
     statement = next(s for s in document["Statement"] if "apigateway:GET" in s.get("Action", []))
     statement["Resource"] = [resource]
     assert problems(document) == []
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "redshift:GetClusterCredentials",
+        "sts:GetServiceBearerToken",
+        "codeartifact:GetAuthorizationToken",
+        "rds:GeneratePasswordThing",
+        "foo:DescribeSecretValueX",
+        "lambda:GetLayerVersion",
+        "lambda:GetLayerVersionByArn",
+        "s3-object-lambda:GetObject",
+        "REDSHIFT:GETCLUSTERCREDENTIALS",
+    ],
+)
+def test_secret_returning_reads_are_reported(policy, action):
+    assert any("must never be granted" in p for p in problems(allow(policy, action)))
