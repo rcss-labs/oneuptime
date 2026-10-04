@@ -230,3 +230,16 @@ def test_adhoc_with_a_missing_or_malformed_file_exits_1(command, skill_dir, case
     bad = tmp_path / "bad.json"
     bad.write_text("[1]")
     assert invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", str(bad), judge=adhoc_judge()) == 1
+
+
+def test_adhoc_question_text_and_options_are_redacted_before_sending(command, skill_dir, case_dir, tmp_path, config_data):
+    account_id = config_data["accounts"]["prod-main"]["account_id"]
+    secret = "hunter" + "2"
+    question = {"type": "choice", "instructions": f"Did the role in {account_id} lose access, with password={secret}?",
+                "criteria": {"yes": f"It lost access in {account_id}", "no": "It did not lose access"}}
+    path = adhoc_file(tmp_path, question=question)
+    judge = adhoc_judge()
+    assert invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", path, judge=judge) == 0
+    stored = (case_dir / "judgments" / "001-adhoc.json").read_text()
+    for text in (json.dumps(judge.calls), stored):
+        assert account_id not in text and secret not in text

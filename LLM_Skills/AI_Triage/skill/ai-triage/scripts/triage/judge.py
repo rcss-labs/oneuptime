@@ -104,6 +104,14 @@ class JudgeSession:
         self.redactor = redactor
         self.model: str | None = None
 
+    def prepare(self, value: Any) -> Any:
+        """The value as it may leave this machine: redacted and with account ids replaced."""
+        return prepare_state(value, self.config, self.redactor)
+
+    def prepare_options(self, question: dict) -> dict:
+        """A run-time choice question with its option texts prepared. Its instructions stay as written."""
+        return {**question, "criteria": self.prepare(question["criteria"])}
+
     def ask(self, kind: str, subject: str, state: Any, questions: dict[str, dict]) -> JudgeReply:
         prepared = prepare_state(state, self.config, self.redactor)
         reply = self.judge.ask(prepared, questions)
@@ -177,7 +185,7 @@ def rank_causes(
     orders = [first, first[::-1]]
     answers = []
     for position, order in enumerate(orders, start=1):
-        asked = {"cause_rank": build_choice(questions["cause_rank"], options, order)}
+        asked = {"cause_rank": session.prepare_options(build_choice(questions["cause_rank"], options, order))}
         answers.append(session.ask("ranking", f"order {position}", state, asked).answers["cause_rank"])
     return {"orders": orders, "answers": answers, "choices": [answer["choice"] for answer in answers]}
 
@@ -202,7 +210,7 @@ def match_resource(
     """Pick the service an incident is about among map candidates, or decide to ask the engineer."""
     order = list(candidates)
     rng.shuffle(order)
-    asked = {"resource_match": build_choice(questions["resource_match"], candidates, order)}
+    asked = {"resource_match": session.prepare_options(build_choice(questions["resource_match"], candidates, order))}
     try:
         answer = session.ask("locate", "locate", {"incident": incident, "candidates": candidates}, asked).answers["resource_match"]
     except JudgeUnavailable as unavailable:
@@ -469,7 +477,7 @@ def run_adhoc(case_dir: Path, session: JudgeSession, config: TriageConfig, docum
     """Ask one question Claude wrote, store it, and list it in the summary."""
     question_id, reason, state, question = parse_adhoc(document)
     try:
-        reply = session.ask("adhoc", question_id, state, {question_id: question})
+        reply = session.ask("adhoc", question_id, state, {question_id: session.prepare(question)})
     except JudgeUnavailable as unavailable:
         return {"id": question_id, "unavailable": unavailable.reason}
     path = Path(case_dir) / "judgments" / SUMMARY_NAME

@@ -307,6 +307,33 @@ def call_option_text(call):
     return criteria
 
 
+def sensitive(config):
+    account_id = config.accounts["prod-main"].account_id
+    secret = "hunter" + "2"
+    return account_id, secret, f"Role arn:aws:iam::{account_id}:role/app lost access; password={secret}"
+
+
+def test_ranking_options_are_redacted_and_aliased_in_the_request_and_the_stored_file(tmp_path, config):
+    account_id, secret, statement = sensitive(config)
+    judge = FakeJudge(make_responder())
+    causes = [{"id": "C1", "statement": statement, "supporting": []}, {"id": "C2", "statement": STATEMENT_2, "supporting": []}]
+    rank_causes(session_for(tmp_path, config, judge), QUESTIONS, causes, SYMPTOMS, {}, {}, random.Random(1))
+    stored = "".join(path.read_text() for path in (tmp_path / "judgments").glob("*.json"))
+    for text in (json.dumps(judge.calls), stored):
+        assert account_id not in text and secret not in text
+    assert "arn:aws:iam::prod-main:role/app" in json.dumps(judge.calls[0][1])
+
+
+def test_locate_candidate_descriptions_are_redacted_in_the_question(tmp_path, config):
+    account_id, secret, text = sensitive(config)
+    candidates = {"a/prod": f"prod-main, eu-west-1, resources: {text}", "a/staging": "staging, eu-west-1, resources: x"}
+    judge = FakeJudge(locate_answer("a/prod", 0.9))
+    match_resource(session_for(tmp_path, config, judge), QUESTIONS, INCIDENT, candidates, random.Random(3), config.typesafe_thresholds)
+    stored = (tmp_path / "judgments" / "001-locate.json").read_text()
+    for text in (json.dumps(judge.calls), stored):
+        assert account_id not in text and secret not in text
+
+
 def test_a_single_cause_is_still_ranked_against_the_fallback(tmp_path, config):
     judge = FakeJudge(make_responder())
     causes = [{"id": "C1", "statement": STATEMENT_1, "supporting": []}]
