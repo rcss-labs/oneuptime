@@ -324,7 +324,7 @@ def test_a_full_run_asks_nine_requests_and_no_state_leaks_an_account_id(tmp_path
         assert len(text) < 6000
         assert config.accounts["prod-main"].account_id not in text
     finding_states = [state for state, _ in judge.calls[:3]]
-    assert [state["claim"] for state in finding_states] == [CLAIM_1, CLAIM_3, CLAIM_2]
+    assert [state["claim"] for state in finding_states] == [CLAIM_3, CLAIM_1, CLAIM_2]
     assert all(len(state["evidence"]) == 1 for state in finding_states)
     assert "Unrelated fact" not in json.dumps(judge.calls)
     assert "Nobody lists this one" not in json.dumps(judge.calls)
@@ -500,11 +500,38 @@ def test_findings_beyond_the_cap_are_uncertain_and_never_asked(tmp_path, config,
     judge = FakeJudge(make_responder())
     summary = run(case_dir, config, judge)
     asked = [state["claim"] for state, questions in judge.calls if "evidence_relation" in questions]
-    assert asked == [CLAIM_1, CLAIM_3]
+    assert asked == [CLAIM_3, CLAIM_1]
     capped = summary["findings"]["compute-2"]
     assert capped["verdict"] == "uncertain" and capped["relation"] is None and capped["confidence"] is None
     assert "2" in capped["reason"]
     assert summary["causes"]["C2"]["gates"]["evidence"] is False
+
+
+def test_contradicting_findings_are_judged_before_supporting_ones(tmp_path, config, monkeypatch):
+    monkeypatch.setattr(compose, "MAX_FINDINGS_JUDGED", 1)
+    judge = FakeJudge(make_responder(relations={CLAIM_3: ("supports", 0.95)}))
+    summary = run(build_case(tmp_path, config), config, judge)
+    asked = [state["claim"] for state, questions in judge.calls if "evidence_relation" in questions]
+    assert asked == [CLAIM_3]
+    assert summary["causes"]["C1"]["gates"]["no_contradiction"] is False and summary["causes"]["C1"]["label"] == "candidate"
+
+
+def test_an_unjudged_contradicting_finding_fails_the_no_contradiction_gate(tmp_path, config, monkeypatch):
+    monkeypatch.setattr(compose, "MAX_FINDINGS_JUDGED", 0)
+    summary = run(build_case(tmp_path, config), config, FakeJudge(make_responder()))
+    cause = summary["causes"]["C1"]
+    assert cause["gates"]["no_contradiction"] is False and cause["label"] == "candidate"
+    assert any("compute-3" in reason and "not judged" in reason for reason in cause["reasons"])
+
+
+def test_a_contradicting_finding_that_is_not_a_valid_finding_fails_the_gate(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    report = json.loads((case_dir / "report.json").read_text())
+    report["causes"][0]["contradicting"] = ["compute-3", "compute-99"]
+    (case_dir / "report.json").write_text(json.dumps(report))
+    cause = run(case_dir, config, FakeJudge(make_responder()))["causes"]["C1"]
+    assert cause["gates"]["no_contradiction"] is False
+    assert any("compute-99" in reason and "not judged" in reason for reason in cause["reasons"])
 
 
 # unavailable

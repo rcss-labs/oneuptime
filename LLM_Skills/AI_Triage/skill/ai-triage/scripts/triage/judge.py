@@ -273,11 +273,13 @@ def load_report_draft(case_dir: Path) -> dict:
 
 
 def _finding_order(causes: list[dict]) -> list[str]:
+    """Contradicting findings first, so a cap can never hide evidence against a cause."""
     ordered: list[str] = []
-    for cause in causes:
-        for finding_id in [*cause.get("supporting", []), *cause.get("contradicting", [])]:
-            if finding_id not in ordered:
-                ordered.append(finding_id)
+    for name in ("contradicting", "supporting"):
+        for cause in causes:
+            for finding_id in cause.get(name, []):
+                if finding_id not in ordered:
+                    ordered.append(finding_id)
     return ordered
 
 
@@ -335,10 +337,12 @@ def _cause_gates(
     timing = compose.timing_gate(cause, findings, incident_start)
     unverified = [finding_id for finding_id in supporting if _verdict(verdicts, finding_id) != "verified"]
     contradicted = [finding_id for finding_id in supporting if _verdict(verdicts, finding_id) == "contradicted"]
-    opposed = [finding_id for finding_id in cause.get("contradicting", []) if _verdict(verdicts, finding_id) == "verified"]
+    listed_against = cause.get("contradicting", [])
+    opposed = [finding_id for finding_id in listed_against if _verdict(verdicts, finding_id) == "verified"]
+    unjudged = [finding_id for finding_id in listed_against if verdicts.get(finding_id, {}).get("relation") is None]
     gates = {
         "evidence": bool(supporting) and not unverified,
-        "no_contradiction": not contradicted and not opposed,
+        "no_contradiction": not contradicted and not opposed and not unjudged,
         "rank": top and low is not None and low >= thresholds["cause_top_probability"],
         "timing": timing is True,
         "symptom_fit": fit is not None and fit >= compose.SYMPTOM_FIT_MIN,
@@ -350,6 +354,7 @@ def _cause_gates(
     reasons += [f"Supporting finding {finding_id} was judged {_verdict(verdicts, finding_id)}, not verified" for finding_id in unverified]
     reasons += [f"Supporting finding {finding_id} is contradicted by its own evidence" for finding_id in contradicted]
     reasons += [f"Finding {finding_id}, listed as contradicting this cause, is verified" for finding_id in opposed]
+    reasons += [f"Finding {finding_id}, listed as contradicting this cause, was not judged" for finding_id in unjudged]
     if not gates["rank"]:
         if top:
             reasons.append(f"Ranking picked this cause with probability {compose.number(low)}, below {compose.number(thresholds['cause_top_probability'])}")
