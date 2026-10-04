@@ -122,3 +122,30 @@ def test_bad_namespace_is_rejected(map_data, config, namespace):
     with pytest.raises(MapError) as excinfo:
         parse_map(map_data, config)
     assert "eks.namespace: must use lower-case letters, digits, and dashes only" in "\n".join(excinfo.value.errors)
+
+
+SERVICE_NAME_RULE = (
+    "name must start with a lower-case letter or digit, use only lower-case letters, digits, and dashes, "
+    "and be at most 63 characters"
+)
+
+
+def _rename_service(map_data, new_name):
+    map_data["services"][new_name] = map_data["services"].pop("payments-api")
+    for service in map_data["services"].values():
+        for env in service["environments"].values():
+            env["depends_on"] = [new_name if d == "payments-api" else d for d in env.get("depends_on") or []]
+
+
+@pytest.mark.parametrize("name", ["Bad Name", "Payments", "pay_ments", "-pay", "pay.ments", "pay,x", "a" * 64, "pay\n", "", True, 12, None])
+def test_bad_service_names_are_rejected(map_data, config, name):
+    _rename_service(map_data, name)
+    with pytest.raises(MapError) as excinfo:
+        parse_map(map_data, config)
+    assert any(SERVICE_NAME_RULE in e or "every service name must be a string" in e for e in excinfo.value.errors)
+
+
+@pytest.mark.parametrize("name", ["a", "payments-api", "9lives", "a" * 63])
+def test_good_service_names_are_accepted(map_data, config, name):
+    _rename_service(map_data, name)
+    assert name in parse_map(map_data, config).services

@@ -9,9 +9,10 @@ from typing import Any
 
 import yaml
 
-from triage.config import INDEX_PATTERN_RULE, TriageConfig, is_index_pattern, is_simple_name
+from triage.config import INDEX_PATTERN_RULE, SIMPLE_NAME_RE, TriageConfig, is_index_pattern, is_simple_name
 
 MAP_FILE_NAME = "service-map.yaml"
+MAX_SERVICE_NAME_LENGTH = 63
 SOURCES = ("confirmed", "discovered")
 RESOURCE_KEYS = frozenset(
     {
@@ -192,6 +193,14 @@ def parse_map(data: Any, config: TriageConfig) -> ServiceMap:
     services: dict[str, Service] = {}
     for name, raw in (data.get("services") or {}).items():
         where = f"services.{name}"
+        if not isinstance(name, str):
+            errors.append("services: every service name must be a string; quote it")
+            continue
+        if len(name) > MAX_SERVICE_NAME_LENGTH or SIMPLE_NAME_RE.fullmatch(name) is None:
+            errors.append(
+                f"{where}: name must start with a lower-case letter or digit, use only lower-case letters, "
+                f"digits, and dashes, and be at most {MAX_SERVICE_NAME_LENGTH} characters"
+            )
         if not isinstance(raw, dict):
             errors.append(f"{where}: must be a mapping")
             continue
