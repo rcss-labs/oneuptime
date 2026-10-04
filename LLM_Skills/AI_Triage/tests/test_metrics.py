@@ -223,8 +223,21 @@ def test_failed_read_says_so(tmp_path, config_data):
 
 def test_numbers_have_three_significant_figures(tmp_path, config_data):
     facts, _ = facts_for(tmp_path, config_data, [0.000000001], [5.0])
-    assert "window average 0.000000001" in facts[0].summary
+    assert "window average 1e-09" in facts[0].summary
     assert "5000000000" not in facts[0].summary or "times lower" in facts[0].summary
     facts, _ = facts_for(tmp_path, config_data, [12345.6], [100.0])
     assert "peak 12300 at" in facts[0].summary
     assert "e+" not in facts[0].summary
+
+
+def test_odd_numbers_read_sensibly(tmp_path, config_data):
+    from triage.metrics import _num
+    assert _num(-0.0) == "0"
+    assert _num(float("nan")) == "not a number"
+    assert _num(float("inf")) == "not a number"
+    assert _num(float("-inf")) == "not a number"
+    assert _num(1e300) == "1e+300"
+    assert _num(-1e-9) == "-1e-09"
+    assert _num(17.0) == "17"
+    assert _num(999.5) == "1000"
+    assert _num(0) == "0"

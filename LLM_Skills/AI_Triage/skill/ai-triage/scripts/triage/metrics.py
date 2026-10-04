@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from datetime import timedelta
@@ -115,7 +116,13 @@ def fetch(
 
 
 def _num(value: float) -> str:
-    """Three significant figures, never in exponent form."""
+    """Three significant figures; exponent form only for very large or very small values."""
+    if not math.isfinite(value):
+        return "not a number"
+    if value == 0:
+        return "0"
+    if abs(value) >= 1e15 or abs(value) < 1e-6:
+        return f"{value:.3g}"
     return format(Decimal(f"{value:.3g}"), "f")
 
 
