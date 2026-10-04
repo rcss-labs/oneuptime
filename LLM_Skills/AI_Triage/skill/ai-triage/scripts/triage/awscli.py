@@ -1,4 +1,7 @@
-"""Run one read-only AWS CLI call with an explicit profile and region."""
+"""Run one read-only AWS CLI call with an explicit profile and region.
+
+run_aws refuses anything the guard would not allow, so no collector can issue a write.
+"""
 from __future__ import annotations
 
 import json
@@ -7,11 +10,16 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
+from triage.guard_aws import classify
+from triage.verdict import ALLOW
+
 SSO_EXPIRED = "SsoSessionExpired"
 CLI_MISSING = "AwsCliMissing"
 TIMEOUT = "Timeout"
 BAD_OUTPUT = "UnreadableOutput"
 UNKNOWN = "Unknown"
+REFUSED = "RefusedByGuard"
+TRIAGE_PROFILE_PREFIX = "triage-"
 
 ERROR_CODE_RE = re.compile(r"An error occurred \((\w+)\)")
 SSO_EXPIRED_MARKERS = (
@@ -52,6 +60,11 @@ def run_aws(
 ) -> AwsResult:
     argv = ["aws", service, operation, *args, "--profile", profile, "--region", region, "--output", "json", "--no-cli-pager"]
     frozen = tuple(argv)
+    if not profile.startswith(TRIAGE_PROFILE_PREFIX):
+        return AwsResult(False, None, REFUSED, f"profile '{profile}' is not a triage profile (its name must start with {TRIAGE_PROFILE_PREFIX})", frozen)
+    verdict = classify(service, operation, args)
+    if verdict.kind != ALLOW:
+        return AwsResult(False, None, REFUSED, verdict.reason, frozen)
     try:
         code, stdout, stderr = runner(argv, timeout)
     except FileNotFoundError:
