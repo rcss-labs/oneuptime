@@ -1,7 +1,6 @@
 """CloudWatch Logs collector: when matching log lines started, which messages repeat, and the first lines."""
 from __future__ import annotations
 
-import re
 import time
 from datetime import datetime
 from typing import Callable, Sequence
@@ -17,7 +16,7 @@ POLL_SECONDS = 1
 QUERY_FAILED = "QueryFailed"
 QUERY_TIMEOUT = "QueryTimeout"
 _FAILED_STATUSES = ("Failed", "Cancelled", "Timeout")
-_UNESCAPED_SLASH = re.compile(r"(?<!\\)/")
+MAX_BUCKET_FACTS = 60
 
 BUCKET_QUERY = "| stats count(*) as matches by bin(5m)"
 PATTERN_QUERY = "| pattern @message | sort @sampleCount desc | limit 15"
@@ -85,9 +84,24 @@ def _number(text: str | None) -> int:
         return 0
 
 
-def _query_text(pattern: str, tail: str) -> str:
-    escaped = _UNESCAPED_SLASH.sub(lambda _: "\\/", pattern)
-    return f"filter @message like /{escaped}/ {tail}"
+def _escape_slashes(pattern: str) -> str | None:
+    """Escape each unescaped forward slash; None when the pattern ends in a lone backslash."""
+    out, index = [], 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            if index + 1 == len(pattern):
+                return None
+            out.append(pattern[index: index + 2])
+            index += 2
+            continue
+        out.append("\\/" if char == "/" else char)
+        index += 1
+    return "".join(out)
+
+
+def _query_text(escaped_pattern: str, tail: str) -> str:
+    return f"filter @message like /{escaped_pattern}/ {tail}"
 
 
 def _split_groups(targets: dict[str, str]) -> list[str]:
@@ -99,7 +113,9 @@ def _add_buckets(ctx: CollectContext, resource: str, rows: list[dict[str, str]])
         ((moment, _number(row.get("matches"))) for row in rows if (moment := _insights_time(row.get("bin(5m)")))),
         key=lambda pair: pair[0],
     )
-    for moment, count in buckets:
+    shown = sorted(sorted(buckets, key=lambda pair: -pair[1])[:MAX_BUCKET_FACTS], key=lambda pair: pair[0])
+    left_out = len(buckets) - len(shown)
+    for moment, count in shown:
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=resource, time=moment, command=ctx.last_command,
             summary=f"{count} matching log lines in the 5 minutes starting {format_time(moment)}",
@@ -115,6 +131,7 @@ def _add_buckets(ctx: CollectContext, resource: str, rows: list[dict[str, str]])
         summary=(
             f"Peak bucket starts {format_time(peak[0])} with {peak[1]} matching log lines; "
             f"the first bucket with matches starts {format_time(first[0])} with {first[1]}"
+            + (f"; {left_out} buckets with the lowest counts were left out" if left_out else "")
         ),
     )
     return True
@@ -142,6 +159,13 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     pattern = targets.get("pattern") or DEFAULT_PATTERN
     groups = _split_groups(targets)
     limit = ctx.config.limits["logs_insights_max_log_groups"]
+    escaped = _escape_slashes(pattern)
+    if escaped is None:
+        ctx.evidence.add(
+            kind=DERIVED, resource="log-groups/" + ",".join(groups[:limit]),
+            summary="The pattern is not usable: it ends in a single backslash, so no query was sent",
+        )
+        return
     used, skipped = groups[:limit], groups[limit:]
     resource = "log-groups/" + ",".join(used)
     if skipped:
@@ -152,7 +176,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
                 f"queried the first {limit}, skipped: {', '.join(skipped)}"
             ),
         )
-    buckets = run_query(ctx, used, _query_text(pattern, BUCKET_QUERY))
+    buckets = run_query(ctx, used, _query_text(escaped, BUCKET_QUERY))
     if buckets is not None:
         if not _add_buckets(ctx, resource, buckets):
             ctx.evidence.add(
@@ -160,10 +184,10 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
                 summary="No log lines matched the pattern in the window",
             )
             return
-    patterns = run_query(ctx, used, _query_text(pattern, PATTERN_QUERY))
+    patterns = run_query(ctx, used, _query_text(escaped, PATTERN_QUERY))
     if patterns is not None:
         _add_patterns(ctx, resource, patterns)
-    lines = run_query(ctx, used, _query_text(pattern, LINES_QUERY))
+    lines = run_query(ctx, used, _query_text(escaped, LINES_QUERY))
     if lines is not None:
         _add_lines(ctx, resource, lines)
 

@@ -225,3 +225,46 @@ def test_failed_query_is_recorded_and_others_continue(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, by_marker)
     assert ctx.evidence.errors
     assert any(f.excerpt == "ERROR connection refused" for f in ctx.evidence.facts)
+
+
+def sent_query(fake):
+    call = fake.called("logs", "start-query")[0]
+    return call[call.index("--query-string") + 1]
+
+
+def test_already_escaped_slash_is_not_escaped_again(config_data, tmp_path):
+    ctx, fake, _ = run(config_data, tmp_path, standard(), {"log_groups": GROUPS[0], "pattern": "a\\/b c/d"})
+    assert sent_query(fake).startswith("filter @message like /a\\/b c\\/d/ | ")
+
+
+def test_escaped_backslash_before_slash_still_escapes_the_slash(config_data, tmp_path):
+    pattern = "a\\\\/ | fields @message #"
+    ctx, fake, _ = run(config_data, tmp_path, standard(), {"log_groups": GROUPS[0], "pattern": pattern})
+    assert sent_query(fake).startswith("filter @message like /a\\\\\\/ | fields @message #/ | ")
+
+
+def test_pattern_ending_in_a_backslash_is_refused_without_a_query(config_data, tmp_path):
+    ctx, fake, _ = run(config_data, tmp_path, standard(), {"log_groups": GROUPS[0], "pattern": "C:\\"})
+    assert not fake.called("logs", "start-query")
+    facts = [f for f in ctx.evidence.facts if f.kind == "derived"]
+    assert len(facts) == 1 and "not usable" in facts[0].summary
+
+
+def test_pattern_ending_in_an_even_number_of_backslashes_is_allowed(config_data, tmp_path):
+    ctx, fake, _ = run(config_data, tmp_path, standard(), {"log_groups": GROUPS[0], "pattern": "C:\\\\"})
+    assert sent_query(fake).startswith("filter @message like /C:\\\\/ | ")
+
+
+def test_bucket_facts_are_capped_at_sixty_keeping_the_highest_counts(config_data, tmp_path):
+    rows = [row(**{"bin(5m)": f"2026-10-04 {10 + i // 12:02d}:{i % 12 * 5:02d}:00.000", "matches": str(i + 1)})
+            for i in range(70)]
+    ctx, _, _ = run(config_data, tmp_path, standard(buckets=rows))
+    buckets = [f for f in ctx.evidence.facts if "matching log lines in the 5 minutes" in f.summary]
+    assert len(buckets) == 60
+    assert [f.time for f in buckets] == sorted(f.time for f in buckets)
+    counts = [f.data["matches"] for f in buckets]
+    assert min(counts) == 11 and max(counts) == 70
+    derived = [f.summary for f in ctx.evidence.facts if "Peak" in f.summary]
+    assert len(derived) == 1
+    assert "10 buckets" in derived[0] and "left out" in derived[0]
+    assert "with 70" in derived[0] and "first bucket with matches starts 2026-10-04T10:00:00Z" in derived[0]
