@@ -153,3 +153,60 @@ def test_bad_config_exits_2(tmp_path, fake_collector, capsys):
 
 def test_missing_config_exits_2(tmp_path, fake_collector, capsys):
     assert collect.main(args(tmp_path, "--target", "thing=x")) == 2
+
+
+# replay mode
+
+@pytest.fixture
+def no_real_calls(monkeypatch):
+    def refuse(*a, **k):
+        raise AssertionError("a real subprocess was started in replay mode")
+
+    monkeypatch.setattr("subprocess.run", refuse)
+
+
+@pytest.fixture
+def replay_dir(tmp_path, monkeypatch):
+    directory = tmp_path / "replay"
+    directory.mkdir()
+    (directory / "aws.json").write_text(json.dumps([{"match": ["ecs", "list-clusters"], "result": {"clusterArns": []}}]))
+    (directory / "kubectl.json").write_text(json.dumps([{"match": ["get", "pods"], "contains": ["payments"], "stdout": "pod-a"}]))
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(directory))
+    monkeypatch.setenv("AI_TRIAGE_FIXTURE_LOG", str(tmp_path / "calls.log"))
+    return directory
+
+
+def test_replay_mode_answers_from_fixtures_and_prints_the_banner_once(skill_dir, replay_dir, tmp_path, fake_collector, no_real_calls, capsys):
+    code = collect.main(args(skill_dir, "--target", "thing=x"))
+    captured = capsys.readouterr()
+    assert code == 0
+    assert json.loads(captured.out)["facts"][0]["summary"] == "hello x"
+    assert captured.err.count("REPLAY MODE") == 1
+    assert f"REPLAY MODE: answers come from {replay_dir}; nothing is called." in captured.err
+    logged = [json.loads(line) for line in (tmp_path / "calls.log").read_text().splitlines()]
+    assert [(entry["tool"], entry["argv"][1:3]) for entry in logged] == [("aws", ["ecs", "list-clusters"])]
+
+
+def test_replay_mode_also_replays_kubectl(skill_dir, replay_dir, no_real_calls, monkeypatch, capsys):
+    def run(ctx, targets):
+        output = ctx.kubectl("platform-prod", ["get", "pods"], namespace="payments")
+        ctx.evidence.add(kind="current", resource="r", summary=f"pods: {output}")
+
+    monkeypatch.setattr(collect, "all_collectors", lambda: {"kube": Collector("kube", "Kube", (), (), run)})
+    code = collect.main(args(skill_dir, name="kube"))
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["facts"][0]["summary"] == "pods: pod-a"
+
+
+def test_an_injected_runner_wins_over_the_environment(skill_dir, replay_dir, fake_collector, capsys):
+    fake = FakeAws({"ecs list-clusters": {"clusterArns": ["x"]}})
+    code = collect.main(args(skill_dir, "--target", "thing=x"), runner=fake, kube_runner=FakeAws({}))
+    assert code == 0
+    assert fake.calls
+    assert "REPLAY MODE" not in capsys.readouterr().err
+
+
+def test_a_bad_fixture_directory_exits_2_and_never_runs_the_real_tool(skill_dir, fake_collector, no_real_calls, monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path / "nowhere"))
+    assert collect.main(args(skill_dir, "--target", "thing=x")) == 2
+    assert "not a directory" in capsys.readouterr().err

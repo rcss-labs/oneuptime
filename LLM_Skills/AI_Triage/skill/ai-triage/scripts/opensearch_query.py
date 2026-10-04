@@ -14,6 +14,7 @@ from typing import Callable
 
 from triage.config import ConfigError, default_config_path, load_config
 from triage.evidence import Evidence
+from triage.fixtures import FixtureError, fixture_dir, replay_banner, transport_from_env
 from triage.opensearch import queries
 from triage.opensearch.client import OpenSearchClient, OpenSearchError, Transport, urllib_transport
 from triage.opensearch.policy import Refused
@@ -124,6 +125,14 @@ def _runner(args: argparse.Namespace) -> Callable[[queries.QueryContext], None]:
 
 def main(argv: list[str] | None = None, transport: Transport | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    try:
+        replay = fixture_dir()
+        if replay and transport is None:
+            print(replay_banner(replay), file=sys.stderr)
+        transport = transport or transport_from_env()
+    except FixtureError as error:
+        print(error, file=sys.stderr)
+        return 2
     try:
         config = load_config(default_config_path(args.skill_dir))
     except ConfigError as error:

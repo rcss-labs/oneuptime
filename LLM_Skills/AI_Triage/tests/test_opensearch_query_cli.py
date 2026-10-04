@@ -217,3 +217,41 @@ def test_secret_looking_text_in_hits_is_redacted_in_the_output(skill_dir, capsys
     code, _ = run(skill_dir, "search", *WINDOWED, transport=FakeTransport(answers))
     out = capsys.readouterr().out
     assert code == 0 and secret not in out and "<SECRET-1>" in out
+
+
+# replay mode
+
+def real_call_fails(*args, **kwargs):
+    raise AssertionError("a real network call was made in replay mode")
+
+
+def test_replay_mode_answers_from_fixtures_and_prints_the_banner_once(skill_dir, tmp_path, monkeypatch, capsys):
+    replay = tmp_path / "replay"
+    replay.mkdir()
+    (replay / "opensearch.json").write_text(json.dumps([
+        {"method": "GET", "path_contains": "_cluster/health", "status": 200, "body": ANSWERS["_cluster/health"]},
+    ]))
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(replay))
+    monkeypatch.setattr("urllib.request.OpenerDirector.open", real_call_fails)
+    code = opensearch_query.main(["health", "--cluster", "logs-prod", "--skill-dir", str(skill_dir)])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert json.loads(captured.out)["facts"]
+    assert captured.err.count("REPLAY MODE") == 1
+    assert f"REPLAY MODE: answers come from {replay}; nothing is called." in captured.err
+
+
+def test_an_injected_transport_wins_over_the_environment(skill_dir, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path))
+    code, transport = run(skill_dir, "health")
+    assert code == 0
+    assert transport.requests
+    assert "REPLAY MODE" not in capsys.readouterr().err
+
+
+def test_a_bad_fixture_directory_exits_2(skill_dir, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path / "nowhere"))
+    monkeypatch.setattr("urllib.request.OpenerDirector.open", real_call_fails)
+    code = opensearch_query.main(["health", "--cluster", "logs-prod", "--skill-dir", str(skill_dir)])
+    assert code == 2
+    assert "not a directory" in capsys.readouterr().err

@@ -14,6 +14,7 @@ from triage.collectors import Collector, all_collectors
 from triage.config import ConfigError, default_config_path, load_config
 from triage.context import CollectContext, SignInExpired
 from triage.evidence import Evidence
+from triage.fixtures import FixtureError, fixture_dir, kube_runner_from_env, replay_banner, runner_from_env
 from triage.window import WindowError, make_window
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -74,6 +75,13 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
         return 0
     if not (args.name and args.account and args.start and args.end):
         parser.error("name, --account, --start, and --end are required")
+    try:
+        replay = fixture_dir()
+        if replay and (runner is None or kube_runner is None):
+            print(replay_banner(replay), file=sys.stderr)
+        runner, kube_runner = runner or runner_from_env(), kube_runner or kube_runner_from_env()
+    except FixtureError as error:
+        return _fail(str(error), 2)
     try:
         config = load_config(default_config_path(args.skill_dir))
     except ConfigError as error:

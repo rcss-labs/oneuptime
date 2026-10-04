@@ -73,3 +73,38 @@ def test_service_name_defaults_from_the_hostname(skill_dir, capsys):
     code, out, _ = run(skill_dir, capsys, FakeAws({**dns_answers(), **lb_answers()}))
     assert code == 0
     assert json.loads(out)["proposed_entry"]["environments"]["discovered"]["resources"] == {"load_balancer": "shop-alb"}
+
+
+# replay mode
+
+def real_call_fails(*args, **kwargs):
+    raise AssertionError("a real subprocess was started in replay mode")
+
+
+def test_replay_mode_discovers_from_fixtures_and_prints_the_banner_once(skill_dir, tmp_path, monkeypatch, capsys):
+    replay = tmp_path / "replay"
+    replay.mkdir()
+    entries = [{"match": key.split(), "result": value} for key, value in full_walk().items()]
+    (replay / "aws.json").write_text(json.dumps(entries))
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(replay))
+    monkeypatch.setattr("subprocess.run", real_call_fails)
+    code = discover.main(["--hostname", HOSTNAME, "--skill-dir", str(skill_dir)])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert json.loads(captured.out)["discovery"]["resources"]["ecs_service"] == "shop/shop-api"
+    assert captured.err.count("REPLAY MODE") == 1
+    assert f"REPLAY MODE: answers come from {replay}; nothing is called." in captured.err
+
+
+def test_an_injected_runner_wins_over_the_environment(skill_dir, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path))
+    code, out, err = run(skill_dir, capsys, FakeAws(full_walk()))
+    assert code == 0
+    assert "REPLAY MODE" not in err
+
+
+def test_a_bad_fixture_directory_exits_2(skill_dir, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path / "nowhere"))
+    monkeypatch.setattr("subprocess.run", real_call_fails)
+    assert discover.main(["--hostname", HOSTNAME, "--skill-dir", str(skill_dir)]) == 2
+    assert "not a directory" in capsys.readouterr().err

@@ -153,3 +153,40 @@ def test_cli_reports_a_missing_config_as_json(tmp_path):
     assert result.returncode == 1
     body = json.loads(result.stdout)
     assert body["exit_code"] == 1 and body["checks"][0]["name"] == "Config"
+
+
+# replay mode
+
+def test_preflight_command_in_replay_mode_uses_fixtures_and_treats_tools_as_present(skill_dir, tmp_path, monkeypatch, capsys):
+    import preflight
+
+    replay = tmp_path / "replay"
+    replay.mkdir()
+    (replay / "aws.json").write_text(json.dumps([
+        {"match": ["sts", "get-caller-identity"], "contains": ["triage-prod-main"], "result": identity("111111111111")},
+        {"match": ["sts", "get-caller-identity"], "contains": ["triage-staging"], "result": identity("222222222222")},
+    ]))
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(replay))
+    monkeypatch.setenv("TYPESAFE_API_KEY", "set")
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    def real_call_fails(*args, **kwargs):
+        raise AssertionError("a real subprocess was started in replay mode")
+
+    monkeypatch.setattr("subprocess.run", real_call_fails)
+    code = preflight.main(["--json", "--skill-dir", str(skill_dir)])
+    captured = capsys.readouterr()
+    checks = {check["name"]: check for check in json.loads(captured.out)["checks"]}
+    assert code == 0
+    assert checks["AWS CLI"]["status"] == OK and checks["kubectl"]["status"] == OK
+    assert checks["Sign-in: prod-main"]["status"] == OK
+    assert captured.err.count("REPLAY MODE") == 1
+    assert f"REPLAY MODE: answers come from {replay}; nothing is called." in captured.err
+
+
+def test_preflight_command_with_a_bad_fixture_directory_exits_2(skill_dir, tmp_path, monkeypatch, capsys):
+    import preflight
+
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path / "nowhere"))
+    assert preflight.main(["--skill-dir", str(skill_dir)]) == 2
+    assert "not a directory" in capsys.readouterr().err

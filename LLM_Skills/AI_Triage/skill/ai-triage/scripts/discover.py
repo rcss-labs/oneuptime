@@ -14,6 +14,7 @@ from triage.awscli import Runner, subprocess_runner
 from triage.config import ConfigError, default_config_path, load_config
 from triage.context import SignInExpired
 from triage.discover import discover_hostname
+from triage.fixtures import FixtureError, fixture_dir, replay_banner, runner_from_env
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
@@ -35,6 +36,13 @@ def _fail(message: str, code: int) -> int:
 
 def main(argv: list[str] | None = None, runner: Runner | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    try:
+        replay = fixture_dir()
+        if replay and runner is None:
+            print(replay_banner(replay), file=sys.stderr)
+        runner = runner or runner_from_env()
+    except FixtureError as error:
+        return _fail(str(error), 2)
     try:
         config = load_config(default_config_path(args.skill_dir))
     except ConfigError as error:
