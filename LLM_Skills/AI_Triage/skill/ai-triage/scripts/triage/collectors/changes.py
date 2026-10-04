@@ -6,17 +6,19 @@ when it is known.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 from triage.collectors import Collector
-from triage.collectors.common import in_window, newest_in_window, parse_iso
+from triage.collectors.common import in_window, newest_in_window, parse_iso, split_csv, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
-from triage.window import describe_offset, format_time
+from triage.window import Window, describe_offset, format_time
 
 MAX_RESOURCE_NAMES = 10
 MAX_EVENTS_PER_NAME = 40
 LOOKUP_ITEMS = "50"
+LOOKUP_GRACE_MINUTES = 5
 STACK_ITEMS = "50"
 PIPELINE_ITEMS = "10"
 CONFIG_LIMIT = "10"
@@ -25,16 +27,7 @@ STACK_TYPE = "AWS::CloudFormation::Stack"
 STACK_UPDATE_STATUSES = ("UPDATE_IN_PROGRESS", "UPDATE_COMPLETE")
 
 
-def _split(text: str | None) -> list[str]:
-    seen: list[str] = []
-    for part in (text or "").split(","):
-        part = part.strip()
-        if part and part not in seen:
-            seen.append(part)
-    return seen
-
-
-def _gap(ctx: CollectContext, incident_start: str | None, when: Any) -> str:
+def _gap(incident_start: str | None, when: Any) -> str:
     """Words such as ", 4 minutes before the incident started", or nothing without an incident start."""
     incident, moment = parse_iso(incident_start), parse_iso(when)
     if incident is None or moment is None:
@@ -42,30 +35,46 @@ def _gap(ctx: CollectContext, incident_start: str | None, when: Any) -> str:
     return f", {describe_offset(moment, incident)} the incident started"
 
 
-def _pop_error(ctx: CollectContext, code: str) -> bool:
-    """Remove the error the last call just recorded when it has this code; say whether it did."""
-    if ctx.evidence.errors and ctx.evidence.errors[-1]["code"] == code:
-        ctx.evidence.errors.pop()
-        return True
-    return False
+def _lookup_end(ctx: CollectContext, incident_start: str | None) -> datetime:
+    """Where the cause would be: up to a few minutes after the incident start, else the whole window."""
+    incident = parse_iso(incident_start)
+    if incident is None:
+        return ctx.window.end
+    return max(ctx.window.start, min(ctx.window.end, incident + timedelta(minutes=LOOKUP_GRACE_MINUTES)))
 
 
-def _add_cloudtrail(ctx: CollectContext, lookup: str, fallback_resource: str, incident_start: str | None) -> None:
-    start, end = ctx.window.start, ctx.window.end
+def _add_cloudtrail(ctx: CollectContext, lookup: str, name: str, incident_start: str | None) -> None:
+    start, end = ctx.window.start, _lookup_end(ctx, incident_start)
     reply = ctx.aws(
         "cloudtrail", "lookup-events",
         ["--lookup-attributes", lookup, "--start-time", format_time(start), "--end-time", format_time(end),
          "--max-items", LOOKUP_ITEMS],
     )
-    writes = [e for e in (reply or {}).get("Events", []) if str(e.get("ReadOnly")).lower() == "false"]
-    for item in newest_in_window(ctx.window, writes, lambda e: e.get("EventTime"), MAX_EVENTS_PER_NAME):
+    if reply is None:
+        return
+    writes = [e for e in reply.get("Events", []) if str(e.get("ReadOnly")).lower() == "false"]
+    shown = newest_in_window(Window(start, end), writes, lambda e: e.get("EventTime"), MAX_EVENTS_PER_NAME)
+    for item in shown:
         resources = [r.get("ResourceName") for r in item.get("Resources", []) if r.get("ResourceName")]
-        resource = ", ".join(resources) or fallback_resource
+        resource = ", ".join(resources) or name
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=resource, time=item.get("EventTime"), command=ctx.last_command,
             summary=(
                 f"{item.get('EventName')} ({item.get('EventSource')}) by {item.get('Username') or 'unknown user'} "
-                f"on {resource}{_gap(ctx, incident_start, item.get('EventTime'))}"
+                f"on {resource}{_gap(incident_start, item.get('EventTime'))}"
+            ),
+        )
+    if not shown:
+        ctx.evidence.add(
+            kind=DERIVED, resource=name, command=ctx.last_command,
+            summary=f"No change was recorded for {name} between {format_time(start)} and {format_time(end)}",
+        )
+    if reply.get("NextToken"):
+        ctx.evidence.add(
+            kind=DERIVED, resource=name, command=ctx.last_command,
+            summary=(
+                f"More change events exist for {name} than the {LOOKUP_ITEMS} shown; "
+                "these are the newest in the period"
             ),
         )
 
@@ -86,7 +95,7 @@ def _add_stack_events(ctx: CollectContext, stack: str, incident_start: str | Non
             kind=INCIDENT_TIME, resource=f"stack/{stack}", time=event.get("Timestamp"), command=ctx.last_command,
             summary=(
                 f"Stack {stack}: {event.get('LogicalResourceId')} ({event.get('ResourceType')}) "
-                f"{event.get('ResourceStatus')}{_gap(ctx, incident_start, event.get('Timestamp'))}"
+                f"{event.get('ResourceStatus')}{_gap(incident_start, event.get('Timestamp'))}"
             ),
             excerpt=event.get("ResourceStatusReason") or "",
         )
@@ -114,7 +123,7 @@ def _add_pipeline_executions(ctx: CollectContext, pipeline: str, incident_start:
             summary=(
                 f"Pipeline {pipeline} execution {execution.get('pipelineExecutionId')} is {execution.get('status')}, "
                 f"trigger {trigger.get('triggerType')} {trigger.get('triggerDetail') or ''}".rstrip()
-                + _gap(ctx, incident_start, when)
+                + _gap(incident_start, when)
             ),
         )
 
@@ -142,9 +151,10 @@ def _add_config_history(ctx: CollectContext, config_resource: str, incident_star
         ["--resource-type", resource_type, "--resource-id", resource_id,
          "--earlier-time", format_time(ctx.window.start), "--later-time", format_time(ctx.window.end),
          "--limit", CONFIG_LIMIT],
+        not_found=(NOT_DISCOVERED,),
     )
     if reply is None:
-        if _pop_error(ctx, NOT_DISCOVERED):
+        if was_not_found(ctx, (NOT_DISCOVERED,)):
             ctx.evidence.add(
                 kind=DERIVED, resource=config_resource, command=ctx.last_command,
                 summary=f"AWS Config does not record {config_resource}, so its configuration history is not available",
@@ -159,7 +169,7 @@ def _add_config_history(ctx: CollectContext, config_resource: str, incident_star
             kind=INCIDENT_TIME, resource=config_resource, time=when, command=ctx.last_command,
             summary=(
                 f"AWS Config captured a configuration of {config_resource} with status "
-                f"{item.get('configurationItemStatus')}{_gap(ctx, incident_start, when)}"
+                f"{item.get('configurationItemStatus')}{_gap(incident_start, when)}"
             ),
             excerpt=f"related CloudTrail events: {related}" if related else "",
         )
@@ -167,7 +177,12 @@ def _add_config_history(ctx: CollectContext, config_resource: str, incident_star
 
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     incident_start = targets.get("incident_start") or None
-    names = _split(targets.get("resource_names"))[:MAX_RESOURCE_NAMES]
+    if incident_start and parse_iso(incident_start) is None:
+        ctx.evidence.add_error(
+            "", "InvalidTarget", "incident_start must be an ISO time with a timezone, for example 2026-10-04T10:50:00Z",
+        )
+        incident_start = None
+    names = split_csv(targets.get("resource_names"))[:MAX_RESOURCE_NAMES]
     if names:
         for name in names:
             _add_cloudtrail(ctx, f"AttributeKey=ResourceName,AttributeValue={name}", name, incident_start)

@@ -50,15 +50,15 @@ def test_cloudtrail_event_fact_says_who_what_and_how_long_before(config_data, tm
     call = aws.called("cloudtrail", "lookup-events")[0]
     assert call[call.index("--lookup-attributes") + 1] == "AttributeKey=ResourceName,AttributeValue=checkout-api"
     assert call[call.index("--start-time") + 1] == "2026-10-04T10:00:00Z"
-    assert call[call.index("--end-time") + 1] == "2026-10-04T12:00:00Z"
+    assert call[call.index("--end-time") + 1] == "2026-10-04T10:55:00Z"
     assert call[call.index("--max-items") + 1] == "50"
     assert_read_only(ctx, aws, kube)
 
 
 def test_gap_wording_after_the_incident(config_data, tmp_path):
-    answers = {"cloudtrail lookup-events": {"Events": [event("UpdateService", when="2026-10-04T11:20:00+00:00")]}}
+    answers = {"cloudtrail lookup-events": {"Events": [event("UpdateService", when="2026-10-04T10:53:00+00:00")]}}
     ctx, _, _ = run(config_data, tmp_path, answers, {"resource_names": "checkout-api", "incident_start": INCIDENT})
-    assert ctx.evidence.facts[0].summary.endswith("30 minutes after the incident started")
+    assert ctx.evidence.facts[0].summary.endswith("3 minutes after the incident started")
 
 
 def test_no_gap_without_incident_start(config_data, tmp_path):
@@ -187,7 +187,8 @@ def test_config_not_recording_the_resource(config_data, tmp_path):
                   "operation: Resource not discovered")
     ctx, _, _ = run(config_data, tmp_path, {"configservice get-resource-config-history": error},
                     {"config_resource": "AWS::EC2::SecurityGroup/sg-0abc", "resource_names": "x"})
-    fact = next(f for f in ctx.evidence.facts if f.kind == "derived")
+    fact = next(f for f in ctx.evidence.facts if "AWS Config" in f.summary)
+    assert fact.kind == "derived"
     assert "AWS Config does not record" in fact.summary
     assert ctx.evidence.errors == []
 
@@ -196,6 +197,14 @@ def test_bad_config_resource_is_a_missing_target_error(config_data, tmp_path):
     ctx, aws, _ = run(config_data, tmp_path, {}, {"config_resource": "nonsense", "resource_names": "x"})
     assert ctx.evidence.errors[0]["code"] == "InvalidTarget"
     assert aws.called("configservice", "get-resource-config-history") == []
+
+
+def test_other_config_errors_stay_errors(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path,
+                    {"configservice get-resource-config-history": access_denied("GetResourceConfigHistory")},
+                    {"config_resource": "AWS::EC2::SecurityGroup/sg-0abc", "resource_names": "x"})
+    assert [e["code"] for e in ctx.evidence.errors] == ["AccessDeniedException"]
+    assert not any("does not record" in s for s in fact_summaries(ctx))
 
 
 def test_access_denied_on_one_call_keeps_the_rest(config_data, tmp_path):
@@ -214,8 +223,68 @@ def test_expired_sign_in_stops_the_run(config_data, tmp_path):
         run(config_data, tmp_path, {"cloudtrail lookup-events": SSO_EXPIRED_ERROR}, {"resource_names": "x"})
 
 
-def test_nothing_changed_gives_no_facts(config_data, tmp_path):
+def test_nothing_changed_says_so_with_the_range_scanned(config_data, tmp_path):
     ctx, aws, kube = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}}, {"resource_names": "x"})
-    assert ctx.evidence.facts == [] and ctx.evidence.errors == []
-    assert fact_summaries(ctx) == []
+    assert ctx.evidence.errors == []
+    assert fact_summaries(ctx) == [
+        "No change was recorded for x between 2026-10-04T10:00:00Z and 2026-10-04T12:00:00Z"
+    ]
+    assert ctx.evidence.facts[0].kind == "derived"
     assert_read_only(ctx, aws, kube)
+
+
+def test_only_read_events_counts_as_nothing_changed(config_data, tmp_path):
+    answers = {"cloudtrail lookup-events": {"Events": [event("DescribeServices", read_only="true")]}}
+    ctx, _, _ = run(config_data, tmp_path, answers, {"resource_names": "x"})
+    assert fact_summaries(ctx)[0].startswith("No change was recorded for x")
+
+
+def test_failed_lookup_is_not_reported_as_nothing_changed(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": access_denied("LookupEvents")},
+                    {"resource_names": "x"})
+    assert ctx.evidence.facts == []
+
+
+def test_lookup_ends_five_minutes_after_the_incident_start(config_data, tmp_path):
+    ctx, aws, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}},
+                      {"resource_names": "x", "incident_start": INCIDENT})
+    call = aws.called("cloudtrail", "lookup-events")[0]
+    assert call[call.index("--start-time") + 1] == "2026-10-04T10:00:00Z"
+    assert call[call.index("--end-time") + 1] == "2026-10-04T10:55:00Z"
+    assert fact_summaries(ctx) == [
+        "No change was recorded for x between 2026-10-04T10:00:00Z and 2026-10-04T10:55:00Z"
+    ]
+
+
+def test_account_wide_lookup_also_ends_after_the_incident_start(config_data, tmp_path):
+    _, aws, _ = run(config_data, tmp_path, {}, {"incident_start": INCIDENT})
+    call = aws.called("cloudtrail", "lookup-events")[0]
+    assert call[call.index("--end-time") + 1] == "2026-10-04T10:55:00Z"
+
+
+def test_incident_start_after_the_window_keeps_the_window_end(config_data, tmp_path):
+    _, aws, _ = run(config_data, tmp_path, {}, {"resource_names": "x", "incident_start": "2026-10-04T11:58:00Z"})
+    call = aws.called("cloudtrail", "lookup-events")[0]
+    assert call[call.index("--end-time") + 1] == "2026-10-04T12:00:00Z"
+
+
+def test_cut_list_is_reported(config_data, tmp_path):
+    answers = {"cloudtrail lookup-events": {"Events": [event("UpdateService")], "NextToken": "abc"}}
+    ctx, _, _ = run(config_data, tmp_path, answers, {"resource_names": "checkout-api"})
+    cut = [f for f in ctx.evidence.facts if "More change events exist" in f.summary]
+    assert len(cut) == 1 and cut[0].kind == "derived"
+    assert cut[0].summary == ("More change events exist for checkout-api than the 50 shown; "
+                              "these are the newest in the period")
+
+
+def test_complete_list_is_not_reported_as_cut(config_data, tmp_path):
+    answers = {"cloudtrail lookup-events": {"Events": [event("UpdateService")]}}
+    ctx, _, _ = run(config_data, tmp_path, answers, {"resource_names": "x"})
+    assert not any("More change events" in s for s in fact_summaries(ctx))
+
+
+def test_incident_start_without_a_timezone_is_an_error(config_data, tmp_path):
+    answers = {"cloudtrail lookup-events": {"Events": [event("UpdateService")]}}
+    ctx, aws, _ = run(config_data, tmp_path, answers, {"resource_names": "x", "incident_start": "2026-10-04T10:50:00"})
+    assert ctx.evidence.errors[0]["code"] == "InvalidTarget"
+    assert "incident started" not in ctx.evidence.facts[0].summary
