@@ -1,6 +1,6 @@
 import json
 
-from fakes import access_denied
+from fakes import FakeAws, access_denied
 from helpers import assert_read_only, make_context
 from triage.collectors.dynamodb import COLLECTOR
 
@@ -81,18 +81,91 @@ def test_scaling_activities_inside_window(config_data, tmp_path):
     assert_read_only(ctx, aws)
 
 
-def test_metrics(config_data, tmp_path):
-    results = {"MetricDataResults": [{"Id": "m0", "Timestamps": ["2026-10-04T10:41:00+00:00"], "Values": [840.0]}]}
-    ctx, aws = run(config_data, tmp_path, healthy_answers(**{"cloudwatch get-metric-data": results}))
+OPERATIONS = ["GetItem", "PutItem", "UpdateItem", "DeleteItem", "Query", "Scan", "BatchGetItem", "BatchWriteItem", "TransactWriteItems"]
+PER_OPERATION = ["ThrottledRequests", "SystemErrors", "SuccessfulRequestLatency"]
+
+
+class MetricsByQuery(FakeAws):
+    """Returns a datapoint only for the (metric, dimensions) pairs in `data`, as CloudWatch does for exact dimension matches."""
+
+    def __init__(self, answers, data):
+        super().__init__(answers)
+        self.data = data  # {(metric name, operation or None): value}
+        self.queries = []
+
+    def __call__(self, argv, timeout):
+        if argv[1:3] == ["cloudwatch", "get-metric-data"]:
+            queries = json.loads(argv[argv.index("--metric-data-queries") + 1])
+            self.queries.append(queries)
+            results = []
+            for query in queries:
+                metric = query["MetricStat"]["Metric"]
+                dims = {d["Name"]: d["Value"] for d in metric["Dimensions"]}
+                value = self.data.get((metric["MetricName"], dims.get("Operation")))
+                if value is not None:
+                    results.append({"Id": query["Id"], "Timestamps": ["2026-10-04T10:41:00+00:00"], "Values": [value]})
+            self.answers["cloudwatch get-metric-data"] = {"MetricDataResults": results}
+        return super().__call__(argv, timeout)
+
+
+def run_with_metrics(config_data, tmp_path, data):
+    answers = healthy_answers()
+    ctx, aws, _ = make_context(config_data, tmp_path, answers, collector="dynamodb")
+    fake = MetricsByQuery(answers, data)
+    ctx.runner = fake
+    COLLECTOR.run(ctx, dict(TARGETS))
+    return ctx, fake
+
+
+def test_table_level_metrics(config_data, tmp_path):
+    ctx, fake = run_with_metrics(config_data, tmp_path, {("ReadThrottleEvents", None): 840.0})
     assert by_summary(ctx, "ReadThrottleEvents (Sum): peak 840.0")
-    call = aws.called("cloudwatch", "get-metric-data")[0]
-    queries = json.loads(call[call.index("--metric-data-queries") + 1])
+    queries = fake.queries[0]
     stats = {q["MetricStat"]["Metric"]["MetricName"]: q["MetricStat"]["Stat"] for q in queries}
-    assert stats == {"ReadThrottleEvents": "Sum", "WriteThrottleEvents": "Sum", "ThrottledRequests": "Sum",
-                     "ConsumedReadCapacityUnits": "Sum", "ConsumedWriteCapacityUnits": "Sum", "SystemErrors": "Sum",
-                     "SuccessfulRequestLatency": "Maximum"}
+    assert stats == {"ReadThrottleEvents": "Sum", "WriteThrottleEvents": "Sum",
+                     "ConsumedReadCapacityUnits": "Sum", "ConsumedWriteCapacityUnits": "Sum"}
     assert queries[0]["MetricStat"]["Metric"]["Namespace"] == "AWS/DynamoDB"
     assert queries[0]["MetricStat"]["Metric"]["Dimensions"] == [{"Name": "TableName", "Value": "orders"}]
+
+
+def test_per_operation_metrics_are_queried_with_the_operation_dimension(config_data, tmp_path):
+    _, fake = run_with_metrics(config_data, tmp_path, {})
+    seen = {}
+    for queries in fake.queries:
+        for query in queries:
+            metric = query["MetricStat"]["Metric"]
+            dims = {d["Name"]: d["Value"] for d in metric["Dimensions"]}
+            if "Operation" in dims:
+                assert dims["TableName"] == "orders"
+                seen.setdefault(metric["MetricName"], set()).add(dims["Operation"])
+    assert seen == {name: set(OPERATIONS) for name in PER_OPERATION}
+    stats = {q["MetricStat"]["Metric"]["MetricName"]: q["MetricStat"]["Stat"]
+             for queries in fake.queries for q in queries if "SuccessfulRequestLatency" == q["MetricStat"]["Metric"]["MetricName"]}
+    assert stats == {"SuccessfulRequestLatency": "Maximum"}
+
+
+def test_only_per_operation_metrics_with_data_become_facts(config_data, tmp_path):
+    ctx, _ = run_with_metrics(config_data, tmp_path, {("ThrottledRequests", "Query"): 12.0, ("SuccessfulRequestLatency", "PutItem"): 340.0})
+    throttled = by_summary(ctx, "ThrottledRequests Query (Sum): peak 12.0")
+    assert len(throttled) == 1 and throttled[0].kind == "incident_time"
+    assert by_summary(ctx, "SuccessfulRequestLatency PutItem (Maximum): peak 340.0")
+    assert by_summary(ctx, "ThrottledRequests Scan") == []
+    assert by_summary(ctx, "throttling or system error was recorded") == []
+
+
+def test_no_per_operation_data_is_stated_once(config_data, tmp_path):
+    ctx, _ = run_with_metrics(config_data, tmp_path, {})
+    fact = by_summary(ctx, "throttling or system error was recorded")[0]
+    assert fact.kind == "derived" and "any operation" in fact.summary
+    assert len(by_summary(ctx, "throttling or system error was recorded")) == 1
+    assert by_summary(ctx, "ThrottledRequests GetItem") == []
+
+
+def test_unreadable_per_operation_metrics_are_not_called_clean(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, healthy_answers(**{"cloudwatch get-metric-data": access_denied("GetMetricData")}))
+    assert by_summary(ctx, "throttling or system error was recorded") == []
+    assert by_summary(ctx, "could not be read")
+    assert {e["code"] for e in ctx.evidence.errors} == {"AccessDeniedException"}
 
 
 def test_no_item_is_ever_read(config_data, tmp_path):
@@ -105,7 +178,15 @@ def test_missing_table(config_data, tmp_path):
     ctx, aws = run(config_data, tmp_path, healthy_answers(**{"dynamodb describe-table": NOT_FOUND}))
     assert len(ctx.evidence.facts) == 1
     assert ctx.evidence.facts[0].kind == "current" and "not found" in ctx.evidence.facts[0].summary
+    assert ctx.evidence.facts[0].command
+    assert ctx.evidence.errors == []
     assert aws.called("cloudwatch", "get-metric-data") == []
+
+
+def test_denied_describe_table_is_an_error_not_a_missing_table(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, healthy_answers(**{"dynamodb describe-table": access_denied("DescribeTable")}))
+    assert ctx.evidence.facts == []
+    assert [e["code"] for e in ctx.evidence.errors] == ["AccessDeniedException"]
 
 
 def test_access_denied_on_one_call_keeps_the_rest(config_data, tmp_path):
