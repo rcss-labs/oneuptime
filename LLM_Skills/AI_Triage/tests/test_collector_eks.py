@@ -235,10 +235,10 @@ def test_logs_cover_the_incident_window_not_the_last_minutes(config_data, tmp_pa
     logs = {("payments-api-abc", "app", True): LOG_TEXT}
     ctx, aws, fake_kube = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"}, logs=logs)
     call = log_calls(fake_kube)[0]
-    assert call[call.index("--since-time") + 1] == "2026-10-04T10:00:00Z"
+    assert "--since-time=2026-10-04T10:00:00Z" in call
     assert "--timestamps" in call and "--since" not in call
-    assert call[call.index("--limit-bytes") + 1] == "200000"
-    assert int(call[call.index("--tail") + 1]) <= 5000
+    assert "--limit-bytes=200000" in call
+    assert "--tail" not in call
     fact = next(f for f in ctx.evidence.facts if "fatal: cannot connect" in f.excerpt)
     assert "before the incident" not in fact.excerpt and "after the incident" not in fact.excerpt
     assert "2026-10-04T10:30:00Z" in fact.summary and "2026-10-04T11:00:00Z" in fact.summary
@@ -440,3 +440,55 @@ def test_at_most_ten_workloads_are_read(config_data, tmp_path):
 def test_access_denied_on_the_cluster_is_not_reported_as_not_found(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, aws_answers(**{"eks describe-cluster": access_denied("DescribeCluster")}))
     assert ctx.evidence.facts == [] and ctx.evidence.errors[0]["code"] == "AccessDeniedException"
+
+
+def test_a_busy_pod_that_hits_the_byte_limit_is_reported_as_cut(config_data, tmp_path):
+    first = "2026-10-04T10:00:01.000000000Z onset of the problem"
+    filler = "2026-10-04T12:30:00.000000000Z " + "x" * 200000
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): first + "\n" + filler})
+    assert any("onset of the problem" in f.excerpt for f in ctx.evidence.facts)
+    cut = [f for f in ctx.evidence.facts if f.kind == "derived" and "200000 bytes" in f.summary]
+    assert len(cut) == 1 and "later lines were not read" in cut[0].summary
+
+
+def test_a_cut_log_with_nothing_inside_the_window_never_claims_it_is_empty(config_data, tmp_path):
+    filler = "2026-10-04T12:30:00.000000000Z " + "x" * 200000
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): filler})
+    assert not any("falls inside" in f.summary for f in ctx.evidence.facts)
+    assert len([f for f in ctx.evidence.facts if "200000 bytes" in f.summary]) == 1
+
+
+def test_a_quiet_pod_under_the_limit_may_say_no_line_falls_inside_the_window(config_data, tmp_path):
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): AFTER_LOG})
+    assert len([f for f in ctx.evidence.facts if "falls inside" in f.summary]) == 1
+    assert not any("200000 bytes" in f.summary for f in ctx.evidence.facts)
+
+
+def test_an_incident_that_ended_hours_ago_still_gets_its_lines(config_data, tmp_path):
+    # The window is 10:00-12:00; the log also holds many hours of later lines, which are dropped in code.
+    later = [f"2026-10-04T{h:02d}:00:00.000000000Z later-{h}" for h in range(13, 24)]
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): "\n".join([*IN_LOG, *later])})
+    fact = next(f for f in ctx.evidence.facts if "fatal: cannot connect" in f.excerpt)
+    assert "later-" not in fact.excerpt
+
+
+def test_event_count_is_never_one_times(config_data, tmp_path):
+    single = event()
+    single["count"] = 1
+    series = event(reason="Unhealthy")
+    series["count"] = None
+    series["series"] = {"count": 12, "lastObservedTime": IN_WINDOW}
+    ctx, _, _ = run(config_data, tmp_path, kube=kube_answers(**{"get events": {"items": [single, series]}}),
+                    targets={"namespace": "web"})
+    texts = [f.summary for f in ctx.evidence.facts if "Warning event" in f.summary]
+    assert not any("1 times" in t for t in texts)
+    assert any("BackOff" in t and "once" in t for t in texts)
+    assert any("Unhealthy" in t and "12 times" in t for t in texts)

@@ -16,8 +16,7 @@ MAX_UPDATES = "20"
 MAX_WORKLOADS = 10
 MAX_CONTAINERS_PER_POD = 2
 LOG_LINES = 50
-LOG_FETCH_LINES = "5000"
-LOG_BYTES = "200000"
+LOG_BYTES = 200000
 MAX_PODS = 30
 MAX_EVENTS = 40
 MAX_LOG_PODS = 3
@@ -187,6 +186,11 @@ def _event_period(event: dict) -> tuple[Any, Any]:
     return first or last, last or first
 
 
+def _times_text(event: dict) -> str:
+    count = (event.get("series") or {}).get("count") or event.get("count") or 1
+    return "once" if count == 1 else f"{count} times"
+
+
 def _add_events(ctx: CollectContext, cluster: str, namespace: str) -> None:
     reply = ctx.kubectl_json(cluster, ["get", "events"], namespace=namespace)
     window = ctx.window
@@ -205,7 +209,7 @@ def _add_events(ctx: CollectContext, cluster: str, namespace: str) -> None:
             command=ctx.last_command,
             summary=(
                 f"Warning event {event.get('reason')} on {involved.get('kind')}/{involved.get('name')} "
-                f"({event.get('count', 1)} times, first seen {format_time(first)}, last seen {format_time(last)})"
+                f"({_times_text(event)}, first seen {format_time(first)}, last seen {format_time(last)})"
             ),
             excerpt=event.get("message") or "",
         )
@@ -261,9 +265,10 @@ def _containers_to_read(pod: dict) -> list[dict]:
 
 
 def _fetch_logs(ctx: CollectContext, cluster: str, namespace: str, pod_name: str, container: str, previous: bool) -> None:
+    # No --tail: the answer is the first LOG_BYTES bytes from the window start, so the onset is always read.
     args = [
-        "logs", pod_name, "-c", container, "--since-time", format_time(ctx.window.start),
-        "--timestamps", "--tail", LOG_FETCH_LINES, "--limit-bytes", LOG_BYTES,
+        "logs", pod_name, "-c", container, f"--since-time={format_time(ctx.window.start)}",
+        "--timestamps", f"--limit-bytes={LOG_BYTES}",
     ]
     if previous:
         args.append("--previous")
@@ -277,11 +282,21 @@ def _fetch_logs(ctx: CollectContext, cluster: str, namespace: str, pod_name: str
         moment = _line_time(line)
         if moment is not None and ctx.window.contains(moment):
             inside.append((moment, line))
-    if not inside:
+    cut = len(output.encode("utf-8")) >= LOG_BYTES
+    if cut:
         ctx.evidence.add(
             kind=DERIVED, resource=resource, command=ctx.last_command,
-            summary=f"No log line of {which} {container} in pod {pod_name} falls inside the incident window",
+            summary=(
+                f"The log of {which} {container} in pod {pod_name} was cut {LOG_BYTES} bytes after the window start; "
+                "later lines were not read"
+            ),
         )
+    if not inside:
+        if not cut:
+            ctx.evidence.add(
+                kind=DERIVED, resource=resource, command=ctx.last_command,
+                summary=f"No log line of {which} {container} in pod {pod_name} falls inside the incident window",
+            )
         return
     kept = inside[-LOG_LINES:]
     # Redact line by line before cutting, so a secret cut by the excerpt boundary cannot leave a fragment.
