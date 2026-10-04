@@ -179,7 +179,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         return
     if _collect_cluster(ctx, name):
         return
-    ctx.evidence.add(kind=CURRENT, resource=f"db/{name}", summary=f"No RDS instance or cluster named {name} was not found")
+    ctx.evidence.add(kind=CURRENT, resource=f"db/{name}", summary=f"RDS instance or cluster {name} was not found")
 
 
 COLLECTOR = Collector(
