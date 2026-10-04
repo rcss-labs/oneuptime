@@ -514,3 +514,41 @@ def test_constructs_outside_the_allow_list_never_get_allow(suffix, monkeypatch):
 def test_semicolon_lists_and_input_redirects_now_ask(command):
     # These were deny or pass before round 4; ; and < are now outside what the scanner accepts.
     assert kind(command) == ASK
+
+
+# ---- guard additions, item 3: own scripts that always ask ---------------------
+
+HEX = "ab" * 32
+
+
+@pytest.mark.parametrize(
+    "args",
+    ["apply --case-dir /tmp/c --service-name s", "apply", "--skill-dir /x apply --case-dir c --service-name s",
+     "app --case-dir c --service-name s"],
+)
+def test_map_suggest_apply_always_asks(args):
+    verdict = decide(f"{PY} {SCRIPT}/map_suggest.py {args}", CONTEXT)
+    assert verdict.kind == ASK and "writes an entry to your service map" in verdict.reason
+
+
+def test_map_suggest_propose_is_still_allowed():
+    assert kind(f"{PY} {SCRIPT}/map_suggest.py propose --case-dir /tmp/c --service-name s") == ALLOW
+
+
+@pytest.mark.parametrize(
+    "args",
+    [f"slack-message --case-dir c --accept-hits={HEX}", f"slack-message --case-dir c --accept-hits {HEX}",
+     f"confluence --accept-hits {HEX} --case-dir c", f"slack-message --case-dir c --confluence-url u --accept-hits={HEX}",
+     f"confluence --case-dir c --accept={HEX}", f"confluence --case-dir c --accept-h {HEX}", "confluence --accept-hits"],
+)
+def test_publish_with_accept_hits_always_asks(args):
+    verdict = decide(f"{PY} {SCRIPT}/publish.py {args}", CONTEXT)
+    assert verdict.kind == ASK and "publishes although the audit found possible secrets" in verdict.reason
+
+
+def test_publish_without_accept_hits_keeps_its_answer(monkeypatch):
+    assert kind(f"{PY} {SCRIPT}/publish.py audit --case-dir c") == ALLOW
+    assert kind(f"{PY} {SCRIPT}/publish.py slack-message --case-dir c --confluence-url u") == ALLOW
+    monkeypatch.setenv("HOME", "/home/eng")
+    command = f'"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/publish.py" confluence --case-dir c --accept-hits {HEX}'
+    assert kind(command) == ASK

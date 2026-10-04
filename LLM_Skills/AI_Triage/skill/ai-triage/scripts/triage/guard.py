@@ -36,6 +36,9 @@ OWN_SCRIPTS = frozenset(
     }
 )
 
+ACCEPT_HITS_FLAG = "--accept-hits"
+APPLY_SUBCOMMAND = "apply"
+
 JQ_FLAGS = frozenset({"-r", "-c", "-S", "-e", "-M", "--raw-output", "--compact-output", "--sort-keys"})
 # jq programs that could read the environment or other files, shell-quote output, or never end.
 JQ_FORBIDDEN = ("env", "$ENV", "input", "$__loc__", "@sh", "import", "include", "modulemeta", "get_search_list",
@@ -228,9 +231,32 @@ def _check_segment(segment: Segment, context: GuardContext) -> Verdict:
     return Verdict(PASS)
 
 
+def _is_accept_hits(arg: str) -> bool:
+    """--accept-hits, with or without =value, or any abbreviation argparse would expand to it."""
+    head = arg.split("=", 1)[0]
+    return arg.startswith(ACCEPT_HITS_FLAG) or (len(head) > 2 and ACCEPT_HITS_FLAG.startswith(head))
+
+
+def _is_apply(arg: str) -> bool:
+    # Some Python versions let argparse expand an abbreviated subcommand, so a prefix counts too.
+    return len(arg) >= 2 and APPLY_SUBCOMMAND.startswith(arg)
+
+
+def _engineer_must_approve(name: str, args: tuple[str, ...]) -> str:
+    """The reason an own-script call always needs the engineer, or "" when it does not."""
+    if name == "map_suggest.py" and any(_is_apply(arg) for arg in args):
+        return "map_suggest.py apply writes an entry to your service map"
+    if name == "publish.py" and any(_is_accept_hits(arg) for arg in args):
+        return "publish.py --accept-hits publishes although the audit found possible secrets"
+    return ""
+
+
 def _own_script_verdict(segment: Segment, name: str) -> Verdict:
     if segment.env or segment.reads_file:
         return Verdict(ASK, f"triage script {name} is run with environment variables or an input redirect")
+    approval = _engineer_must_approve(name, segment.argv[2:])
+    if approval:
+        return Verdict(ASK, approval)
     return Verdict(ALLOW, f"triage script {name}" if name != OPENSEARCH_SCRIPT else "OpenSearch query through the triage tool")
 
 
