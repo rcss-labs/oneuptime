@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 
 from triage.evidence import INCIDENT_TIME
-from triage.findings import evidence_documents
-from triage.window import WindowError, describe_offset, parse_time
+from triage.findings import evidence_documents, qualified_id
+from triage.window import WindowError, describe_offset, format_time, parse_time
 
 MAX_ROWS = 300
 TIMELINE_NAME = "timeline.json"
@@ -15,6 +15,7 @@ _INCIDENT_TEXTS = (
     ("declared_at", "Incident declared"),
     ("resolved_at", "Incident resolved"),
 )
+_BAD_ID = "\0bad-id"
 _SOURCE_RANK = {"incident": 0, "oneuptime": 1}
 
 
@@ -38,11 +39,13 @@ def _raw_rows(case_dir: Path, case: dict, incident: dict) -> list[dict]:
         for entry in entries if isinstance(entries, list) else []:
             if isinstance(entry, dict) and entry.get("time"):
                 rows.append(_row(entry["time"], "oneuptime", str(entry.get("text", ""))))
-    for _, document in evidence_documents(case_dir):
+    for file_name, document in evidence_documents(case_dir):
         for fact in document.get("facts", []):
             if isinstance(fact, dict) and fact.get("kind") == INCIDENT_TIME and fact.get("time"):
+                fact_id = fact.get("id")
                 rows.append(_row(fact["time"], str(document.get("collector", "")), str(fact.get("summary", "")),
-                                 fact.get("id"), str(fact.get("resource", ""))))
+                                 qualified_id(file_name, fact_id) if isinstance(fact_id, str) else _BAD_ID,
+                                 str(fact.get("resource", ""))))
     return rows
 
 
@@ -55,11 +58,17 @@ def build_timeline(case_dir: Path) -> list[dict]:
     incident = _read_json(case_dir / "incident.json")
     start = parse_time(case["incident_start"])
     rows = []
+    skipped = 0
     for row in _raw_rows(case_dir, case, incident):
+        if row["fact_id"] == _BAD_ID:
+            skipped += 1
+            continue
         try:
             row["_moment"] = parse_time(row["time"])
         except WindowError:
+            skipped += 1
             continue
+        row["time"] = format_time(row["_moment"])
         row["offset"] = f"{describe_offset(row['_moment'], start)} the incident started"
         rows.append(row)
     dropped = max(0, len(rows) - MAX_ROWS)
@@ -68,8 +77,13 @@ def build_timeline(case_dir: Path) -> list[dict]:
     rows.sort(key=_sort_key)
     for row in rows:
         del row["_moment"]
+    notes = []
     if dropped:
-        note = _row("", "timeline", f"{dropped} more rows farther from the incident start were left out")
+        notes.append(f"{dropped} more rows farther from the incident start were left out")
+    if skipped:
+        notes.append(f"{skipped} events with an unreadable time or fact id were left out")
+    for text in notes:
+        note = _row("", "timeline", text)
         note["offset"] = ""
         rows.append(note)
     (case_dir / TIMELINE_NAME).write_text(json.dumps(rows, indent=2) + "\n")
@@ -77,12 +91,21 @@ def build_timeline(case_dir: Path) -> list[dict]:
 
 
 def _cell(text: str) -> str:
-    return " ".join(text.split()).replace("|", "\\|")
+    return " ".join(text.split()).replace("\\", "\\\\").replace("|", "\\|")
 
 
 def render_rows(rows: list[dict]) -> str:
+    """A Markdown table of the rows; notes about rows that were left out follow it as plain lines."""
     lines = ["| Time | Relative to incident start | Event | Source |", "| --- | --- | --- | --- |"]
+    notes = []
     for row in rows:
+        if row["source"] == "timeline":
+            notes.append(row["text"])
+            continue
         source = row["fact_id"] or row["source"]
-        lines.append(f"| {_cell(row['time'])} | {_cell(row['offset'])} | {_cell(row['text'])} | {_cell(source)} |")
+        when = row["time"].replace("T", " ")
+        lines.append(f"| {_cell(when)} | {_cell(row['offset'])} | {_cell(row['text'])} | {_cell(source)} |")
+    if notes:
+        lines.append("")
+        lines.extend(notes)
     return "\n".join(lines)

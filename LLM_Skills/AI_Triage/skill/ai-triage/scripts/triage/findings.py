@@ -10,6 +10,7 @@ from triage.redact import Redactor
 from triage.window import WindowError, parse_time
 
 CHECKED_NAME = "checked.json"
+MIN_EXCERPT = 12
 PROVENANCES = ("incident_time", "current", "inferred")
 CONFIDENCES = ("high", "medium", "low")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -35,20 +36,36 @@ def evidence_documents(case_dir: Path, warnings: list[str] | None = None) -> lis
     return documents
 
 
+def qualified_id(file_name: str, fact_id: str) -> str:
+    return f"{Path(file_name).stem}:{fact_id}"
+
+
 def load_facts(case_dir: Path, warnings: list[str] | None = None) -> dict[str, dict]:
-    """Fact id to fact across all evidence files. A repeated id is kept as "<file>:<id>"."""
+    """Qualified fact id ("<evidence file stem>:<fact id>") to fact, across all evidence files.
+
+    Fact ids are numbered per file, so only the qualified id is unique in a case.
+    """
     facts: dict[str, dict] = {}
     for file_name, document in evidence_documents(case_dir, warnings):
         for fact in document.get("facts", []):
-            if not isinstance(fact, dict) or "id" not in fact:
-                continue
-            key = fact["id"]
-            if key in facts:
-                key = f"{file_name}:{fact['id']}"
+            if not isinstance(fact, dict) or not isinstance(fact.get("id"), str):
                 if warnings is not None:
-                    warnings.append(f"fact id {fact['id']} appears in more than one evidence file; kept as {key}")
-            facts[key] = {**fact, "file": file_name}
+                    warnings.append(f"a fact in {file_name} has no text id and was skipped")
+                continue
+            facts[qualified_id(file_name, fact["id"])] = {**fact, "file": file_name}
     return facts
+
+
+def _resolve_citation(cited: str, facts: dict[str, dict]) -> tuple[str | None, str | None]:
+    """The qualified id a citation names, or a problem when it names none or several."""
+    if cited in facts:
+        return cited, None
+    matches = sorted(key for key, fact in facts.items() if fact["id"] == cited)
+    if len(matches) == 1:
+        return matches[0], None
+    if matches:
+        return None, f"fact id {cited} exists in more than one evidence file; cite it as one of: {', '.join(matches)}"
+    return None, f"fact id {cited} does not exist"
 
 
 def _is_text(value: object) -> bool:
@@ -80,33 +97,61 @@ def _field_problems(finding: dict) -> list[str]:
     return problems
 
 
-def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str], list[dict]]:
-    """Problems with the cited facts and the excerpt, plus the cited facts that exist."""
-    problems, cited = [], []
+def _whole_values(fact: dict) -> set[str]:
+    """Every whole string value of a fact's summary and data, whitespace collapsed."""
+    values = {_collapse(str(fact.get("summary") or ""))}
+    pending = [fact.get("data")]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            values.add(_collapse(item))
+        elif isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return values
+
+
+def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str], dict[str, dict]]:
+    """Problems with the cited facts and the excerpt, plus the cited facts that exist by qualified id."""
+    problems: list[str] = []
+    cited: dict[str, dict] = {}
     if not isinstance(finding.get("fact_ids"), list) or not all(isinstance(item, str) for item in finding["fact_ids"]):
         return problems, cited
     for fact_id in finding["fact_ids"]:
-        if fact_id in facts:
-            cited.append(facts[fact_id])
+        key, problem = _resolve_citation(fact_id, facts)
+        if problem:
+            problems.append(problem)
         else:
-            problems.append(f"fact id {fact_id} does not exist")
+            cited[key] = facts[key]
     excerpt = finding.get("excerpt")
+    matching: list[dict] = []
     if isinstance(excerpt, str):
         needle = _collapse(excerpt)
+        matching = [
+            fact for fact in cited.values()
+            if any(needle in _collapse(str(fact.get(field) or "")) for field in ("summary", "excerpt"))
+        ]
         if not needle:
             problems.append("excerpt is empty")
-        elif not any(needle in _collapse(str(fact.get(field) or "")) for fact in cited for field in ("summary", "excerpt")):
+        elif not matching:
             problems.append("excerpt was not found in the summary or excerpt of any cited fact")
+        elif len(needle) < MIN_EXCERPT and not any(needle in _whole_values(fact) for fact in matching):
+            problems.append(
+                f"excerpt is shorter than {MIN_EXCERPT} characters and is not the whole value of a cited fact"
+            )
     provenance = finding.get("provenance")
     required_kind = {"incident_time": INCIDENT_TIME, "current": CURRENT}.get(provenance)
-    if required_kind and finding["fact_ids"] and not any(fact.get("kind") == required_kind for fact in cited):
+    if required_kind and finding["fact_ids"] and matching and not any(fact.get("kind") == required_kind for fact in matching):
+        problems.append(f"provenance is {provenance} but no cited fact containing the excerpt has kind {required_kind}")
+    elif required_kind and finding["fact_ids"] and not matching and not any(fact.get("kind") == required_kind for fact in cited.values()):
         problems.append(f"provenance is {provenance} but no cited fact has kind {required_kind}")
     return problems, cited
 
 
-def _finding_problems(finding: object, analyst: str, facts: dict[str, dict], seen_ids: set[str]) -> tuple[list[str], list[dict]]:
+def _finding_problems(finding: object, analyst: str, facts: dict[str, dict], seen_ids: set[str]) -> tuple[list[str], dict[str, dict]]:
     if not isinstance(finding, dict):
-        return ["finding is not an object"], []
+        return ["finding is not an object"], {}
     problems = _field_problems(finding)
     citation_problems, cited = _citation_problems(finding, facts)
     problems += citation_problems
@@ -151,7 +196,11 @@ def check_findings(case_dir: Path) -> dict:
         if data is None:
             result["unreadable"].append({"file": f"findings/{path.name}", "reason": reason})
             continue
-        analyst = data["analyst"] if _is_text(data.get("analyst")) else path.stem
+        analyst = path.stem
+        if "analyst" in data and data["analyst"] != analyst:
+            reason = f"analyst field {data['analyst']!r} does not match the file name {analyst}"
+            result["unreadable"].append({"file": f"findings/{path.name}", "reason": reason})
+            continue
         for finding in data["findings"]:
             problems, cited = _finding_problems(finding, analyst, facts, seen_ids)
             finding_id = finding.get("id") if isinstance(finding, dict) else None
@@ -159,7 +208,12 @@ def check_findings(case_dir: Path) -> dict:
                 result["rejected"].append({"analyst": analyst, "id": finding_id, "reasons": problems})
                 continue
             seen_ids.add(finding_id)
-            stored = {**finding, "analyst": analyst, "fact_summaries": [fact.get("summary", "") for fact in cited]}
+            stored = {
+                **finding,
+                "analyst": analyst,
+                "fact_ids": list(cited),
+                "fact_summaries": {key: fact.get("summary", "") for key, fact in cited.items()},
+            }
             result["valid"].append(redactor.value(stored))
         if isinstance(data.get("checked"), list):
             result["checked"][analyst] = [redactor.text(item) for item in data["checked"] if isinstance(item, str)]

@@ -56,27 +56,58 @@ def reasons_of(result):
     return result["rejected"][0]["reasons"]
 
 
-def test_load_facts_across_files_adds_file_name(case_dir):
+def test_load_facts_keys_every_fact_by_file_stem_and_id(case_dir):
     add_evidence(case_dir, collector="rds", facts=[(CURRENT, "db up", "")])
     facts = load_facts(case_dir)
-    assert set(facts) == {"ecs-0001", "ecs-0002", "ecs-0003", "rds-0001"}
-    assert facts["rds-0001"]["file"] == "rds-prod-main-eu-west-1.json"
+    assert set(facts) == {"ecs-prod-main-eu-west-1:ecs-0001", "ecs-prod-main-eu-west-1:ecs-0002", "ecs-prod-main-eu-west-1:ecs-0003", "rds-prod-main-eu-west-1:rds-0001"}
+    assert facts["rds-prod-main-eu-west-1:rds-0001"]["file"] == "rds-prod-main-eu-west-1.json"
+    assert facts["rds-prod-main-eu-west-1:rds-0001"]["id"] == "rds-0001"
 
 
-def test_load_facts_keeps_duplicate_under_file_prefix_and_warns(case_dir):
+def test_load_facts_keeps_same_id_from_two_files_apart(case_dir):
     add_evidence(case_dir, region="eu-central-1", facts=[(CURRENT, "second region", "")])
+    facts = load_facts(case_dir)
+    assert facts["ecs-prod-main-eu-west-1:ecs-0001"]["summary"].startswith("Essential")
+    assert facts["ecs-prod-main-eu-central-1:ecs-0001"]["summary"] == "second region"
+
+
+def test_load_facts_skips_a_fact_whose_id_is_not_text_and_warns(case_dir):
+    path = case_dir / "evidence" / "ecs-prod-main-eu-west-1.json"
+    document = json.loads(path.read_text())
+    document["facts"].append({"id": 7, "kind": "current", "summary": "odd"})
+    path.write_text(json.dumps(document))
     warnings = []
-    facts = load_facts(case_dir, warnings)
-    assert facts["ecs-0001"]["file"] == "ecs-prod-main-eu-central-1.json" or facts["ecs-0001"]["summary"].startswith("Essential")
-    duplicates = [key for key in facts if key.endswith(":ecs-0001")]
-    assert len(duplicates) == 1
-    assert len(warnings) == 1 and "ecs-0001" in warnings[0]
+    assert len(load_facts(case_dir, warnings)) == 3
+    assert len(warnings) == 1
 
 
-def test_check_reports_duplicate_warning(case_dir):
-    add_evidence(case_dir, region="eu-central-1", facts=[(CURRENT, "second region", "")])
+def test_bare_id_in_two_files_is_ambiguous_and_rejected(tmp_path):
+    add_evidence(tmp_path, collector="dynamodb", suffix="orders", facts=[(INCIDENT_TIME, "No throttling was recorded for any operation", "")])
+    add_evidence(tmp_path, collector="dynamodb", suffix="payments", facts=[(INCIDENT_TIME, "ReadThrottleEvents peaked at 500 for GetItem", "")])
+    result = check(tmp_path, [finding(fact_ids=["dynamodb-0001"], excerpt="throttling was recorded")])
+    reasons = reasons_of(result)
+    assert any("exists in more than one evidence file" in r and "dynamodb-prod-main-eu-west-1-orders:dynamodb-0001" in r
+               and "dynamodb-prod-main-eu-west-1-payments:dynamodb-0001" in r for r in reasons)
+
+
+def test_qualified_id_picks_the_right_file_and_is_stored_qualified(tmp_path):
+    add_evidence(tmp_path, collector="dynamodb", suffix="orders", facts=[(INCIDENT_TIME, "No throttling was recorded for any operation", "")])
+    add_evidence(tmp_path, collector="dynamodb", suffix="payments", facts=[(INCIDENT_TIME, "ReadThrottleEvents peaked at 500 for GetItem", "")])
+    qualified = "dynamodb-prod-main-eu-west-1-payments:dynamodb-0001"
+    result = check(tmp_path, [finding(fact_ids=[qualified], excerpt="ReadThrottleEvents peaked at 500")])
+    assert result["rejected"] == []
+    assert result["valid"][0]["fact_ids"] == [qualified]
+    assert result["valid"][0]["fact_summaries"] == {qualified: "ReadThrottleEvents peaked at 500 for GetItem"}
+
+
+def test_bare_id_unique_to_one_file_is_stored_qualified(case_dir):
     result = check(case_dir, [finding()])
-    assert len(result["warnings"]) == 1
+    assert result["valid"][0]["fact_ids"] == ["ecs-prod-main-eu-west-1:ecs-0001"]
+
+
+def test_same_fact_cited_twice_is_stored_once(case_dir):
+    result = check(case_dir, [finding(fact_ids=["ecs-0001", "ecs-prod-main-eu-west-1:ecs-0001"])])
+    assert result["valid"][0]["fact_ids"] == ["ecs-prod-main-eu-west-1:ecs-0001"]
 
 
 def test_load_facts_without_evidence_is_empty(tmp_path):
@@ -88,7 +119,7 @@ def test_valid_finding_is_kept_with_summaries_and_written(case_dir):
     assert result["rejected"] == []
     assert result["valid"][0]["id"] == "compute-1"
     assert result["valid"][0]["analyst"] == "compute"
-    assert result["valid"][0]["fact_summaries"] == ["Essential container exited with code 137"]
+    assert result["valid"][0]["fact_summaries"] == {"ecs-prod-main-eu-west-1:ecs-0001": "Essential container exited with code 137"}
     assert result["checked"] == {"compute": ["ECS events"]}
     assert json.loads((case_dir / "findings" / "checked.json").read_text()) == result
     assert valid_findings(case_dir)["compute-1"]["claim"] == "Deployment failed"
@@ -149,7 +180,7 @@ def test_bad_provenance_and_confidence_values_are_rejected(case_dir):
 
 
 def test_incident_time_provenance_needs_an_incident_time_fact(case_dir):
-    reasons = reasons_of(check(case_dir, [finding(fact_ids=["ecs-0002"], excerpt="running 0")]))
+    reasons = reasons_of(check(case_dir, [finding(fact_ids=["ecs-0002"], excerpt="desired 2, running 0")]))
     assert any("incident_time" in reason for reason in reasons)
 
 
@@ -236,3 +267,36 @@ def test_analyst_name_defaults_to_file_name(case_dir):
     del data["analyst"]
     path.write_text(json.dumps(data))
     assert check_findings(case_dir)["valid"][0]["analyst"] == "compute"
+
+
+def test_short_excerpt_is_rejected(case_dir):
+    reasons = reasons_of(check(case_dir, [finding(excerpt="exited")]))
+    assert any("12 characters" in reason for reason in reasons)
+
+
+def test_short_excerpt_that_is_a_whole_summary_is_accepted(tmp_path):
+    add_evidence(tmp_path, facts=[(INCIDENT_TIME, "OOMKilled", "")])
+    assert check(tmp_path, [finding(excerpt="OOMKilled")])["rejected"] == []
+
+
+def test_short_excerpt_that_is_a_whole_data_string_is_accepted(tmp_path):
+    evidence = Evidence("ecs", "prod-main", "eu-west-1", WINDOW)
+    evidence.add(kind=INCIDENT_TIME, resource="svc", summary="Task stopped: OOMKilled by the kernel", time="2026-10-04T10:41:00Z",
+                 data={"detail": {"reason": "OOMKilled"}})
+    evidence.write(tmp_path)
+    assert check(tmp_path, [finding(excerpt="OOMKilled")])["rejected"] == []
+
+
+def test_provenance_kind_must_come_from_a_fact_that_contains_the_excerpt(tmp_path):
+    add_evidence(tmp_path, collector="rds", facts=[(CURRENT, "CPU is at 99% right now", ""), (INCIDENT_TIME, "Failover started on the writer", "")])
+    reasons = reasons_of(check(tmp_path, [finding(fact_ids=["rds-0001", "rds-0002"], excerpt="CPU is at 99% right now")]))
+    assert any("incident_time" in reason for reason in reasons)
+
+
+def test_analyst_field_must_match_the_file_name(case_dir):
+    write_findings(case_dir, "compute", [finding()], checked=["real"])
+    (case_dir / "findings" / "evil.json").write_text(json.dumps({"analyst": "compute", "findings": [], "checked": ["fake"]}))
+    result = check_findings(case_dir)
+    assert result["checked"] == {"compute": ["real"]}
+    assert [item["file"] for item in result["unreadable"]] == ["findings/evil.json"]
+    assert "analyst" in result["unreadable"][0]["reason"]

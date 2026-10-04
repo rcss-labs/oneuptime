@@ -31,7 +31,7 @@ def test_rows_are_ordered_by_time_with_offsets(tmp_path):
     add_facts(case, "ecs", [(INCIDENT_TIME, "2026-10-04T10:38:00Z", "Tasks stopped")])
     rows = build_timeline(case)
     assert [row["text"] for row in rows] == ["Deploy noted", "Tasks stopped", "Incident declared", "Paged"]
-    assert rows[1] == {"time": "2026-10-04T10:38:00Z", "source": "ecs", "fact_id": "ecs-0001", "resource": "res",
+    assert rows[1] == {"time": "2026-10-04T10:38:00Z", "source": "ecs", "fact_id": "ecs-prod-main-eu-west-1:ecs-0001", "resource": "res",
                        "text": "Tasks stopped", "offset": "4 minutes before the incident started"}
     assert rows[0]["source"] == "oneuptime" and rows[0]["fact_id"] is None and rows[0]["resource"] == ""
     assert rows[3]["offset"] == "8 minutes after the incident started"
@@ -96,9 +96,48 @@ def test_render_rows_makes_a_table_and_escapes_pipes(tmp_path):
     lines = render_rows(rows).splitlines()
     assert lines[0] == "| Time | Relative to incident start | Event | Source |"
     assert lines[1] == "| --- | --- | --- | --- |"
-    assert lines[2] == "| 2026-10-04T10:38:00Z | 4 minutes before the incident started | a \\| b c | ecs-0001 |"
+    assert lines[2] == "| 2026-10-04 10:38:00Z | 4 minutes before the incident started | a \\| b c | ecs-0001 |"
     assert lines[3].endswith("| Incident declared | incident |")
 
 
 def test_render_empty_rows_still_has_header():
     assert len(render_rows([]).splitlines()) == 2
+
+
+def test_same_fact_id_in_two_files_gives_distinct_qualified_ids(tmp_path):
+    case = make_case(tmp_path)
+    add_facts(case, "dynamodb", [(INCIDENT_TIME, "2026-10-04T10:38:00Z", "orders ok")], region="eu-west-1")
+    add_facts(case, "dynamodb", [(INCIDENT_TIME, "2026-10-04T10:39:00Z", "payments throttled")], region="eu-central-1")
+    ids = [row["fact_id"] for row in build_timeline(case) if row["source"] == "dynamodb"]
+    assert len(set(ids)) == 2 and all(":dynamodb-0001" in item for item in ids)
+
+
+def test_rows_with_unreadable_time_are_counted_in_a_note(tmp_path):
+    case = make_case(tmp_path, incident={"notes": [{"time": "bad", "text": "x"}, {"time": "worse", "text": "y"}]})
+    rows = build_timeline(case)
+    assert rows[-1]["source"] == "timeline" and rows[-1]["text"].startswith("2 ") and "unreadable" in rows[-1]["text"]
+    last_line = render_rows(rows).splitlines()[-1]
+    assert "2 " in last_line and not last_line.startswith("|")
+
+
+def test_non_text_fact_id_is_reported_not_a_crash(tmp_path):
+    case = make_case(tmp_path)
+    add_facts(case, "ecs", [(INCIDENT_TIME, "2026-10-04T10:38:00Z", "ok")])
+    path = next((case / "evidence").glob("*.json"))
+    document = json.loads(path.read_text())
+    document["facts"][0]["id"] = 5
+    path.write_text(json.dumps(document))
+    rows = build_timeline(case)
+    assert rows[-1]["source"] == "timeline" and "left out" in rows[-1]["text"]
+
+
+def test_times_are_converted_to_utc(tmp_path):
+    case = make_case(tmp_path, incident={"notes": [{"time": "2026-10-04T12:40:00+02:00", "text": "local"}]})
+    row = next(row for row in build_timeline(case) if row["source"] == "oneuptime")
+    assert row["time"] == "2026-10-04T10:40:00Z"
+    assert "| 2026-10-04 10:40:00Z |" in render_rows([row])
+
+
+def test_backslashes_are_escaped_before_pipes():
+    row = {"time": "2026-10-04T10:38:00Z", "source": "ecs", "fact_id": None, "resource": "", "text": "path C:\\ |", "offset": "x"}
+    assert "path C:\\\\ \\|" in render_rows([row])
