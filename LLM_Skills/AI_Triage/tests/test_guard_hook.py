@@ -237,3 +237,63 @@ def test_the_python_override_needs_the_test_flag(tmp_path):
     assert result.returncode == 0
     if not (SKILL_SRC / ".venv" / "bin" / "python").exists():
         assert "not installed correctly" in decision(result.stdout)["permissionDecisionReason"]
+
+
+# ---- guard additions, item 1: protected files for the file tools ---------------
+
+
+def file_payload(tool, tool_input, cwd="/"):
+    return json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input, "cwd": cwd})
+
+
+@pytest.fixture
+def skill_with_cases(skill_dir, tmp_path_factory):
+    cases = tmp_path_factory.mktemp("cases")
+    config_path = skill_dir / "config" / "triage-config.yaml"
+    data = yaml.safe_load(config_path.read_text())
+    data["cases_dir"] = str(cases)
+    config_path.write_text(yaml.safe_dump(data))
+    run = cases / "INC-7" / "20261004-120000"
+    (run / "evidence").mkdir(parents=True)
+    return skill_dir, run
+
+
+@pytest.mark.parametrize("tool, key", [("Write", "file_path"), ("Edit", "file_path"), ("MultiEdit", "file_path"),
+                                       ("NotebookEdit", "notebook_path")])
+def test_file_tools_on_protected_paths_are_denied(skill_with_cases, tool, key):
+    skill, run = skill_with_cases
+    for target in (run / "evidence" / "ecs.json", run / "case.json", skill / "config" / "service-map.yaml"):
+        result = decision(guard_hook.evaluate(file_payload(tool, {key: str(target)}), skill))
+        assert result["permissionDecision"] == "deny", target
+        assert "instead" in result["permissionDecisionReason"]
+
+
+def test_file_tools_use_the_hook_cwd_for_relative_paths(skill_with_cases):
+    skill, run = skill_with_cases
+    result = decision(guard_hook.evaluate(file_payload("Edit", {"file_path": "case.json"}, str(run)), skill))
+    assert result["permissionDecision"] == "deny"
+    assert guard_hook.evaluate(file_payload("Write", {"file_path": "report.json"}, str(run)), skill) == ""
+
+
+def test_file_tools_on_other_paths_print_nothing(skill_with_cases, tmp_path_factory):
+    skill, run = skill_with_cases
+    elsewhere = tmp_path_factory.mktemp("project")
+    assert guard_hook.evaluate(file_payload("Write", {"file_path": str(run / "report.json")}), skill) == ""
+    assert guard_hook.evaluate(file_payload("Write", {"file_path": str(elsewhere / "notes.md")}), skill) == ""
+
+
+@pytest.mark.parametrize("tool_input", [{}, {"file_path": 3}, {"file_path": "a\u0000b"}, "text"])
+def test_file_tools_with_an_unreadable_path_ask(skill_with_cases, tool_input):
+    skill, _run = skill_with_cases
+    result = decision(guard_hook.evaluate(file_payload("Write", tool_input), skill))
+    assert result["permissionDecision"] == "ask"
+
+
+def test_file_tools_still_protect_the_skill_folder_without_a_config(tmp_path):
+    result = decision(guard_hook.evaluate(file_payload("Write", {"file_path": str(tmp_path / "SKILL.md")}), tmp_path))
+    assert result["permissionDecision"] == "deny"
+
+
+def test_read_is_still_ignored(skill_with_cases):
+    skill, run = skill_with_cases
+    assert guard_hook.evaluate(file_payload("Read", {"file_path": str(run / "case.json")}), skill) == ""

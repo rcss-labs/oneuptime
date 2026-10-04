@@ -2,8 +2,10 @@
 """PreToolUse hook entry point for the AI Triage guard.
 
 Reads the hook input JSON on stdin and prints a permission decision, or
-nothing when the guard has no opinion. It never exits non-zero: any internal
-error becomes a deny for commands that touch aws or kubectl.
+nothing when the guard has no opinion. Bash commands go to the command guard;
+Write, Edit, MultiEdit and NotebookEdit go to the protected-files check. It
+never exits non-zero: an internal error becomes a deny for commands that touch
+aws or kubectl, and an ask for a file tool.
 """
 from __future__ import annotations
 
@@ -16,7 +18,8 @@ from typing import Mapping
 
 from triage.config import ConfigError, default_config_path, load_config
 from triage.guard import context_from_config, decide
-from triage.verdict import DENY, PASS, Verdict
+from triage.guard_paths import FILE_TOOLS, decide_file_tool, protected_roots
+from triage.verdict import ASK, DENY, PASS, Verdict
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 # Used when the guard cannot understand its input. No word boundaries: a false deny is
@@ -50,6 +53,17 @@ def _fail_closed(stdin_text: str, reason: str) -> str:
     return render(Verdict(DENY, reason) if FALLBACK_RE.search(stdin_text) else Verdict(PASS))
 
 
+def _file_tool_verdict(tool: str, payload: dict, skill_dir: Path) -> Verdict:
+    try:
+        try:
+            cases_dir = str(load_config(default_config_path(skill_dir)).cases_dir)
+        except ConfigError:
+            cases_dir = ""  # the default case root and the skill folder are still protected
+        return decide_file_tool(tool, payload.get("tool_input"), payload.get("cwd"), protected_roots(str(skill_dir), cases_dir))
+    except Exception as exc:  # a file tool the guard cannot judge goes to the engineer
+        return Verdict(ASK, f"internal error while checking {tool} ({exc})")
+
+
 def evaluate(stdin_text: str, skill_dir: Path) -> str:
     try:
         try:
@@ -58,7 +72,10 @@ def evaluate(stdin_text: str, skill_dir: Path) -> str:
             return _fail_closed(stdin_text, "unreadable hook input")
         if not isinstance(payload, dict):
             return _fail_closed(stdin_text, "unexpected hook input")
-        if payload.get("tool_name") != "Bash":
+        tool = payload.get("tool_name")
+        if isinstance(tool, str) and tool in FILE_TOOLS:
+            return render(_file_tool_verdict(tool, payload, skill_dir))
+        if tool != "Bash":
             return ""
         tool_input = payload.get("tool_input")
         if not isinstance(tool_input, dict):
