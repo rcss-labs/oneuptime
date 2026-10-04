@@ -436,3 +436,22 @@ def test_an_equals_after_quoted_text_or_escaped_stays_literal():
 def test_a_separator_needs_a_command_on_both_sides(command):
     with pytest.raises(Unparseable):
         split_command(command)
+
+
+# ---- guard additions, item 4: a segment with no command word -------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["aws x | >/dev/null", "aws x | > out", "aws x && 2>/dev/null", ">/dev/null", "2>/dev/null | aws x",
+     "aws x | &>/dev/null", "FOO=1", "aws x && FOO=1 >/dev/null"],
+)
+def test_a_segment_without_a_command_word_is_unparseable(command):
+    # zsh runs its null command (cat) for a segment that is only redirects
+    with pytest.raises(Unparseable):
+        split_command(command)
+
+
+def test_a_leading_redirect_before_the_command_word_is_still_fine():
+    assert split_command("&> f echo a")[0].argv == ("echo", "a")
+    assert split_command(">/dev/null aws x | jq .")[0].argv == ("aws", "x")

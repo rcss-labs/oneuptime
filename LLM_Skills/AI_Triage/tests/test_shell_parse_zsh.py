@@ -3,7 +3,8 @@
 A stand-in program records the argv zsh passes to it. For every generated string
 that split_command accepts as one simple command, the scanner's argv must equal
 the recorded argv, and a redirect the scanner calls harmless must leave the
-working directory untouched. The stand-in is first on PATH under the names aws
+working directory untouched. Pipelines and && lists are compared too, as the
+set of argvs every stand-in process received. The stand-in is first on PATH under the names aws
 and kubectl, so no real aws or kubectl can run from this test.
 """
 from __future__ import annotations
@@ -88,7 +89,8 @@ def write_stand_ins(bin_dir: Path) -> None:
     bin_dir.mkdir()
     for name in STAND_IN_NAMES:
         script = bin_dir / name
-        script.write_text(f"#!{STAND_IN_SHELL}\nprintf '%s\\0' {name} \"$@\" > \"$ARGV_LOG\"\n")
+        # One log file per process, so every command of a pipeline leaves its own record.
+        script.write_text(f"#!{STAND_IN_SHELL}\nprintf '%s\\0' {name} \"$@\" > \"$ARGV_LOG.$$\"\n")
         script.chmod(0o755)
 
 
@@ -110,18 +112,19 @@ class ZshRunner:
 
     def __init__(self, root: Path, bin_dir: Path, home: Path, worker: int) -> None:
         self.cwd = root / f"cwd-{worker}"
-        self.log = root / f"argv-{worker}.log"
+        self.logs = root / f"argv-{worker}"
+        self.logs.mkdir()
         reset_directory(self.cwd)
-        base = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(home), "ARGV_LOG": str(self.log),
+        base = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(home), "ARGV_LOG": str(self.logs / "argv"),
                 "LANG": os.environ.get("LANG", "en_US.UTF-8")}
         # -f skips every startup file; the second mode reads them, from an empty ZDOTDIR.
         self.modes = {"zsh -f": ([ZSH, "-f", "-c"], base), "zsh": ([ZSH, "-c"], {**base, "ZDOTDIR": str(home)})}
 
-    def run(self, mode: str, command: str) -> tuple[tuple[str, ...] | None, bool, str]:
-        """Return the argv the stand-in saw (None if it did not run), whether the folder changed, and stderr."""
+    def run(self, mode: str, command: str) -> tuple[list[tuple[str, ...]], bool, str]:
+        """Return the argvs the stand-ins saw (sorted, one per process), whether the folder changed, and stderr."""
         prefix, env = self.modes[mode]
-        if self.log.exists():
-            self.log.unlink()
+        for log in self.logs.iterdir():
+            log.unlink()
         before = snapshot(self.cwd)
         result = subprocess.run(prefix + [command], cwd=self.cwd, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=TIMEOUT_SECONDS,
@@ -130,9 +133,8 @@ class ZshRunner:
         if changed:
             reset_directory(self.cwd)
         stderr = result.stderr.decode(errors="replace").lower()
-        if not self.log.exists():
-            return None, changed, stderr
-        return tuple(self.log.read_text().split("\0")[:-1]), changed, stderr
+        argvs = sorted(tuple(log.read_text().split("\0")[:-1]) for log in self.logs.iterdir())
+        return argvs, changed, stderr
 
     def whence(self, mode: str, name: str) -> str:
         prefix, env = self.modes[mode]
@@ -160,7 +162,8 @@ def _differences(runner: ZshRunner, cases: list[tuple[str, tuple[str, ...], bool
     found = []
     for command, argv, writes_file in cases:
         for mode in runner.modes:
-            seen, changed, stderr = runner.run(mode, command)
+            argvs, changed, stderr = runner.run(mode, command)
+            seen = argvs[0] if len(argvs) == 1 else None
             if seen is None and writes_file and any(error in stderr for error in UNWRITABLE_TARGET_ERRORS):
                 continue  # a write the guard never allows anyway, aimed at a path outside the test folder
             if seen != argv:
@@ -182,5 +185,39 @@ def test_scanner_argv_matches_zsh_for_every_accepted_string(runners):
     slices = [accepted[worker::WORKERS] for worker in range(WORKERS)]
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         results = pool.map(_differences, runners, slices)
+    mismatches = [line for found in results for line in found]
+    assert not mismatches, f"{len(mismatches)} mismatches:\n" + "\n".join(mismatches[:60])
+
+
+# Pipelines and && lists, compared as the multiset of argvs every stand-in process received.
+PIPELINE_SIDES = ["aws get", "kubectl 'a b'", "aws -n 2>/dev/null", "kubectl >/dev/null get", ">/dev/null",
+                  "2>/dev/null", "&>/dev/null", "> out", "FOO=1", "FOO=1 >/dev/null", "aws <->", "kubectl \\\n x"]
+
+
+def build_pipeline_corpus() -> list[str]:
+    return sorted({f"{left} {separator} {right}" for left, right in itertools.product(PIPELINE_SIDES, repeat=2)
+                   for separator in ("|", "&&")})
+
+
+def _pipeline_differences(runner: ZshRunner, commands: list[str]) -> list[str]:
+    found = []
+    for command in commands:
+        try:
+            segments = split_command(command)
+        except Unparseable:
+            continue
+        expected = sorted(segment.argv for segment in segments)
+        for mode in runner.modes:
+            argvs, _changed, _stderr = runner.run(mode, command)
+            if argvs != expected:
+                found.append(f"{mode}: {command!r}\n    scanner {expected!r}\n    zsh     {argvs!r}")
+    return found
+
+
+def test_every_pipeline_segment_matches_what_zsh_runs(runners):
+    corpus = build_pipeline_corpus()
+    slices = [corpus[worker::WORKERS] for worker in range(WORKERS)]
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        results = pool.map(_pipeline_differences, runners, slices)
     mismatches = [line for found in results for line in found]
     assert not mismatches, f"{len(mismatches)} mismatches:\n" + "\n".join(mismatches[:60])

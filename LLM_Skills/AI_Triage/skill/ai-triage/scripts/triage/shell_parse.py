@@ -236,7 +236,10 @@ def split_command(command: str) -> list[Segment]:
         env: list[str] = []
         while words and _is_assignment(words[0]):
             env.append(words.pop(0).text)
-        if words or env or writes_file:
+        if (env or has_redirect) and not words:
+            # zsh runs its null command (cat) for redirects alone and changes its own state for assignments alone
+            raise Unparseable("a command with no command word")
+        if words:
             segments.append(Segment(tuple(w.text for w in words), tuple(env), writes_file, preceded_by))
         words, writes_file, has_redirect, preceded_by = [], False, False, next_separator
 
