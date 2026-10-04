@@ -27,15 +27,11 @@ class OpenSearchError(Exception):
         super().__init__(message)
 
 
-class SameHostRedirects(urllib.request.HTTPRedirectHandler):
-    """Follow a redirect only when scheme, host and port stay the same."""
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect: a cluster does not redirect, and a followed one skips the read policy."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-        before = urlsplit(req.full_url)
-        after = urlsplit(newurl)
-        if (before.scheme, before.hostname, before.port) != (after.scheme, after.hostname, after.port):
-            raise OpenSearchError(f"refused a redirect (HTTP {code}) to {after.scheme}://{after.netloc}")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        raise OpenSearchError(f"refused a redirect (HTTP {code}) to {urlsplit(newurl).netloc or newurl}")
 
 
 def build_ssl_context(verify_tls: bool, ca_bundle: str | None) -> ssl.SSLContext:
@@ -44,6 +40,14 @@ def build_ssl_context(verify_tls: bool, ca_bundle: str | None) -> ssl.SSLContext
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
     return context
+
+
+def _read_whole(response: Any) -> str:
+    """Read the response; raise rather than return a body that was cut short."""
+    data = response.read(MAX_RESPONSE_BYTES + 1)
+    if len(data) > MAX_RESPONSE_BYTES:
+        raise OpenSearchError(f"response was too large (over {MAX_RESPONSE_BYTES} bytes)")
+    return data.decode("utf-8", errors="replace")
 
 
 def urllib_transport(
@@ -55,12 +59,12 @@ def urllib_transport(
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         opener = urllib.request.build_opener(
-            SameHostRedirects(), urllib.request.HTTPSHandler(context=build_ssl_context(verify_tls, ca_bundle))
+            NoRedirects(), urllib.request.HTTPSHandler(context=build_ssl_context(verify_tls, ca_bundle))
         )
         with opener.open(request, timeout=timeout_seconds) as response:
-            return response.status, response.read(MAX_RESPONSE_BYTES).decode("utf-8", errors="replace")
+            return response.status, _read_whole(response)
     except urllib.error.HTTPError as error:
-        return error.code, error.read(MAX_RESPONSE_BYTES).decode("utf-8", errors="replace")
+        return error.code, _read_whole(error)
     except OpenSearchError:
         raise
     except (OSError, ValueError) as error:  # URLError, ssl.SSLError and timeouts are OSError

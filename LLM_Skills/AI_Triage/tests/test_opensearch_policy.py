@@ -149,11 +149,11 @@ BODY_REFUSALS = [
     ("bool without filter", valid_body(query={"bool": {"must": []}}), "time range"),
     ("filter not a list", valid_body(query={"bool": {"filter": {"range": {}}}}), "time range"),
     ("range on another field",
-     valid_body(query={"bool": {"filter": [{"range": {"timestamp": {"gte": START, "lte": END}}}]}}), "time range"),
+     valid_body(query={"bool": {"filter": [{"range": {"timestamp": {"gte": START, "lte": END}}}]}}), "range"),
     ("missing lte", with_range(gte=START), "time range"),
     ("missing gte", with_range(lte=END), "time range"),
-    ("extra range key", with_range(gte=START, lte=END, time_zone="+05:00"), "time range"),
-    ("lt instead of lte", with_range(gte=START, lt=END), "time range"),
+    ("extra range key", with_range(gte=START, lte=END, time_zone="+05:00"), "range"),
+    ("lt instead of lte", with_range(gte=START, lt=END), "range"),
     ("relative time", with_range(gte="now-1h", lte="now"), "time"),
     ("no Z suffix", with_range(gte="2026-10-04T10:00:00", lte="2026-10-04T12:00:00"), "time"),
     ("offset instead of Z", with_range(gte="2026-10-04T10:00:00+00:00", lte=END), "time"),
@@ -202,7 +202,7 @@ def test_count_still_needs_the_time_range(cluster):
 def test_extra_filters_next_to_the_time_range_are_allowed(cluster):
     body = valid_body()
     body["query"]["bool"]["filter"].append({"term": {"level": "error"}})
-    body["query"]["bool"]["must"] = [{"query_string": {"query": "timeout"}}]
+    body["query"]["bool"]["must"] = [{"query_string": {"query": "timeout", "allow_leading_wildcard": False}}]
     check_request(Request("POST", f"{INDEX}/_search", {}, body), cluster, LIMITS)
 
 
@@ -341,6 +341,161 @@ def test_search_body_uses_the_cluster_time_field(config_data):
 
 
 def test_search_body_cannot_be_used_to_smuggle_a_forbidden_key(cluster):
-    body = search_body(cluster, WINDOW, LIMITS, aggs={"x": {"scripted_metric": {}}})
     with pytest.raises(Refused):
-        passes_check(cluster, body)
+        search_body(cluster, WINDOW, LIMITS, aggs={"x": {"scripted_metric": {}}})
+
+
+# ---- the body check is an allow-list ----
+
+TERMS = {"by_level": {"terms": {"field": "level", "size": 5}}}
+HISTOGRAM = {"over_time": {"date_histogram": {"field": "@timestamp", "fixed_interval": "5m", "min_doc_count": 1}}}
+
+
+def query_with(*filters, must=None):
+    bool_query = {"filter": [{"range": {"@timestamp": {"gte": START, "lte": END}}}, *filters]}
+    if must is not None:
+        bool_query["must"] = must
+    return {"query": {"bool": bool_query}}
+
+
+def search_refusal(cluster, body):
+    with pytest.raises(Refused) as caught:
+        check_request(Request("POST", f"{INDEX}/_search", {}, body), cluster, LIMITS)
+    return str(caught.value).lower()
+
+
+ALLOW_LIST_REFUSALS = [
+    ("global aggregation", valid_body(aggs={"all": {"global": {}}}), "global"),
+    ("significant_terms", valid_body(aggs={"s": {"significant_terms": {"field": "a"}}}), "significant_terms"),
+    ("cardinality aggregation", valid_body(aggs={"c": {"cardinality": {"field": "a"}}}), "cardinality"),
+    ("suggest", valid_body(suggest={"s": {"text": "x"}}), "suggest"),
+    ("from", valid_body(**{"from": 10000}), "from"),
+    ("collapse", valid_body(collapse={"field": "host"}), "collapse"),
+    ("highlight", valid_body(highlight={"fields": {"*": {}}}), "highlight"),
+    ("profile", valid_body(profile=True), "profile"),
+    ("search_after", valid_body(search_after=[1]), "search_after"),
+    ("timeout -1", valid_body(timeout="-1"), "timeout"),
+    ("timeout 1000d", valid_body(timeout="1000d"), "timeout"),
+    ("timeout above the limit", valid_body(timeout="11s"), "timeout"),
+    ("timeout in ms above the limit", valid_body(timeout="10001ms"), "timeout"),
+    ("timeout zero", valid_body(timeout="0s"), "timeout"),
+    ("timeout with trailing text", valid_body(timeout="5s;x"), "timeout"),
+    ("timeout not a string", valid_body(timeout=5), "timeout"),
+    ("minimum_should_match_script", valid_body(query={"bool": {"filter": valid_body()["query"]["bool"]["filter"], "minimum_should_match_script": {}}}), "minimum_should_match_script"),
+    ("should clause", valid_body(query={"bool": {"filter": valid_body()["query"]["bool"]["filter"], "should": [{"term": {"a": "b"}}]}}), "should"),
+    ("must_not clause", valid_body(query={"bool": {"filter": valid_body()["query"]["bool"]["filter"], "must_not": []}}), "must_not"),
+    ("regexp in filter", valid_body(**query_with({"regexp": {"msg": ".*a.*b.*"}})), "regexp"),
+    ("wildcard in filter", valid_body(**query_with({"wildcard": {"msg": "*foo*"}})), "wildcard"),
+    ("prefix in filter", valid_body(**query_with({"prefix": {"msg": "a"}})), "prefix"),
+    ("terms in filter", valid_body(**query_with({"terms": {"msg": ["a"]}})), "terms"),
+    ("second range", valid_body(**query_with({"range": {"@timestamp": {"gte": START, "lte": END}}})), "range"),
+    ("range on another field as the extra range", valid_body(**query_with({"range": {"bytes": {"gte": 1}}})), "range"),
+    ("term with a list value", valid_body(**query_with({"term": {"a": ["x"]}})), "term"),
+    ("term with two fields", valid_body(**query_with({"term": {"a": "x", "b": "y"}})), "term"),
+    ("exists with extra key", valid_body(**query_with({"exists": {"field": "a", "boost": 2}})), "exists"),
+    ("two must clauses", valid_body(**query_with(must=[{"query_string": {"query": "a", "allow_leading_wildcard": False}}] * 2)), "must"),
+    ("must is not query_string", valid_body(**query_with(must=[{"match_all": {}}])), "must"),
+    ("query_string with leading wildcards allowed", valid_body(**query_with(must=[{"query_string": {"query": "*a", "allow_leading_wildcard": True}}])), "allow_leading_wildcard"),
+    ("query_string without allow_leading_wildcard", valid_body(**query_with(must=[{"query_string": {"query": "a"}}])), "allow_leading_wildcard"),
+    ("query_string with an extra key", valid_body(**query_with(must=[{"query_string": {"query": "a", "allow_leading_wildcard": False, "fuzziness": 5}}])), "fuzziness"),
+    ("query_string too long", valid_body(**query_with(must=[{"query_string": {"query": "a" * 501, "allow_leading_wildcard": False}}])), "500"),
+    ("query_string not a string", valid_body(**query_with(must=[{"query_string": {"query": 1, "allow_leading_wildcard": False}}])), "query"),
+    ("range with an extra key", with_range(gte=START, lte=END, boost=2), "range"),
+    ("sort on another field", valid_body(sort=[{"host": {"order": "asc"}}]), "sort"),
+    ("sort with two entries", valid_body(sort=[{"@timestamp": {"order": "asc"}}] * 2), "sort"),
+    ("sort with a bad order", valid_body(sort=[{"@timestamp": {"order": "sideways"}}]), "sort"),
+    ("sort script", valid_body(sort=[{"_script": {"type": "number"}}]), "sort"),
+    ("_source true", valid_body(_source=True), "_source"),
+    ("_source with 21 fields", valid_body(_source=[f"f{n}" for n in range(21)]), "_source"),
+    ("_source with a non-string", valid_body(_source=["a", 1]), "_source"),
+    ("aggs not a dict", valid_body(aggs=[TERMS]), "aggs"),
+    ("a fourth aggregation", valid_body(aggs={f"a{n}": {"terms": {"field": "f", "size": 5}} for n in range(4)}), "aggs"),
+    ("terms size over 50", valid_body(aggs={"t": {"terms": {"field": "f", "size": 51}}}), "size"),
+    ("terms size zero", valid_body(aggs={"t": {"terms": {"field": "f", "size": 0}}}), "size"),
+    ("terms without size", valid_body(aggs={"t": {"terms": {"field": "f"}}}), "size"),
+    ("terms with an extra key", valid_body(aggs={"t": {"terms": {"field": "f", "size": 5, "include": ".*"}}}), "include"),
+    ("terms with a non-string field", valid_body(aggs={"t": {"terms": {"field": 1, "size": 5}}}), "field"),
+    ("nested aggregation", valid_body(aggs={"t": {"terms": {"field": "f", "size": 5}, "aggs": {"u": {"terms": {"field": "g", "size": 5}}}}}), "nested"),
+    ("two aggregation types in one", valid_body(aggs={"t": {"terms": {"field": "f", "size": 5}, "date_histogram": {}}}), "aggs"),
+    ("histogram interval 1s", valid_body(aggs={"h": {"date_histogram": {"field": "@timestamp", "fixed_interval": "1s"}}}), "interval"),
+    ("histogram without an interval", valid_body(aggs={"h": {"date_histogram": {"field": "@timestamp"}}}), "interval"),
+    ("histogram calendar interval", valid_body(aggs={"h": {"date_histogram": {"field": "@timestamp", "calendar_interval": "day"}}}), "calendar_interval"),
+    ("histogram on another field", valid_body(aggs={"h": {"date_histogram": {"field": "other", "fixed_interval": "5m"}}}), "field"),
+    ("histogram min_doc_count negative", valid_body(aggs={"h": {"date_histogram": {"field": "@timestamp", "fixed_interval": "5m", "min_doc_count": -1}}}), "min_doc_count"),
+    ("histogram extra bounds", valid_body(aggs={"h": {"date_histogram": {"field": "@timestamp", "fixed_interval": "5m", "extended_bounds": {}}}}), "extended_bounds"),
+]
+
+
+@pytest.mark.parametrize("label,body,fragment", ALLOW_LIST_REFUSALS, ids=[row[0] for row in ALLOW_LIST_REFUSALS])
+def test_allow_list_refusals(cluster, label, body, fragment):
+    assert fragment.lower() in search_refusal(cluster, body)
+
+
+def test_count_accepts_only_a_query(cluster):
+    for extra in ({"size": 1}, {"aggs": TERMS}, {"timeout": "5s"}, {"sort": []}):
+        body = dict(count_body(), **extra)
+        with pytest.raises(Refused) as caught:
+            check_request(Request("POST", f"{INDEX}/_count", {}, body), cluster, LIMITS)
+        assert next(iter(extra)) in str(caught.value)
+
+
+def test_explain_accepts_only_index_shard_and_primary(cluster):
+    with pytest.raises(Refused) as caught:
+        check_request(
+            Request("POST", "_cluster/allocation/explain", {}, {"index": INDEX, "current_node": "n1"}), cluster, LIMITS
+        )
+    assert "current_node" in str(caught.value)
+
+
+ALLOW_LIST_ACCEPTED = [
+    ("term, exists and query_string", valid_body(**query_with(
+        {"term": {"level": "error"}}, {"term": {"status": 500}}, {"term": {"ok": False}}, {"exists": {"field": "trace.id"}},
+        must=[{"query_string": {"query": "a" * 500, "default_field": "message", "allow_leading_wildcard": False,
+                                "lenient": True, "default_operator": "AND"}}]))),
+    ("range with format", with_range(gte=START, lte=END, format="strict_date_time_no_millis")),
+    ("terms aggregation", valid_body(aggs=TERMS)),
+    ("histogram aggregation", valid_body(aggs=HISTOGRAM)),
+    ("histogram without min_doc_count", valid_body(aggs={"h": {"date_histogram": {"field": "@timestamp", "fixed_interval": "1h"}}})),
+    ("three aggregations", valid_body(aggs={**TERMS, **HISTOGRAM, "c": {"terms": {"field": "host", "size": 50}}})),
+    ("_source false", valid_body(_source=False)),
+    ("_source list", valid_body(_source=[f"f{n}" for n in range(20)])),
+    ("sort desc", valid_body(sort=[{"@timestamp": {"order": "desc"}}])),
+    ("timeout in ms", valid_body(timeout="10000ms")),
+]
+
+
+@pytest.mark.parametrize("label,body", ALLOW_LIST_ACCEPTED, ids=[row[0] for row in ALLOW_LIST_ACCEPTED])
+def test_allow_list_accepts_what_the_tool_builds(cluster, label, body):
+    check_request(Request("POST", f"{INDEX}/_search", {}, body), cluster, LIMITS)
+
+
+def test_search_body_with_every_allowed_option_passes_the_check(cluster):
+    body = search_body(
+        cluster, WINDOW, LIMITS, query_string="timeout", filters={"level": "error"}, size=50, aggs={**TERMS, **HISTOGRAM}
+    )
+    passes_check(cluster, body)
+
+
+def test_search_body_refuses_a_window_longer_than_the_limit(cluster):
+    long_window = Window(WINDOW.start, datetime(2026, 10, 4, 17, 0, tzinfo=timezone.utc))
+    with pytest.raises(Refused, match="hours"):
+        search_body(cluster, long_window, LIMITS)
+
+
+@pytest.mark.parametrize(
+    "aggs",
+    [
+        {"h": {"date_histogram": {"field": "@timestamp", "fixed_interval": "10s"}}},
+        {"t": {"terms": {"field": "f", "size": 500}}},
+        {"g": {"global": {}}},
+        {"t": {"terms": {"field": "f", "size": 5}, "aggs": {"u": {"terms": {"field": "g", "size": 5}}}}},
+    ],
+)
+def test_search_body_refuses_aggregations_outside_the_two_shapes(cluster, aggs):
+    with pytest.raises(Refused):
+        search_body(cluster, WINDOW, LIMITS, aggs=aggs)
+
+
+def test_search_body_refuses_an_overlong_query_string(cluster):
+    with pytest.raises(Refused, match="500"):
+        search_body(cluster, WINDOW, LIMITS, query_string="a" * 501)

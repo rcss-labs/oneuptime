@@ -1,5 +1,7 @@
+import http.server
 import json
 import ssl
+import threading
 import urllib.request
 
 import pytest
@@ -9,7 +11,8 @@ from triage.opensearch import client as client_module
 from triage.opensearch.client import (
     OpenSearchClient,
     OpenSearchError,
-    SameHostRedirects,
+    NoRedirects,
+    urllib_transport,
     build_ssl_context,
 )
 from triage.opensearch.policy import Request
@@ -183,22 +186,87 @@ def redirect(handler, target):
     return handler.redirect_request(request, None, 302, "Found", {}, target)
 
 
-def test_a_redirect_to_another_host_is_refused():
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://elsewhere.example.com/_nodes",
+        "http://opensearch.internal.example.com/_nodes",
+        "https://opensearch.internal.example.com/app-logs-1/_flush",
+    ],
+)
+def test_every_redirect_is_refused(target):
     with pytest.raises(OpenSearchError) as caught:
-        redirect(SameHostRedirects(), "https://elsewhere.example.com/_nodes")
+        redirect(NoRedirects(), target)
     assert caught.value.status is None
     assert "redirect" in str(caught.value).lower()
 
 
-@pytest.mark.parametrize(
-    "target",
-    ["http://opensearch.internal.example.com/_nodes", "https://opensearch.internal.example.com:9200/_nodes"],
-)
-def test_a_redirect_that_changes_scheme_or_port_is_refused(target):
-    with pytest.raises(OpenSearchError):
-        redirect(SameHostRedirects(), target)
+class LocalServer:
+    """A loopback HTTP server, so that urllib_transport meets real HTTP without any outside network."""
+
+    def __init__(self, handler):
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return f"http://127.0.0.1:{self.server.server_port}"
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
 
 
-def test_a_redirect_on_the_same_host_is_followed():
-    followed = redirect(SameHostRedirects(), "https://opensearch.internal.example.com/_cluster/health")
-    assert followed.full_url == "https://opensearch.internal.example.com/_cluster/health"
+def handler_for(status, body=b"", headers=None):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(status)
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    return Handler
+
+
+def test_the_real_transport_returns_status_and_text():
+    with LocalServer(handler_for(200, b'{"ok": true}')) as base:
+        assert urllib_transport("GET", base + "/_nodes", None, 5, True, None) == (200, '{"ok": true}')
+
+
+def test_the_real_transport_returns_an_http_error_status():
+    with LocalServer(handler_for(404, b"missing")) as base:
+        assert urllib_transport("GET", base + "/_nodes", None, 5, True, None) == (404, "missing")
+
+
+def test_the_real_transport_refuses_a_redirect():
+    with LocalServer(handler_for(302, headers={"Location": "/app-logs-1/_flush"})) as base:
+        with pytest.raises(OpenSearchError) as caught:
+            urllib_transport("GET", base + "/_nodes", None, 5, True, None)
+    assert caught.value.status is None
+    assert "redirect" in str(caught.value).lower()
+
+
+def test_a_response_over_the_size_limit_raises_and_is_never_cut_short(monkeypatch):
+    monkeypatch.setattr(client_module, "MAX_RESPONSE_BYTES", 100)
+    with LocalServer(handler_for(200, b"x" * 101)) as base:
+        with pytest.raises(OpenSearchError, match="too large"):
+            urllib_transport("GET", base + "/_nodes", None, 5, True, None)
+
+
+def test_a_response_at_the_size_limit_is_returned_whole(monkeypatch):
+    monkeypatch.setattr(client_module, "MAX_RESPONSE_BYTES", 100)
+    with LocalServer(handler_for(200, b"x" * 100)) as base:
+        assert urllib_transport("GET", base + "/_nodes", None, 5, True, None) == (200, "x" * 100)
+
+
+def test_a_connection_failure_raises_with_no_status():
+    with LocalServer(handler_for(200)) as base:
+        pass
+    with pytest.raises(OpenSearchError) as caught:
+        urllib_transport("GET", base + "/_nodes", None, 2, True, None)
+    assert caught.value.status is None
