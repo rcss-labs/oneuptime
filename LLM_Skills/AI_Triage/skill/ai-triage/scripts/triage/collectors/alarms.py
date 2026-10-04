@@ -10,6 +10,7 @@ from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
 from triage.window import format_time
 
+INVALID_TARGET = "InvalidTarget"
 MAX_ALARMS = 50
 MAX_HISTORY_ALARMS = 20
 MAX_HISTORY_ITEMS = "20"
@@ -106,7 +107,12 @@ def _first_alarm_text(fired: list[tuple[datetime, str, bool]]) -> str | None:
 
 
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
-    names, prefix = split_csv(targets.get("alarm_names")), targets.get("name_prefix") or None
+    names, prefix = split_csv(targets.get("alarm_names")), (targets.get("name_prefix") or "").strip() or None
+    for key in ("alarm_names", "name_prefix"):
+        if key in targets and not (names if key == "alarm_names" else prefix):
+            ctx.evidence.add_error("", INVALID_TARGET, f"target {key} has no usable value, so it was not used")
+    if not names and not prefix:
+        return
     alarms = _describe(ctx, names, prefix)
     if not alarms:
         ctx.evidence.add(kind=CURRENT, resource="alarms", summary="No alarms were found for the given names or prefix")
@@ -135,7 +141,7 @@ COLLECTOR = Collector(
     name="alarms",
     description="CloudWatch alarm state, state changes in the window, and which alarm fired first",
     required=(),
-    optional=(),
+    optional=("alarm_names", "name_prefix"),
     run=collect,
     one_of=("alarm_names", "name_prefix"),
 )

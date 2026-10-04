@@ -31,7 +31,7 @@ def run(config_data, tmp_path, answers, targets):
 def test_declares_its_targets():
     assert COLLECTOR.name == "alarms"
     assert COLLECTOR.required == ()
-    assert COLLECTOR.optional == ()
+    assert COLLECTOR.optional == ("alarm_names", "name_prefix")
     assert COLLECTOR.one_of == ("alarm_names", "name_prefix")
 
 
@@ -243,3 +243,17 @@ def test_metric_alarms_get_history_before_composites_and_left_out_alarms_are_sai
     assert all(f"m{i}" in asked for i in range(18))
     note = [f for f in ctx.evidence.facts if f.kind == "derived" and "history" in f.summary and "left out" in f.summary]
     assert len(note) == 1 and "3" in note[0].summary
+
+
+def test_blank_prefix_beside_names_is_rejected_not_queried(config_data, tmp_path):
+    answers = {"cloudwatch describe-alarms": {"MetricAlarms": [alarm("cpu-high")]},
+               "cloudwatch describe-alarm-history": {"AlarmHistoryItems": []}}
+    ctx, aws = run(config_data, tmp_path, answers, {"alarm_names": "cpu-high", "name_prefix": "  "})
+    assert all("--alarm-name-prefix" not in call for call in aws.called("cloudwatch", "describe-alarms"))
+    assert ctx.evidence.errors and ctx.evidence.errors[0]["code"] == "InvalidTarget"
+
+
+def test_names_with_only_commas_make_no_query(config_data, tmp_path):
+    ctx, aws = run(config_data, tmp_path, {}, {"alarm_names": " , ,"})
+    assert not aws.calls
+    assert ctx.evidence.errors and ctx.evidence.errors[0]["code"] == "InvalidTarget"
