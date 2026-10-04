@@ -138,3 +138,49 @@ def test_environment_secrets_never_reach_the_document(config_data, tmp_path):
     document = ctx.evidence.to_json()
     assert password not in document and url_secret not in document
     assert "DB_PASSWORD" in document and "db.example.com" in document
+
+
+def test_values_under_innocent_names_never_reach_the_document(config_data, tmp_path):
+    values = {
+        "SIGNING_SALT": "q9Zr7Lm2" + "Xc4Vb8Nt",
+        "STRIPE_KEY": "rk_prod_" + "a1b2c3d4e5f6",
+        "UPSTREAM_HEADER": "Basic " + "dXNlcjpwYXNz",
+        "HMAC": "f00dface" + "cafe1234",
+    }
+    variables = {**values, "LOG_LEVEL": "info", "QUEUE_URL": "https://sqs.example.com/orders?x=" + "z" * 12}
+    ctx, _, _ = run(config_data, tmp_path, answers(**{
+        "lambda get-function-configuration": configuration(Environment={"Variables": variables})}))
+    document = ctx.evidence.to_json()
+    for value in values.values():
+        assert value not in document
+    for name in values:
+        assert name in document
+    assert ctx.evidence.facts[0].data["environment"]["LOG_LEVEL"] == "info"
+    assert ctx.evidence.facts[0].data["environment"]["QUEUE_URL"] == "https://sqs.example.com"
+
+
+def test_access_denied_on_the_configuration_is_not_reported_as_not_found(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, answers(**{
+        "lambda get-function-configuration": access_denied("GetFunctionConfiguration")}))
+    assert ctx.evidence.facts == []
+    assert ctx.evidence.errors[0]["code"] == "AccessDeniedException"
+
+
+def test_not_found_names_the_region(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, answers(**{
+        "lambda get-function-configuration": (254, "An error occurred (ResourceNotFoundException) when calling the GetFunctionConfiguration operation: Function not found")}))
+    assert "eu-west-1" in ctx.evidence.facts[0].summary
+
+
+def test_missing_optional_fields_are_left_out(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, answers(**{
+        "lambda list-event-source-mappings": {"EventSourceMappings": [
+            {"UUID": "m", "EventSourceArn": "arn:aws:sqs:eu-west-1:111111111111:q", "State": "Enabled"}]}}))
+    assert "None" not in with_text(ctx, "Event source mapping")[0].summary
+
+
+def test_metrics_use_the_bare_function_name_when_given_an_arn(config_data, tmp_path):
+    ctx, aws, _ = make_context(config_data, tmp_path, answers(), collector="lambda")
+    COLLECTOR.run(ctx, {"function": "arn:aws:lambda:eu-west-1:111111111111:function:orders-worker"})
+    call = aws.called("cloudwatch", "get-metric-data")[0]
+    assert '"Value": "orders-worker"' in call[call.index("--metric-data-queries") + 1]
