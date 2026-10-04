@@ -204,3 +204,22 @@ def test_a_corrupt_case_json_exits_2_in_one_line(skill_dir, case_dir, subcommand
 def test_a_run_folder_that_cannot_be_created_exits_2(skill_dir, tmp_path):
     (tmp_path / "cases").write_text("a file")
     assert_clean_exit_2(run(skill_dir, "init", "--incident", write(tmp_path, "i.json", INCIDENT), "--now", NOW))
+
+
+@pytest.mark.parametrize("subcommand", ["plan", "target"])
+def test_a_case_json_with_wrong_value_types_exits_2_in_one_line(skill_dir, case_dir, subcommand):
+    path = Path(case_dir, "case.json")
+    case = json.loads(path.read_text())
+    case["window"]["start"] = 1
+    case["match"]["candidates"] = [{"service": "s", "environment": "e", "reasons": 5}]
+    case["incident"]["hostnames"] = 5
+    path.write_text(json.dumps(case))
+    extra = ["--service", "checkout-api", "--environment", "prod"] if subcommand == "target" else []
+    assert_clean_exit_2(run(skill_dir, subcommand, "--case-dir", case_dir, *extra))
+
+
+def test_a_bad_opensearch_filter_key_exits_2_from_plan(skill_dir, case_dir, tmp_path):
+    discovery = {"account": "prod-main", "region": "eu-west-1", "resources": {
+        "opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-checkout-*", "filter": {"-dash": "v"}}}}
+    run(skill_dir, "target", "--case-dir", case_dir, "--discovery", write(tmp_path, "d.json", discovery))
+    assert_clean_exit_2(run(skill_dir, "plan", "--case-dir", case_dir))

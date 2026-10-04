@@ -23,6 +23,8 @@ SCALAR_RESOURCES = ("ecs_service", "auto_scaling_group", "load_balancer", "api_g
 LIST_RESOURCES = ("ec2_instances", "lambda_functions", "dynamodb_tables", "sqs_queues", "sns_topics", "log_groups")
 _WHITESPACE_RE = re.compile(r"\s+")
 _LEADING_NUMBER_RE = re.compile(r"(\d+)\.")
+MAX_TEXT = 2000
+MAX_TITLE = 300
 _MARKER_START = ("#", ">", "-", "*", "+", "|", "```", "~~~")
 _BARE_HOST_RE = re.compile(r"[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
 
@@ -195,20 +197,39 @@ def create_case(incident: dict, config: TriageConfig, service_map: ServiceMap, n
     return case_dir
 
 
-def _check_case_shape(case: Any, path: Path) -> None:
-    def is_text_map(value: Any, *keys: str) -> bool:
-        return isinstance(value, dict) and all(key in value for key in keys)
+def _is_text(value: Any) -> bool:
+    return isinstance(value, str)
 
-    target = case.get("target") if isinstance(case, dict) else None
+
+def _is_text_or_none(value: Any) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _is_text_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _has(value: Any, **checks: Any) -> bool:
+    """True when value is a mapping that has every key and each value passes its check."""
+    return isinstance(value, dict) and all(key in value and check(value[key]) for key, check in checks.items())
+
+
+def _check_case_shape(case: Any, path: Path) -> None:
+    summary_checks = {key: _is_text_or_none for key in INCIDENT_SUMMARY_KEYS}
     sound = (
-        is_text_map(case, "case_dir", "incident", "incident_start", "window", "match", "target")
-        and is_text_map(case["incident"], *INCIDENT_SUMMARY_KEYS)
-        and is_text_map(case["window"], "start", "end")
-        and is_text_map(case["match"], "status", "candidates")
-        and isinstance(case["match"]["candidates"], list)
-        and all(is_text_map(c, "service", "environment", "reasons") for c in case["match"]["candidates"])
-        and (target is None or (is_text_map(target, "source", "account", "region", "resources")
-                                and isinstance(target["resources"], dict)))
+        _has(case, case_dir=_is_text, incident_start=_is_text, incident=lambda v: isinstance(v, dict),
+             window=lambda v: isinstance(v, dict), match=lambda v: isinstance(v, dict), target=lambda v: v is None or isinstance(v, dict))
+        and _has(case["incident"], **summary_checks)
+        and _is_text(case["incident"]["number"])
+        and ("hostnames" not in case["incident"] or _is_text_list(case["incident"]["hostnames"]))
+        and _has(case["window"], start=_is_text, end=_is_text)
+        and _has(case["match"], status=_is_text, candidates=lambda v: isinstance(v, list))
+        and all(_has(c, service=_is_text, environment=_is_text, reasons=_is_text_list) for c in case["match"]["candidates"])
+        and (case["target"] is None or (
+            _has(case["target"], source=_is_text, account=_is_text, region=_is_text, resources=lambda v: isinstance(v, dict))
+            and _is_text_or_none(case["target"].get("service"))
+            and _is_text_or_none(case["target"].get("environment"))
+            and _is_text_list(case["target"].get("depends_on", []))))
     )
     if not sound:
         raise CaseError([f"{path}: is not a valid case file"])
@@ -235,16 +256,24 @@ def save_case(case_dir: Path, case: dict) -> None:
         raise CaseError([f"{case_dir}: cannot write the case ({error.strerror or error})"]) from error
 
 
-def _line(value: Any) -> str:
-    """One line of text with any leading Markdown marker escaped, so a value cannot start a block."""
+def _line(value: Any, limit: int = MAX_TEXT) -> str:
+    """One bounded line of text. A leading Markdown marker is escaped and angle brackets are written as
+    entities, so that a value can neither start a block nor open a tag or comment."""
     text = _WHITESPACE_RE.sub(" ", str(value)).strip()
+    if len(text) > limit:
+        text = text[:limit] + " (cut)"
+    text = text.replace("<", "&lt;").replace(">", "&gt;")
     if text.startswith(_MARKER_START):
         return "\\" + text
     return _LEADING_NUMBER_RE.sub(r"\1\\.", text, count=1) if _LEADING_NUMBER_RE.match(text) else text
 
 
-def _bullets(pairs: list[tuple[str, Any]]) -> str:
-    return "\n".join(f"- {label}: {_line(value) if value not in (None, '') else '-'}" for label, value in pairs)
+def _bullets(pairs: list[tuple[str, Any]], limits: dict[str, int] | None = None) -> str:
+    limits = limits or {}
+    return "\n".join(
+        f"- {label}: {_line(value, limits.get(label, MAX_TEXT)) if value not in (None, '') else '-'}"
+        for label, value in pairs
+    )
 
 
 def _describe_target(target: dict | None) -> str:
@@ -277,7 +306,7 @@ def render_case(case: dict) -> str:
             ("Title", incident["title"]), ("URL", incident["url"]), ("Severity", incident["severity"]),
             ("State", incident["state"]), ("Declared", incident["declared_at"]),
             ("Impact started", incident["impact_started_at"]), ("Resolved", incident["resolved_at"]),
-        ]),
+        ], {"Title": MAX_TITLE}),
         "window": _bullets([("Start", case["window"]["start"]), ("End", case["window"]["end"]),
                             ("Incident start", case["incident_start"])]),
         "match": _describe_match(case["match"]),

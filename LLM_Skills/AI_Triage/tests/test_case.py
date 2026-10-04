@@ -359,7 +359,8 @@ def test_a_leading_markdown_marker_is_escaped(cases_config, service_map, skill_d
     case_dir = make_case({**FULL_INCIDENT, "title": start}, cases_config, service_map, skill_dir)
     line = next(l for l in (case_dir / "case.md").read_text().splitlines() if l.startswith("- Title: "))
     value = line[len("- Title: "):]
-    assert value != start and "\\" in value
+    assert value != start
+    assert "\\" in value or value.startswith("&gt;")
 
 
 def test_a_placeholder_in_a_value_is_not_expanded(cases_config, service_map, skill_dir):
@@ -424,3 +425,59 @@ def test_a_good_discovery_with_every_kind_of_resource_is_kept(cases_config, skil
     }
     target = set_target_from_discovery(case_dir, cases_config, {"account": "prod-main", "region": "eu-west-1", "resources": resources})
     assert target["resources"] == resources
+
+
+# fix round 2
+
+@pytest.mark.parametrize("edit", [
+    lambda c: c["window"].update(start=1),
+    lambda c: c["window"].update(end=None),
+    lambda c: c.update(incident_start=5),
+    lambda c: c.update(case_dir=["x"]),
+    lambda c: c["incident"].update(hostnames=5),
+    lambda c: c["incident"].update(title=["x"]),
+    lambda c: c["incident"].update(number=7),
+    lambda c: c["match"].update(status=3),
+    lambda c: c["match"].update(candidates=[{"service": "s", "environment": "e", "reasons": 5}]),
+    lambda c: c["match"].update(candidates=[{"service": 1, "environment": "e", "reasons": []}]),
+    lambda c: c.update(target={"source": "map", "account": 1, "region": "r", "resources": {}}),
+    lambda c: c.update(target={"source": "map", "account": "a", "region": "r", "resources": {}, "depends_on": 5}),
+    lambda c: c.update(target={"source": "map", "account": "a", "region": "r", "resources": {}, "service": 4}),
+])
+def test_a_case_json_with_wrong_value_types_is_a_case_error(cases_config, service_map, skill_dir, edit):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    case = json.loads((case_dir / "case.json").read_text())
+    edit(case)
+    (case_dir / "case.json").write_text(json.dumps(case))
+    with pytest.raises(CaseError):
+        load_case(case_dir)
+
+
+def case_md_values(cases_config, service_map, skill_dir, **fields):
+    case_dir = make_case({**FULL_INCIDENT, **fields}, cases_config, service_map, skill_dir)
+    return (case_dir / "case.md").read_text()
+
+
+def test_a_long_title_is_cut_to_300_characters(cases_config, service_map, skill_dir):
+    text = case_md_values(cases_config, service_map, skill_dir, title="t" * 5000)
+    line = next(l for l in text.splitlines() if l.startswith("- Title: "))
+    assert line == "- Title: " + "t" * 300 + " (cut)"
+    assert len(text) < 6000
+
+
+def test_a_short_title_is_not_marked_cut(cases_config, service_map, skill_dir):
+    text = case_md_values(cases_config, service_map, skill_dir, title="t" * 300)
+    assert "(cut)" not in text
+
+
+def test_other_text_values_are_cut_to_2000_characters(cases_config, service_map, skill_dir):
+    text = case_md_values(cases_config, service_map, skill_dir, url="https://oneuptime.example.com/" + "u" * 5000)
+    line = next(l for l in text.splitlines() if l.startswith("- URL: "))
+    assert line.endswith(" (cut)") and len(line) == len("- URL: ") + 2000 + len(" (cut)")
+
+
+def test_angle_brackets_in_incident_text_are_escaped(cases_config, service_map, skill_dir):
+    text = case_md_values(cases_config, service_map, skill_dir, title="<!-- hide <b>x</b> > y")
+    line = next(l for l in text.splitlines() if l.startswith("- Title: "))
+    assert line == "- Title: &lt;!-- hide &lt;b&gt;x&lt;/b&gt; &gt; y"
+    assert "<!--" not in text
