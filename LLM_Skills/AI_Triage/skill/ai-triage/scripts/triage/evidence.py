@@ -75,7 +75,7 @@ class Evidence:
             resource=self.redactor.text(resource),
             summary=self.redactor.text(summary),
             data=self.redactor.value(data or {}),
-            command=command,
+            command=self.redactor.text(command),
             excerpt=_cut(self.redactor.text(excerpt), MAX_EXCERPT),
         )
         self.facts.append(fact)
@@ -83,7 +83,7 @@ class Evidence:
 
     def add_error(self, command: str, code: str, message: str) -> None:
         self.errors.append(
-            {"command": command, "code": code, "message": _cut(self.redactor.text(message), MAX_ERROR_MESSAGE)}
+            {"command": self.redactor.text(command), "code": code, "message": _cut(self.redactor.text(message), MAX_ERROR_MESSAGE)}
         )
 
     def to_dict(self) -> dict:
@@ -101,7 +101,7 @@ class Evidence:
         return json.dumps(self.to_dict(), indent=2)
 
     def write(self, case_dir: Path, suffix: str = "") -> Path:
-        name = f"{self.collector}-{self.account}-{self.region}"
+        name = "-".join(_SUFFIX_CLEANER.sub("", part) for part in (self.collector, self.account, self.region))
         cleaned = _SUFFIX_CLEANER.sub("", suffix)
         if cleaned:
             name += f"-{cleaned}"

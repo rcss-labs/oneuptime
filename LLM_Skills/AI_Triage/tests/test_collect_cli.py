@@ -239,3 +239,38 @@ def test_one_of_satisfied(skill_dir, one_of_collector):
 def test_list_shows_one_of(one_of_collector, capsys):
     assert collect.main(["--list"]) == 0
     assert "one of: a, b" in capsys.readouterr().out
+
+
+def test_collector_exception_keeps_the_evidence(skill_dir, monkeypatch, capsys):
+    def run(ctx, targets):
+        ctx.evidence.add(kind="current", resource="r", summary="before the crash")
+        raise ZeroDivisionError("division by zero")
+
+    monkeypatch.setattr(collect, "all_collectors", lambda: {"boom": Collector("boom", "d", (), (), run)})
+    assert collect.main(args(skill_dir, name="boom"), runner=FakeAws({})) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["facts"][0]["summary"] == "before the crash"
+    assert document["errors"][0]["code"] == "CollectorError"
+    assert "ZeroDivisionError: division by zero" in document["errors"][0]["message"]
+
+
+def test_collector_exception_is_written_to_the_case_dir(skill_dir, monkeypatch, tmp_path):
+    def run(ctx, targets):
+        raise KeyError("nope")
+
+    monkeypatch.setattr(collect, "all_collectors", lambda: {"boom": Collector("boom", "d", (), (), run)})
+    case = tmp_path / "case"
+    assert collect.main(args(skill_dir, "--case-dir", str(case), name="boom"), runner=FakeAws({})) == 0
+    assert any((case / "evidence").iterdir())
+
+
+def test_region_outside_the_account_is_rejected(skill_dir, fake_collector, capsys):
+    assert collect.main(args(skill_dir, "--target", "thing=x", "--region", "ap-south-1")) == 2
+    err = capsys.readouterr().err
+    assert "eu-west-1" in err and "us-east-1" in err
+
+
+def test_global_region_is_allowed_for_any_account(skill_dir, fake_collector):
+    argv = args(skill_dir, "--target", "thing=x", "--region", "us-east-1")
+    argv[argv.index("prod-main")] = "staging"
+    assert collect.main(argv, runner=FakeAws({})) == 0

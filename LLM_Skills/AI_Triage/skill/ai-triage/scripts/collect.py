@@ -2,6 +2,7 @@
 """Collect read-only evidence from one source into the evidence format.
 
 Exit codes: 0 collected, 2 usage or config error, 3 sign-in expired, 4 unknown collector or bad target key.
+A collector that raises is recorded as a CollectorError evidence error and the evidence is still output.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from triage.evidence import Evidence
 from triage.fixtures import FixtureError, fixture_dir, kube_runner_from_env, replay_banner, runner_from_env
 from triage.window import WindowError, make_window
 
+GLOBAL_REGION = "us-east-1"  # hosts the global services
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -56,7 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--account", metavar="ALIAS", help="account alias from the config")
     parser.add_argument("--start", help="window start, ISO 8601 with a timezone")
     parser.add_argument("--end", help="window end, ISO 8601 with a timezone")
-    parser.add_argument("--region", help="AWS region; defaults to the account's first region")
+    parser.add_argument("--region", help="AWS region: one of the account's regions or us-east-1; defaults to the account's first")
     parser.add_argument("--target", action="append", default=[], metavar="KEY=VALUE", help="what to collect; repeatable")
     parser.add_argument("--case-dir", type=Path, help="write the evidence file into this case folder")
     parser.add_argument("--suffix", default="", help="added to the evidence file name")
@@ -106,6 +108,9 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     except WindowError as error:
         return _fail(str(error), 2)
     region = args.region or account.regions[0]
+    allowed_regions = (*account.regions, GLOBAL_REGION) if GLOBAL_REGION not in account.regions else account.regions
+    if region not in allowed_regions:
+        return _fail(f"region {region} is not allowed for {account.alias}; use one of: {', '.join(allowed_regions)}", 2)
     evidence = Evidence(collector.name, account.alias, region, window)
     ctx = CollectContext(
         config, account, region, window, evidence, args.skill_dir,
@@ -115,6 +120,8 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
         collector.run(ctx, targets)
     except SignInExpired as expired:
         return _fail(f"Sign-in expired. Run: aws sso login --profile {expired.profile}", 3)
+    except Exception as error:  # noqa: BLE001 - one bad field must not cost the evidence already collected
+        evidence.add_error(ctx.last_command, "CollectorError", f"{type(error).__name__}: {error}")
     if args.case_dir:
         path = evidence.write(args.case_dir, args.suffix)
         print(f"{path} facts={len(evidence.facts)} errors={len(evidence.errors)} truncated={evidence.truncated}")

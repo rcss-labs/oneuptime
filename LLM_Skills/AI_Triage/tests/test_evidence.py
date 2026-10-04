@@ -131,3 +131,17 @@ def test_load_evidence_round_trip(tmp_path):
     add_simple(evidence, time="2026-10-04T10:42:10Z")
     path = evidence.write(tmp_path)
     assert load_evidence(path) == evidence.to_dict()
+
+
+def test_command_is_redacted_in_facts_and_errors():
+    evidence = make_evidence()
+    fact = add_simple(evidence, command="aws logs start-query --query-string 'like /bob@example.com/'")
+    assert "bob@example.com" not in fact.command
+    evidence.add_error("aws logs start-query --query-string 'like /bob@example.com/'", "X", "failed")
+    assert "bob@example.com" not in evidence.errors[0]["command"]
+
+
+def test_write_path_cannot_leave_the_evidence_folder(tmp_path):
+    window = make_window("2026-10-04T10:00:00Z", "2026-10-04T12:00:00Z", 6)
+    path = Evidence("ecs", "prod-main", "/../../escaped", window).write(tmp_path)
+    assert path.parent == tmp_path / "evidence"
