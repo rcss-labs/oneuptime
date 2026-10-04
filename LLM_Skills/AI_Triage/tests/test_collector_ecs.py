@@ -312,8 +312,8 @@ def test_harmless_named_values_never_reach_the_document(config_data, tmp_path):
     document = ctx.evidence.to_json()
     for secret in (dsn_secret, hook_secret, "pw" + "5" * 8):
         assert secret not in document
-    assert "https://o1.ingest.example.com" in document
-    assert "postgres://db.example.com:5432" in document
+    assert "o1.ingest.example.com" not in document
+    assert "db.example.com" not in document
 
 
 def test_diff_reports_a_changed_host(config_data, tmp_path):

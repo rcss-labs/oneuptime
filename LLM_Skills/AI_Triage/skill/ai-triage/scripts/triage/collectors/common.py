@@ -1,18 +1,31 @@
 """Small helpers shared by collectors. This module has no COLLECTOR, so the registry skips it."""
 from __future__ import annotations
 
+import ipaddress
 import re
 from datetime import datetime
 from typing import Any, Callable, Iterable, Sequence
-from urllib.parse import urlsplit
 
 from triage.context import CollectContext
-from triage.redact import looks_secret_key
+from triage.redact import key_components, looks_secret_key
 from triage.window import Window, WindowError, parse_time
 
 _SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")
-_HOST_RE = re.compile(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?")
-_SETTING_RE = re.compile(r"[a-z][a-z0-9_.-]{0,39}")
+_LABEL_RE = re.compile(r"[A-Za-z0-9-]{1,63}")
+_PORT_RE = re.compile(r"[0-9]{1,5}")
+_AUTHORITY_CHARS_RE = re.compile(r"[A-Za-z0-9.:\[\]-]*")
+_BRACKETED_HOST_RE = re.compile(r"\[[0-9A-Fa-f:.]+\]")
+_BOOLEAN_RE = re.compile(r"true|false", re.IGNORECASE)
+_SHORT_NUMBER_RE = re.compile(r"[0-9]{1,6}")
+_WORD_RE = re.compile(r"[A-Za-z_-]{1,20}")
+_SHORT_SETTING_RE = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,14}")
+_LONG_HEX_RE = re.compile(r"[0-9A-Fa-f]{16,}")
+_MAX_HOST_LENGTH = 253
+_MAX_PORT = 65535
+# Name components that mark a variable as secret although the redactor does not.
+_SECRET_NAME_COMPONENTS = frozenset(
+    {"pw", "pin", "salt", "hash", "cred", "creds", "license", "seed", "jwt", "private", "dsn", "signing", "hmac", "cert", "conn"}
+)
 _HIDDEN_PREFIX = "<hidden:"
 
 
@@ -48,19 +61,56 @@ def _hidden(value: Any) -> str:
     return f"<hidden: {len(value if isinstance(value, str) else str(value))} characters>"
 
 
+def _valid_host(host: str) -> bool:
+    if _BRACKETED_HOST_RE.fullmatch(host):
+        return True
+    try:
+        ipaddress.IPv4Address(host)
+        return True
+    except ValueError:
+        pass
+    labels = host.split(".")
+    return (
+        len(host) <= _MAX_HOST_LENGTH
+        and len(labels) >= 2
+        and all(_LABEL_RE.fullmatch(label) for label in labels)
+        and any(char.isalpha() for char in labels[-1])
+    )
+
+
+def _host_and_port(text: str) -> str | None:
+    """text unchanged when it is a valid host or host:port, else None."""
+    host, separator, port = text.rpartition(":") if not text.endswith("]") else (text, "", "")
+    if not separator:
+        host, port = text, ""
+    elif not host or not _PORT_RE.fullmatch(port) or int(port) > _MAX_PORT:
+        return None
+    return text if _valid_host(host) else None
+
+
 def _origin(text: str) -> str | None:
-    """scheme://host[:port] of a URL, dropping user, path, query, and fragment; None if not a URL."""
-    scheme, separator, _ = text.partition("://")
+    """scheme://host[:port] of a URL; None when it is not a plainly safe URL."""
+    scheme, separator, rest = text.partition("://")
     if not separator or not _SCHEME_RE.fullmatch(scheme):
         return None
-    try:
-        parts = urlsplit(text)
-        host, port = parts.hostname, parts.port
-    except ValueError:
+    cut = min((rest.find(mark) for mark in "/?#" if mark in rest), default=len(rest))
+    authority, tail = rest[:cut], rest[cut:]
+    if "@" in tail:
         return None
-    if not host:
+    host_and_port = authority.rpartition("@")[2]
+    if not _AUTHORITY_CHARS_RE.fullmatch(host_and_port):
         return None
-    return f"{scheme}://{host}" + (f":{port}" if port is not None else "")
+    shown = _host_and_port(host_and_port)
+    return f"{scheme}://{shown}" if shown else None
+
+
+def _plain_setting(text: str) -> bool:
+    if _LONG_HEX_RE.fullmatch(text):
+        return False
+    return any(
+        pattern.fullmatch(text)
+        for pattern in (_BOOLEAN_RE, _SHORT_NUMBER_RE, _WORD_RE, _SHORT_SETTING_RE)
+    )
 
 
 def shown_env_value(value: Any) -> str:
@@ -71,18 +121,21 @@ def shown_env_value(value: Any) -> str:
         return str(value)
     if not isinstance(value, str):
         return _hidden(value)
-    origin = _origin(value)
-    if origin:
-        return origin
-    if _HOST_RE.fullmatch(value) or _SETTING_RE.fullmatch(value):
+    if "://" in value:
+        return _origin(value) or _hidden(value)
+    if _plain_setting(value) or (not _LONG_HEX_RE.fullmatch(value) and _host_and_port(value)):
         return value
     return _hidden(value)
+
+
+def _secret_name(name: str) -> bool:
+    return looks_secret_key(name) or any(part in _SECRET_NAME_COMPONENTS for part in key_components(name))
 
 
 def env_summary(pairs: Iterable[tuple[str, Any]]) -> dict[str, str]:
     """Environment variable name to its shown value; names that look secret are always hidden."""
     return {
-        name: _hidden(value) if looks_secret_key(name) else shown_env_value(value)
+        name: _hidden(value) if _secret_name(name) else shown_env_value(value)
         for name, value in pairs
     }
 
