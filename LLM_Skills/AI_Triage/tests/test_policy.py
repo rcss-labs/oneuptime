@@ -159,3 +159,36 @@ def test_api_gateway_grant_has_no_usage_plan_resources(policy):
 )
 def test_single_character_wildcards_are_reported(policy, action):
     assert any("uses a wildcard" in p for p in problems(allow(policy, action)))
+
+
+@pytest.mark.parametrize(
+    "resource",
+    [
+        "*",
+        "arn:aws:apigateway:*::/*",
+        "arn:aws:apigateway:*::/usage*",
+        "arn:aws:apigateway:*::/api*",
+        "arn:aws:apigateway:*::/apikeys",
+        "arn:aws:apigateway:*::/usageplans/x",
+        "arn:aws:apigateway:*::/rest*/x",
+        "arn:aws:apigateway:*::/accounts",
+        "arn:aws:apigateway:*::/tags/*",
+        "/restapis/*",
+    ],
+)
+def test_api_gateway_resources_outside_the_allowlist_are_reported(policy, resource):
+    document = copy.deepcopy(policy)
+    statement = next(s for s in document["Statement"] if "apigateway:GET" in s.get("Action", []))
+    statement["Resource"] = [resource]
+    assert any("apigateway:GET" in p and "expose key values" in p for p in problems(document))
+
+
+@pytest.mark.parametrize(
+    "resource",
+    ["arn:aws:apigateway:*::/restapis/*", "arn:aws:apigateway:*::/APIS/*", "arn:aws:apigateway:*::/domainnames/*", "arn:aws:apigateway:*::/account"],
+)
+def test_api_gateway_resources_on_the_allowlist_are_accepted(policy, resource):
+    document = copy.deepcopy(policy)
+    statement = next(s for s in document["Statement"] if "apigateway:GET" in s.get("Action", []))
+    statement["Resource"] = [resource]
+    assert problems(document) == []

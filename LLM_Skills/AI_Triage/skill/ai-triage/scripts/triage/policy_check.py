@@ -47,7 +47,9 @@ REQUIRED_DENIES = frozenset(
 )
 # Action names are compared in lower case, as IAM does.
 FORBIDDEN_ALLOW_PREFIXES = ("s3:getobject",)
-SECRET_API_GATEWAY_PATHS = ("usageplans", "apikeys")
+# apigateway:GET on any other path can return API key values (/apikeys, /usageplans/*/keys).
+API_GATEWAY_PATH_PREFIXES = ("/restapis/", "/apis/", "/domainnames/")
+API_GATEWAY_EXACT_PATHS = ("/account",)
 ACCOUNT_ID_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
 
 
@@ -63,6 +65,19 @@ FORBIDDEN_LOWER = _lower(FORBIDDEN_ALLOWS)
 READ_EXCEPTIONS_LOWER = _lower(READ_EXCEPTIONS)
 READ_PREFIXES_LOWER = tuple(prefix.lower() for prefix in READ_NAME_PREFIXES)
 REQUIRED_DENIES_LOWER = _lower(REQUIRED_DENIES)
+
+
+def _api_gateway_path(resource: str) -> str | None:
+    """The lower-case path of an API Gateway ARN, or None when the resource is not one."""
+    parts = resource.lower().split(":", 5)
+    if len(parts) != 6 or parts[:3] != ["arn", "aws", "apigateway"]:
+        return None
+    return parts[5]
+
+
+def _api_gateway_resource_allowed(resource: str) -> bool:
+    path = _api_gateway_path(resource)
+    return path is not None and (path.startswith(API_GATEWAY_PATH_PREFIXES) or path in API_GATEWAY_EXACT_PATHS)
 
 
 def check_policy(document: Any, raw_text: str) -> list[str]:
@@ -109,7 +124,7 @@ def check_policy(document: Any, raw_text: str) -> list[str]:
         if effect != "Allow":
             problems.append(f"{where}: Effect must be Allow or Deny")
             continue
-        resources = [str(resource).lower() for resource in _as_list(statement.get("Resource", []))]
+        resources = [str(resource) for resource in _as_list(statement.get("Resource", []))]
         for action in actions:
             lowered = action.lower()
             service, _, name = action.partition(":")
@@ -121,10 +136,13 @@ def check_policy(document: Any, raw_text: str) -> list[str]:
                 problems.append(f"{where}: '{action}' must never be granted")
             elif lowered not in READ_EXCEPTIONS_LOWER and not name.lower().startswith(READ_PREFIXES_LOWER):
                 problems.append(f"{where}: '{action}' is not a read action")
-            elif lowered == "apigateway:get" and any(
-                path in resource for resource in resources for path in SECRET_API_GATEWAY_PATHS
-            ):
-                problems.append(f"{where}: usage plans and API keys expose key values and must not be readable")
+            elif lowered == "apigateway:get":
+                for resource in resources:
+                    if not _api_gateway_resource_allowed(resource):
+                        problems.append(
+                            f"{where}: apigateway:GET on '{resource}' is not allowed; only /restapis/, /apis/, "
+                            "/domainnames/, and /account are, because usage plans and API keys expose key values"
+                        )
     for action in sorted(REQUIRED_DENIES):
         if action.lower() not in denied:
             problems.append(f"missing explicit deny for '{action}'")
