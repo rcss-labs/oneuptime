@@ -88,6 +88,9 @@ def _add_simulation(ctx: CollectContext, role_arn: str, action: str, resource_ar
         if decision != "allowed":
             matched = ", ".join(_statement_text(s) for s in result.get("MatchedStatements", []))
             text += f"; denied by {matched}" if matched else "; no statement allows it"
+        missing = result.get("MissingContextValues") or []
+        if missing:
+            text += f". The simulation lacked values for: {', '.join(missing)}; the real decision may differ"
         ctx.evidence.add(kind=DERIVED, resource=role_arn, summary=text, command=ctx.last_command)
 
 
@@ -154,9 +157,6 @@ def _add_secret(ctx: CollectContext, name: str) -> None:
 
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     role, key, secret = targets.get("role"), targets.get("kms_key"), targets.get("secret")
-    if not (role or key or secret):
-        ctx.evidence.add_error("", "MissingTarget", "access needs at least one of role, kms_key, or secret")
-        return
     if role:
         role_arn = _add_role(ctx, role)
         _add_role_policies(ctx, role)
@@ -173,5 +173,6 @@ COLLECTOR = Collector(
     description="IAM role trust and policies, a policy simulation, KMS key state, and secret rotation metadata",
     required=(),
     optional=("role", "action", "resource_arn", "kms_key", "secret"),
+    one_of=("role", "kms_key", "secret"),
     run=collect,
 )

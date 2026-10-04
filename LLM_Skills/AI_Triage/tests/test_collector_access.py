@@ -49,10 +49,8 @@ def test_declares_its_targets():
     assert set(COLLECTOR.optional) == {"role", "action", "resource_arn", "kms_key", "secret"}
 
 
-def test_needs_at_least_one_target(config_data, tmp_path):
-    ctx, aws, _ = run(config_data, tmp_path, {}, {})
-    assert ctx.evidence.errors[0]["code"] == "MissingTarget"
-    assert aws.calls == []
+def test_declares_that_one_target_is_needed():
+    assert COLLECTOR.one_of == ("role", "kms_key", "secret")
 
 
 def test_role_facts(config_data, tmp_path):
@@ -104,6 +102,23 @@ def test_simulation_denied_names_the_statement(config_data, tmp_path):
     fact = by_summary(ctx, "s3:GetObject")[0]
     assert "explicitDeny" in fact.summary and "deny-prod-data" in fact.summary
     assert "--resource-arns" not in aws.called("iam", "simulate-principal-policy")[0]
+
+
+def test_missing_context_values_are_reported(config_data, tmp_path):
+    reply = simulation("implicitDeny")
+    reply["EvaluationResults"][0]["MissingContextValues"] = ["aws:SourceVpc", "aws:PrincipalTag/team"]
+    ctx, _, _ = run(config_data, tmp_path, role_answers(**{"iam simulate-principal-policy": reply}),
+                    {"role": "checkout-task", "action": "s3:GetObject"})
+    summary = by_summary(ctx, "s3:GetObject")[0].summary
+    assert "The simulation lacked values for: aws:SourceVpc, aws:PrincipalTag/team; the real decision may differ" in summary
+
+
+def test_no_missing_context_note_when_none_are_missing(config_data, tmp_path):
+    reply = simulation("allowed")
+    reply["EvaluationResults"][0]["MissingContextValues"] = []
+    ctx, _, _ = run(config_data, tmp_path, role_answers(**{"iam simulate-principal-policy": reply}),
+                    {"role": "checkout-task", "action": "s3:GetObject"})
+    assert "lacked values" not in by_summary(ctx, "s3:GetObject")[0].summary
 
 
 def test_implicit_deny_without_statements(config_data, tmp_path):
