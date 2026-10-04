@@ -1,14 +1,19 @@
 import copy
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 
 import pytest
+import yaml
 
+from conftest import SKILL_SRC
 from triage.case import create_case, load_case, parse_incident
 from triage.config import parse_config
 from triage.evidence import CURRENT, INCIDENT_TIME, Evidence
 from triage.findings import check_findings, load_facts, valid_findings
 from triage.compose import LABEL_ORDER
+from triage.digest import action_digest, cause_digest
 from triage.report import (
     REQUIRED_HEADINGS,
     build_work_order,
@@ -132,9 +137,31 @@ SUMMARY = {
 }
 
 
-def store_summary(case_dir, summary):
+def store_summary(case_dir, summary, report=None, digests=True):
+    """Write the summary as a judging run of `report` would: each entry gets the digest of its cause or action.
+
+    An entry that already has a "digest" key keeps it. With digests=False the summary is written as given.
+    """
+    summary = copy.deepcopy(summary)
+    if digests:
+        findings = valid_findings(case_dir)
+        report = report or VALID_REPORT
+        for cause in report["causes"]:
+            if isinstance(summary["causes"].get(cause["id"]), dict):
+                summary["causes"][cause["id"]].setdefault("digest", cause_digest(cause, findings))
+        for action in report["actions"]:
+            if isinstance(summary["actions"].get(action["id"]), dict):
+                summary["actions"][action["id"]].setdefault("digest", action_digest(action))
     (case_dir / "judgments").mkdir(exist_ok=True)
     (case_dir / "judgments" / "summary.json").write_text(json.dumps(summary))
+
+
+def rejudge(case_dir, report):
+    """Store the unchanged judgments again with digests of `report`, as if judging had been run on it."""
+    summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
+    for entry in [*summary["causes"].values(), *summary["actions"].values()]:
+        entry.pop("digest", None)
+    store_summary(case_dir, summary, report)
 
 
 def summary_with(**changes):
@@ -211,8 +238,9 @@ def assert_problem(problems, *needles):
     assert any(all(needle in problem for needle in needles) for problem in problems), problems
 
 
-def test_valid_reports_have_no_problems(case, findings, config):
+def test_valid_reports_have_no_problems(case_dir, case, findings, config):
     assert problems_for(VALID_REPORT, case, findings, config) == []
+    rejudge(case_dir, UNRESOLVED_REPORT)
     assert problems_for(UNRESOLVED_REPORT, case, findings, config) == []
 
 
@@ -274,8 +302,9 @@ def test_unresolved_top_cause_must_be_empty(case, findings, config):
     assert_problem(problems_for(report, case, findings, config), "top_cause", "unresolved")
 
 
-def test_unresolved_accepts_empty_string_top_cause(case, findings, config):
+def test_unresolved_accepts_empty_string_top_cause(case_dir, case, findings, config):
     report = mutated(UNRESOLVED_REPORT, lambda r: r["summary"].update(top_cause=""))
+    rejudge(case_dir, report)
     assert problems_for(report, case, findings, config) == []
 
 
@@ -311,11 +340,13 @@ def test_confirmed_cause_needs_incident_time_support(case, findings, config):
     assert_problem(problems_for(report, case, findings, config), "causes[0]", "incident_time")
 
 
-def test_probable_cause_does_not_need_incident_time_support(case, findings, config):
+def test_probable_cause_does_not_need_incident_time_support(case_dir, case, findings, config):
     def weaken(report):
         report["causes"][0].update(label="probable", supporting=["compute-2"])
         report["actions"] = [{**report["actions"][0], "label": "candidate"}]
-    assert problems_for(mutated(VALID_REPORT, weaken), case, findings, config) == []
+    report = mutated(VALID_REPORT, weaken)
+    rejudge(case_dir, report)
+    assert problems_for(report, case, findings, config) == []
 
 
 def test_cause_found_needs_strong_top_cause_and_confirmed_hypothesis(case, findings, config):
@@ -328,7 +359,7 @@ def test_cause_found_needs_strong_top_cause_and_confirmed_hypothesis(case, findi
     assert_problem(problems, "hypothesis", "confirmed")
 
 
-def test_three_rejected_hypotheses_force_unresolved(case, findings, config):
+def test_three_rejected_hypotheses_force_unresolved(case_dir, case, findings, config):
     def reject(report):
         report["hypotheses"][0]["result"] = "rejected"
         report["hypotheses"].append({**report["hypotheses"][1], "id": "H3"})
@@ -336,6 +367,7 @@ def test_three_rejected_hypotheses_force_unresolved(case, findings, config):
     assert_problem(problems, "rejected", "unresolved")
     report = mutated(UNRESOLVED_REPORT, lambda r: r["hypotheses"].extend(
         {**r["hypotheses"][0], "id": f"H{i}", "result": "rejected"} for i in (2, 3, 4)))
+    rejudge(case_dir, report)
     assert problems_for(report, case, findings, config) == []
 
 
@@ -1089,3 +1121,122 @@ def test_build_work_order_copies_only_contract_keys_of_an_action(case):
     report = mutated(VALID_REPORT, lambda r: r["actions"][0].update(notes="x"))
     order = build_work_order(report, case, RENDERED_AT)
     assert "notes" not in order["actions"][0] and validate_work_order(order) == []
+
+
+# labels are bound to what was judged
+
+def edited_problems(problems, path):
+    assert_problem(problems, path, "edited after judging", "run the judgments again")
+
+
+def test_a_report_that_matches_what_was_judged_passes(case, findings, config):
+    assert problems_for(VALID_REPORT, case, findings, config) == []
+
+
+def test_a_rewritten_cause_statement_fails(case, findings, config):
+    report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(statement="The payments database ran out of connections"))
+    problems = problems_for(report, case, findings, config)
+    edited_problems(problems, "causes[0]")
+    assert_problem(problems, "causes[0]", "stronger than", "candidate")
+    assert_problem(problems, "actions[0]", "recommended", "cause was edited")
+
+
+def test_an_unjudged_supporting_finding_fails(case, findings, config):
+    report = mutated(VALID_REPORT, lambda r: r["causes"][0]["supporting"].append("compute-2"))
+    edited_problems(problems_for(report, case, findings, config), "causes[0]")
+
+
+def test_a_changed_action_change_and_target_fail(case, findings, config):
+    def edit(report):
+        report["actions"][0]["change"] = "Reboot the RDS instance payments-prod"
+        report["actions"][0]["target"] = {**ACTION_TARGET, "resource_id": "payments-prod"}
+    problems = problems_for(mutated(VALID_REPORT, edit), case, findings, config)
+    edited_problems(problems, "actions[0]")
+    assert_problem(problems, "actions[0]", "recommended", "edited after judging")
+
+
+def test_a_changed_action_target_alone_fails(case, findings, config):
+    report = mutated(VALID_REPORT, lambda r: r["actions"][1]["target"].update(resource_id="other/service"))
+    edited_problems(problems_for(report, case, findings, config), "actions[1]")
+
+
+def test_swapping_the_statements_of_two_causes_fails(case, findings, config):
+    def swap(report):
+        first, second = report["causes"][0]["statement"], report["causes"][1]["statement"]
+        report["causes"][0]["statement"], report["causes"][1]["statement"] = second, first
+    problems = problems_for(mutated(VALID_REPORT, swap), case, findings, config)
+    edited_problems(problems, "causes[0]")
+    edited_problems(problems, "causes[1]")
+
+
+def test_a_changed_claim_of_a_cited_finding_fails(case_dir, case, config):
+    path = case_dir / "findings" / "checked.json"
+    checked = json.loads(path.read_text())
+    for item in checked["valid"]:
+        if item["id"] == "compute-1":
+            item["claim"] = "The database was restarted"
+    path.write_text(json.dumps(checked))
+    edited_problems(problems_for(VALID_REPORT, case, valid_findings(case_dir), config), "causes[0]")
+
+
+@pytest.mark.parametrize("digest", ["missing", None, 5, ["x"]])
+def test_a_missing_or_invalid_stored_digest_fails(case_dir, case, findings, config, digest):
+    summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
+    for entry in [*summary["causes"].values(), *summary["actions"].values()]:
+        if digest == "missing":
+            entry.pop("digest", None)
+        else:
+            entry["digest"] = digest
+    store_summary(case_dir, summary, digests=False)
+    problems = problems_for(VALID_REPORT, case, findings, config)
+    for path in ("causes[0]", "causes[1]", "actions[0]", "actions[1]"):
+        edited_problems(problems, path)
+
+
+def test_only_labels_and_reasons_may_change_after_judging(case_dir, case, findings, config):
+    report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(label="probable"))
+    report["actions"][0].update(label="candidate", rationale="A new rationale", risk="Lower", verification=["Other"])
+    assert problems_for(report, case, findings, config) == []
+    summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
+    summary["causes"]["C2"]["reasons"] = ["Something else"]
+    store_summary(case_dir, summary, digests=False)
+    assert problems_for(report, case, findings, config) == []
+
+
+def test_judging_again_after_an_edit_restores_the_label(case_dir, case, findings, config):
+    report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(statement="A reworded statement of the same cause"))
+    assert problems_for(report, case, findings, config) != []
+    rejudge(case_dir, report)
+    assert problems_for(report, case, findings, config) == []
+
+
+def test_an_unjudged_summary_has_no_digests_to_check(case_dir, case, findings, config):
+    store_summary(case_dir, summary_with(judged=False, causes={}, actions={}, findings={}), digests=False)
+    problems = problems_for(VALID_REPORT, case, findings, config)
+    assert not any("edited after judging" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("edit", [
+    lambda r: r["causes"][0].update(statement="A different cause entirely"),
+    lambda r: r["causes"][0]["supporting"].append("compute-2"),
+    lambda r: r["actions"][0].update(change="Delete the production database"),
+    lambda r: r["actions"][0]["target"].update(service="payments-api"),
+])
+def test_an_edited_report_is_never_rendered_as_confirmed_or_recommended(skill_dir, case_dir, edit):
+    report = copy.deepcopy(VALID_REPORT)
+    edit(report)
+    (case_dir / "report.json").write_text(json.dumps(report))
+    result = subprocess.run([sys.executable, str(SKILL_SRC / "scripts" / "report.py"), "render", "--case-dir", str(case_dir),
+                             "--skill-dir", str(skill_dir)], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "edited after judging" in result.stderr
+    assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
+
+
+@pytest.fixture
+def skill_dir(tmp_path, config_data):
+    config_data["cases_dir"] = str(tmp_path / "cases")
+    root = tmp_path / "digest-skill"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "triage-config.yaml").write_text(yaml.safe_dump(config_data))
+    return root

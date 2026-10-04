@@ -13,6 +13,7 @@ from typing import Any
 
 from triage.compose import LABEL_ORDER, cap_label, number
 from triage.config import TriageConfig
+from triage.digest import action_digest, cause_digest
 from triage.findings import evidence_documents, load_facts
 from triage.redact import Redactor, audit_text
 from triage.window import WindowError, format_time, parse_time
@@ -380,10 +381,37 @@ def _summary_entry(table: Any, key: Any) -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
-def _check_causes_against_summary(summary: dict, parts: dict, problems: list[str]) -> None:
+def _stored_digest_matches(entry: dict, current: str) -> bool:
+    stored = entry.get("digest")
+    return isinstance(stored, str) and stored == current
+
+
+def _edited_entries(summary: dict, parts: dict, findings: dict[str, dict], problems: list[str]) -> tuple[set[int], set[int]]:
+    """Indexes of causes and actions whose content no longer matches what was judged. Each is a problem."""
+    causes, actions = set(), set()
+    for index, cause in parts["causes"]:
+        entry = _summary_entry(summary["causes"], cause.get("id"))
+        if entry is not None and not _stored_digest_matches(entry, cause_digest(cause, findings)):
+            causes.add(index)
+            problems.append(f"causes[{index}]: edited after judging (or its stored digest is missing); "
+                            "it counts as candidate, so run the judgments again")
+    for index, action in parts["actions"]:
+        entry = _summary_entry(summary.get("actions"), action.get("id"))
+        if entry is not None and not _stored_digest_matches(entry, action_digest(action)):
+            actions.add(index)
+            problems.append(f"actions[{index}]: edited after judging (or its stored digest is missing); "
+                            "it counts as candidate, so run the judgments again")
+    return causes, actions
+
+
+def _check_causes_against_summary(summary: dict, parts: dict, edited: set[int], problems: list[str]) -> None:
     for index, cause in parts["causes"]:
         label, where = cause.get("label"), f"causes[{index}]"
         if label not in LABEL_ORDER:
+            continue
+        if index in edited:
+            if cap_label(label, "candidate") != label:
+                problems.append(f"{where}: labelled {label}, stronger than candidate, which an edited cause counts as")
             continue
         entry = _summary_entry(summary["causes"], cause.get("id"))
         if entry is None:
@@ -398,9 +426,16 @@ def _check_causes_against_summary(summary: dict, parts: dict, problems: list[str
             problems.append(f"{where}: labelled {label}, stronger than the judged label {judged}")
 
 
-def _check_actions_against_summary(summary: dict, parts: dict, problems: list[str]) -> None:
+def _check_actions_against_summary(summary: dict, parts: dict, edited_causes: set[int], edited_actions: set[int],
+                                   problems: list[str]) -> None:
+    edited_cause_ids = {cause.get("id") for index, cause in parts["causes"] if index in edited_causes}
     for index, action in parts["actions"]:
         where = f"actions[{index}]"
+        if action.get("label") == "recommended":
+            if index in edited_actions:
+                problems.append(f"{where}: recommended, but the action was edited after judging")
+            if isinstance(action.get("cause"), str) and action["cause"] in edited_cause_ids:
+                problems.append(f"{where}: recommended, but its cause was edited after judging")
         entry = _summary_entry(summary.get("actions"), action.get("id"))
         if entry is not None and entry.get("label") not in ACTION_LABELS and action.get("label") == "recommended":
             problems.append(f"{where}: its entry in judgments/{SUMMARY_NAME} has a missing or invalid label")
@@ -442,7 +477,7 @@ def _check_typesafe_against_summary(report: dict, summary: dict | None, problems
         problems.append(f"coverage.typesafe: must equal the value stored in judgments/{SUMMARY_NAME}")
 
 
-def _check_judgments(report: dict, case: dict, parts: dict, problems: list[str]) -> None:
+def _check_judgments(report: dict, case: dict, parts: dict, findings: dict[str, dict], problems: list[str]) -> None:
     raw, unreadable = load_summary(case)
     if unreadable:
         problems.append(unreadable)
@@ -456,8 +491,9 @@ def _check_judgments(report: dict, case: dict, parts: dict, problems: list[str])
             if cause.get("label") == "confirmed":
                 problems.append(f"causes[{index}]: no judging run is stored, so no cause may be labelled confirmed")
     if summary is not None:
-        _check_causes_against_summary(summary, parts, problems)
-        _check_actions_against_summary(summary, parts, problems)
+        edited_causes, edited_actions = _edited_entries(summary, parts, findings, problems)
+        _check_causes_against_summary(summary, parts, edited_causes, problems)
+        _check_actions_against_summary(summary, parts, edited_causes, edited_actions, problems)
         _check_findings_against_summary(summary, parts, problems)
 
 
@@ -502,7 +538,7 @@ def validate_report(report: Any, case: dict, findings: dict[str, dict], config: 
     _check_actions(config, parts, findings, problems)
     _check_hypothesis_causes(parts, problems)
     _check_typesafe(report, parts, problems)
-    _check_judgments(report, case, parts, problems)
+    _check_judgments(report, case, parts, findings, problems)
     _check_secrets(report, problems)
     return problems
 
