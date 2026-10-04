@@ -20,6 +20,7 @@ Invoking this skill turns on the triage guard for the rest of the session. The
 guard approves read-only AWS and Kubernetes commands that use a triage profile
 or the triage kubeconfig, and blocks every other AWS or Kubernetes command.
 Start a new session to work with your everyday profiles again.
+If the guard hook itself times out, Claude Code treats that as a non-blocking error and the normal permission flow applies.
 
 ## What to do when invoked
 

@@ -23,9 +23,11 @@ skill_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python_bin="${AI_TRIAGE_PYTHON:-${skill_dir}/.venv/bin/python}"
 payload="$(cat)"
 
+# No word boundaries: JSON escapes such as \n or \t hide the boundary before the tool
+# name, and a false deny is acceptable when the guard itself is broken.
 deny_if_sensitive() {
   local reason="$1"
-  if printf '%s' "${payload}" | grep -Eq '(^|[^A-Za-z0-9_])(aws|kubectl)([^A-Za-z0-9_]|$)'; then
+  if printf '%s' "${payload}" | grep -Eq 'aws|kubectl'; then
     printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"AI Triage guard: %s"}}\n' "${reason}"
   fi
 }
