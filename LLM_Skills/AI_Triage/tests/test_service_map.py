@@ -86,3 +86,36 @@ def test_missing_map_file_is_reported(tmp_path, config):
     with pytest.raises(MapError) as excinfo:
         load_map(tmp_path / "absent.yaml", config)
     assert "file not found" in excinfo.value.errors[0]
+
+
+def _prod_resources(map_data, service, key):
+    return map_data["services"][service]["environments"]["prod"]["resources"][key]
+
+
+@pytest.mark.parametrize("pattern", ["app-logs-*,other-*", "app-logs-1,app-logs-2", "*,*", "app-logs-*\n"])
+def test_comma_list_or_odd_index_pattern_is_rejected(map_data, config, pattern):
+    _prod_resources(map_data, "checkout-api", "opensearch")["index_pattern"] = pattern
+    with pytest.raises(MapError) as excinfo:
+        parse_map(map_data, config)
+    assert "must be a single index pattern such as app-logs-*" in "\n".join(excinfo.value.errors)
+
+
+def test_index_pattern_outside_the_cluster_patterns_is_rejected(map_data, config):
+    _prod_resources(map_data, "checkout-api", "opensearch")["index_pattern"] = "billing-logs-*"
+    with pytest.raises(MapError) as excinfo:
+        parse_map(map_data, config)
+    assert "outside the allowed patterns" in "\n".join(excinfo.value.errors)
+
+
+@pytest.mark.parametrize("pattern", ["app-logs-*", "app-logs-prod", "app-logs-prod-*"])
+def test_index_pattern_inside_the_cluster_patterns_is_accepted(map_data, config, pattern):
+    _prod_resources(map_data, "checkout-api", "opensearch")["index_pattern"] = pattern
+    parse_map(map_data, config)
+
+
+@pytest.mark.parametrize("namespace", ["Payments", "pay_ments", "-pay", "pay ments", "pay,other", "pay\n", "kube-system "])
+def test_bad_namespace_is_rejected(map_data, config, namespace):
+    _prod_resources(map_data, "payments-api", "eks")["namespace"] = namespace
+    with pytest.raises(MapError) as excinfo:
+        parse_map(map_data, config)
+    assert "eks.namespace: must use lower-case letters, digits, and dashes only" in "\n".join(excinfo.value.errors)

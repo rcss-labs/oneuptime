@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from triage.config import TriageConfig
+from triage.config import TriageConfig, is_index_pattern, is_simple_name
 
 MAP_FILE_NAME = "service-map.yaml"
 SOURCES = ("confirmed", "discovered")
@@ -129,10 +129,14 @@ def _check_resources(resources: dict[str, Any], where: str, config: TriageConfig
             errors.append(f"{where}.resources.opensearch: must be a mapping")
         else:
             cluster = config.opensearch_clusters.get(str(search.get("cluster")))
-            pattern = str(search.get("index_pattern", ""))
+            pattern = search.get("index_pattern", "")
             if cluster is None:
                 errors.append(f"{where}.resources.opensearch.cluster: unknown cluster '{search.get('cluster')}'")
-            elif not any(fnmatchcase(pattern, allowed) for allowed in cluster.allowed_index_patterns):
+            if not is_index_pattern(pattern):
+                errors.append(
+                    f"{where}.resources.opensearch.index_pattern: {pattern!r} must be a single index pattern such as app-logs-*"
+                )
+            elif cluster is not None and not any(fnmatchcase(pattern, allowed) for allowed in cluster.allowed_index_patterns):
                 errors.append(
                     f"{where}.resources.opensearch.index_pattern: '{pattern}' is outside the allowed patterns"
                 )
@@ -143,8 +147,13 @@ def _check_resources(resources: dict[str, Any], where: str, config: TriageConfig
         else:
             if str(eks.get("cluster")) not in config.eks_clusters:
                 errors.append(f"{where}.resources.eks.cluster: unknown cluster '{eks.get('cluster')}'")
-            if not str(eks.get("namespace", "")).strip():
+            namespace = eks.get("namespace")
+            if not isinstance(namespace, str) or not namespace.strip():
                 errors.append(f"{where}.resources.eks.namespace: must be set")
+            elif not is_simple_name(namespace):
+                errors.append(
+                    f"{where}.resources.eks.namespace: must use lower-case letters, digits, and dashes only"
+                )
 
 
 def _parse_environment(name: str, raw: Any, where: str, config: TriageConfig, errors: list[str]) -> Environment | None:
