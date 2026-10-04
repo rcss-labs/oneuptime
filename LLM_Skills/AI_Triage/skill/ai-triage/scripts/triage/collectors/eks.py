@@ -5,17 +5,22 @@ import re
 from typing import Any
 
 from triage.collectors import Collector
-from triage.collectors.common import in_window, newest_in_window
+from triage.collectors.common import in_window, parse_iso, split_csv, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME, MAX_EXCERPT
+from triage.window import format_time
 
 MAX_NODEGROUPS = 10
 MAX_ADDONS = 20
-MAX_UPDATES = "5"
+MAX_UPDATES = "20"
+MAX_WORKLOADS = 10
+MAX_CONTAINERS_PER_POD = 2
+LOG_LINES = 50
+LOG_FETCH_LINES = "5000"
+LOG_BYTES = "200000"
 MAX_PODS = 30
 MAX_EVENTS = 40
 MAX_LOG_PODS = 3
-LOG_TAIL = "50"
 NOT_FOUND = "ResourceNotFoundException"
 WORKLOAD = re.compile(r"^(deployment|statefulset|daemonset)/[A-Za-z0-9][A-Za-z0-9.-]*$")
 
@@ -28,12 +33,8 @@ def _issues_text(health: dict | None) -> str:
 
 
 def _describe_cluster(ctx: CollectContext, name: str, region: str) -> dict | None:
-    errors_before = len(ctx.evidence.errors)
-    reply = ctx.aws("eks", "describe-cluster", ["--name", name], region=region)
-    missing = reply is None and len(ctx.evidence.errors) > errors_before and ctx.evidence.errors[-1]["code"] == NOT_FOUND
-    if missing or (reply is not None and not reply.get("cluster")):
-        if missing:
-            ctx.evidence.errors.pop()
+    reply = ctx.aws("eks", "describe-cluster", ["--name", name], region=region, not_found=(NOT_FOUND,))
+    if was_not_found(ctx, (NOT_FOUND,)) or (reply is not None and not reply.get("cluster")):
         ctx.evidence.add(
             kind=CURRENT, resource=f"cluster/{name}", command=ctx.last_command,
             summary=f"EKS cluster {name} was not found in region {region}",
@@ -107,11 +108,11 @@ def _add_updates(ctx: CollectContext, name: str, region: str) -> None:
         )
 
 
-def _container_problems(status: dict) -> tuple[list[str], list[str]]:
+def _container_problems(status: dict, prefix: str = "") -> tuple[list[str], list[str]]:
     """Short phrases for the summary and longer messages for the excerpt."""
     phrases: list[str] = []
     messages: list[str] = []
-    container = status.get("name")
+    container = f"{prefix}{status.get('name')}"
     for label, state in (("", status.get("state") or {}), ("last ", status.get("lastState") or {})):
         for kind in ("waiting", "terminated"):
             detail = state.get(kind)
@@ -124,16 +125,24 @@ def _container_problems(status: dict) -> tuple[list[str], list[str]]:
     return phrases, messages
 
 
+def _container_statuses(pod: dict) -> list[dict]:
+    return (pod.get("status") or {}).get("containerStatuses") or []
+
+
+def _init_statuses(pod: dict) -> list[dict]:
+    return (pod.get("status") or {}).get("initContainerStatuses") or []
+
+
 def _pod_is_healthy(pod: dict) -> bool:
     status = pod.get("status") or {}
     if status.get("phase") == "Succeeded":
         return True
-    containers = status.get("containerStatuses") or []
+    containers = _container_statuses(pod)
     return status.get("phase") == "Running" and bool(containers) and all(c.get("ready") for c in containers)
 
 
 def _restarts(pod: dict) -> int:
-    return sum(c.get("restartCount", 0) for c in (pod.get("status") or {}).get("containerStatuses") or [])
+    return sum(c.get("restartCount", 0) for c in _container_statuses(pod) + _init_statuses(pod))
 
 
 def _pod_fact(ctx: CollectContext, namespace: str, pod: dict) -> None:
@@ -141,8 +150,8 @@ def _pod_fact(ctx: CollectContext, namespace: str, pod: dict) -> None:
     status = pod.get("status") or {}
     phrases: list[str] = []
     messages: list[str] = []
-    for container in status.get("containerStatuses") or []:
-        more_phrases, more_messages = _container_problems(container)
+    for container, prefix in [(c, "") for c in _container_statuses(pod)] + [(c, "init ") for c in _init_statuses(pod)]:
+        more_phrases, more_messages = _container_problems(container, prefix)
         phrases += more_phrases
         messages += more_messages
     for condition in status.get("conditions") or []:
@@ -171,22 +180,32 @@ def _add_pods(ctx: CollectContext, cluster: str, namespace: str) -> list[dict]:
     return unhealthy
 
 
-def _event_time(event: dict) -> Any:
-    return event.get("lastTimestamp") or (event.get("series") or {}).get("lastObservedTime") \
-        or event.get("eventTime") or event.get("firstTimestamp")
+def _event_period(event: dict) -> tuple[Any, Any]:
+    """First and last occurrence of an event, as parsed times (None when unknown)."""
+    last = parse_iso(event.get("lastTimestamp")) or parse_iso((event.get("series") or {}).get("lastObservedTime"))
+    first = parse_iso(event.get("firstTimestamp")) or parse_iso(event.get("eventTime"))
+    return first or last, last or first
 
 
 def _add_events(ctx: CollectContext, cluster: str, namespace: str) -> None:
-    reply = ctx.kubectl_json(cluster, ["get", "events", "--sort-by=.lastTimestamp"], namespace=namespace)
-    warnings = [e for e in (reply or {}).get("items", []) if e.get("type") == "Warning"]
-    for event in newest_in_window(ctx.window, warnings, _event_time, MAX_EVENTS):
+    reply = ctx.kubectl_json(cluster, ["get", "events"], namespace=namespace)
+    window = ctx.window
+    overlapping = []
+    for event in (reply or {}).get("items", []):
+        first, last = _event_period(event)
+        if event.get("type") == "Warning" and first and last and first <= window.end and last >= window.start:
+            overlapping.append((last, first, event))
+    overlapping.sort(key=lambda entry: entry[0], reverse=True)
+    for last, first, event in overlapping[:MAX_EVENTS]:
         involved = event.get("involvedObject") or {}
+        # The first occurrence inside the window is not known for a recurring event; use the best bound we have.
+        moment = first if window.contains(first) else last if window.contains(last) else window.start
         ctx.evidence.add(
-            kind=INCIDENT_TIME, resource=f"{involved.get('kind')}/{involved.get('name')}", time=_event_time(event),
+            kind=INCIDENT_TIME, resource=f"{involved.get('kind')}/{involved.get('name')}", time=moment,
             command=ctx.last_command,
             summary=(
                 f"Warning event {event.get('reason')} on {involved.get('kind')}/{involved.get('name')} "
-                f"({event.get('count', 1)} times)"
+                f"({event.get('count', 1)} times, first seen {format_time(first)}, last seen {format_time(last)})"
             ),
             excerpt=event.get("message") or "",
         )
@@ -223,29 +242,79 @@ def _add_workload(ctx: CollectContext, cluster: str, namespace: str, workload: s
         )
 
 
+_LOG_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z(?: |$)")
+
+
+def _line_time(line: str):
+    """The time kubectl --timestamps put at the start of a line (nanoseconds are cut to microseconds)."""
+    match = _LOG_TIME.match(line)
+    if not match:
+        return None
+    fraction = f".{match.group(2)[:6]}" if match.group(2) else ""
+    return parse_iso(f"{match.group(1)}{fraction}Z")
+
+
+def _containers_to_read(pod: dict) -> list[dict]:
+    """Containers that are not ready or have restarted, and that have run (so they have logs), at most two."""
+    chosen = [c for c in _container_statuses(pod) if not c.get("ready") or c.get("restartCount", 0) > 0]
+    return chosen[:MAX_CONTAINERS_PER_POD]
+
+
+def _fetch_logs(ctx: CollectContext, cluster: str, namespace: str, pod_name: str, container: str, previous: bool) -> None:
+    args = [
+        "logs", pod_name, "-c", container, "--since-time", format_time(ctx.window.start),
+        "--timestamps", "--tail", LOG_FETCH_LINES, "--limit-bytes", LOG_BYTES,
+    ]
+    if previous:
+        args.append("--previous")
+    output = ctx.kubectl(cluster, args, namespace=namespace)
+    if output is None:
+        return
+    which = "previous container instance" if previous else "container"
+    resource = f"pod/{namespace}/{pod_name}"
+    inside = []
+    for line in output.splitlines():
+        moment = _line_time(line)
+        if moment is not None and ctx.window.contains(moment):
+            inside.append((moment, line))
+    if not inside:
+        ctx.evidence.add(
+            kind=DERIVED, resource=resource, command=ctx.last_command,
+            summary=f"No log line of {which} {container} in pod {pod_name} falls inside the incident window",
+        )
+        return
+    kept = inside[-LOG_LINES:]
+    # Redact line by line before cutting, so a secret cut by the excerpt boundary cannot leave a fragment.
+    text = "\n".join(ctx.evidence.redactor.text(line) for _, line in kept)
+    ctx.evidence.add(
+        kind=INCIDENT_TIME, resource=resource, time=kept[0][0], command=ctx.last_command,
+        summary=(
+            f"Log lines of {which} {container} in pod {pod_name} from {format_time(kept[0][0])} "
+            f"to {format_time(kept[-1][0])} ({len(kept)} lines kept of {len(inside)} inside the window)"
+        ),
+        excerpt=text[-MAX_EXCERPT:],
+    )
+
+
 def _add_logs(ctx: CollectContext, cluster: str, namespace: str, pod: dict) -> None:
     name = pod["metadata"]["name"]
-    minutes = max(1, int(ctx.window.duration().total_seconds() // 60))
-    base = ["logs", name, "--tail", LOG_TAIL, "--since", f"{minutes}m"]
-    calls = [(base, f"Last log lines of pod {name}")]
-    if _restarts(pod) > 0:
-        calls.append(([*base, "--previous"], f"Last log lines of pod {name} before its previous restart (previous container)"))
-    for args, summary in calls:
-        output = ctx.kubectl(cluster, args, namespace=namespace)
-        if not output:
-            continue
-        # Redact the whole text first so a secret cut by the tail boundary cannot leave a fragment.
-        text = ctx.evidence.redactor.text(output)
-        ctx.evidence.add(
-            kind=CURRENT, resource=f"pod/{namespace}/{name}", command=ctx.last_command,
-            summary=summary, excerpt=text[-MAX_EXCERPT:],
-        )
+    for container in _containers_to_read(pod):
+        state = container.get("state") or {}
+        if "running" in state or "terminated" in state:
+            _fetch_logs(ctx, cluster, namespace, name, container["name"], previous=False)
+        if container.get("restartCount", 0) > 0:
+            _fetch_logs(ctx, cluster, namespace, name, container["name"], previous=True)
 
 
 def _add_kubernetes(ctx: CollectContext, cluster: str, namespace: str, workloads: list[str]) -> None:
     unhealthy = _add_pods(ctx, cluster, namespace)
     _add_events(ctx, cluster, namespace)
-    for workload in workloads:
+    if len(workloads) > MAX_WORKLOADS:
+        ctx.evidence.add(
+            kind=DERIVED, resource=f"namespace/{namespace}",
+            summary=f"{len(workloads)} workloads were given; only the first {MAX_WORKLOADS} were examined",
+        )
+    for workload in workloads[:MAX_WORKLOADS]:
         if not WORKLOAD.match(workload):
             ctx.evidence.add_error(
                 "", "InvalidTarget",
@@ -264,9 +333,12 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         ctx.evidence.add_error("", "UnknownCluster", f"{name} is not in eks_clusters in the triage config")
         return
     if cluster.account != ctx.account.alias:
-        ctx.evidence.add_error(
-            "", "AccountMismatch",
-            f"cluster {name} belongs to account {cluster.account}, but this run uses account {ctx.account.alias}",
+        ctx.evidence.add(
+            kind=DERIVED, resource=f"cluster/{name}",
+            summary=(
+                f"Cluster {name} belongs to account {cluster.account}, but this run uses account "
+                f"{ctx.account.alias}; nothing was collected"
+            ),
         )
         return
     described = _describe_cluster(ctx, name, cluster.region)
@@ -278,7 +350,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     _add_updates(ctx, name, cluster.region)
     namespace = targets.get("namespace")
     if namespace:
-        workloads = [w.strip() for w in targets.get("workloads", "").split(",") if w.strip()]
+        workloads = split_csv(targets.get("workloads"))
         _add_kubernetes(ctx, name, namespace, workloads)
 
 

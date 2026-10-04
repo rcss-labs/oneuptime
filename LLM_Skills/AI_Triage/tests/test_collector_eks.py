@@ -1,7 +1,7 @@
 import json
 
 from fakes import access_denied
-from helpers import assert_read_only, make_context
+from helpers import FakeKubectl, assert_read_only, make_context
 from triage.collectors.eks import COLLECTOR
 
 CLUSTER = "platform-prod"
@@ -46,20 +46,25 @@ def aws_answers(**extra):
     return base
 
 
-def pod(name="payments-api-abc", phase="Running", ready=True, restarts=0, waiting=None, terminated=None):
-    state = {"running": {"startedAt": OUTSIDE}}
-    if waiting:
-        state = {"waiting": waiting}
-    status = {"name": "app", "ready": ready, "restartCount": restarts, "state": state}
-    if terminated:
-        status["lastState"] = {"terminated": terminated}
-    return {"metadata": {"name": name}, "status": {"phase": phase, "containerStatuses": [status]}}
+def container(name="app", ready=True, restarts=0, state=None, last=None):
+    body = {"name": name, "ready": ready, "restartCount": restarts, "state": state or {"running": {"startedAt": OUTSIDE}}}
+    if last:
+        body["lastState"] = {"terminated": last}
+    return body
+
+
+def pod(name="payments-api-abc", phase="Running", ready=True, restarts=0, waiting=None, terminated=None,
+        containers=None):
+    state = {"waiting": waiting} if waiting else None
+    statuses = containers if containers is not None else [
+        container(ready=ready, restarts=restarts, state=state, last=terminated)]
+    return {"metadata": {"name": name}, "status": {"phase": phase, "containerStatuses": statuses}}
 
 
 def event(reason="BackOff", message="Back-off restarting failed container", when=IN_WINDOW, kind="Warning",
-          obj="payments-api-abc"):
+          obj="payments-api-abc", first=None):
     return {"type": kind, "reason": reason, "message": message, "lastTimestamp": when, "count": 7,
-            "involvedObject": {"kind": "Pod", "name": obj}}
+            "firstTimestamp": first or when, "involvedObject": {"kind": "Pod", "name": obj}}
 
 
 def deployment(desired=3, ready=3, updated=3, conditions=()):
@@ -72,16 +77,41 @@ HISTORY = "deployment.apps/payments-api\nREVISION  CHANGE-CAUSE\n1         <none
 
 def kube_answers(**extra):
     base = {"get pods": {"items": [pod()]}, "get events": {"items": []},
-            "get deployment/payments-api": deployment(), "rollout history": HISTORY, "logs payments-api-abc": "line"}
+            "get deployment/payments-api": deployment(), "rollout history": HISTORY}
     base.update(extra)
     return base
 
 
-def run(config_data, tmp_path, aws=None, kube=None, targets=None):
-    ctx, fake_aws, fake_kube = make_context(
+class LogKube(FakeKubectl):
+    """Answers kubectl logs by (pod, container, previous); every other call as FakeKubectl does."""
+
+    def __init__(self, answers, logs):
+        super().__init__(answers)
+        self.logs = logs
+
+    def __call__(self, argv, timeout):
+        if "logs" not in argv:
+            return super().__call__(argv, timeout)
+        self.calls.append(argv)
+        pod_name = argv[argv.index("logs") + 1]
+        container_name = argv[argv.index("-c") + 1] if "-c" in argv else None
+        answer = self.logs.get((pod_name, container_name, "--previous" in argv), "")
+        if isinstance(answer, tuple):
+            return answer[0], "", answer[1]
+        return 0, answer, ""
+
+
+def run(config_data, tmp_path, aws=None, kube=None, targets=None, logs=None):
+    ctx, fake_aws, _ = make_context(
         config_data, tmp_path, aws or aws_answers(), collector="eks", kube_answers=kube or kube_answers())
+    fake_kube = LogKube(kube or kube_answers(), logs or {})
+    ctx.kube_runner = fake_kube
     COLLECTOR.run(ctx, {"cluster": CLUSTER, **(targets or {})})
     return ctx, fake_aws, fake_kube
+
+
+def log_calls(fake_kube):
+    return [c for c in fake_kube.calls if "logs" in c]
 
 
 def with_text(ctx, text):
@@ -136,8 +166,6 @@ def test_updates_inside_the_window(config_data, tmp_path):
     update = with_text(ctx, "Update u1")[0]
     assert update.kind == "incident_time" and update.time == IN_WINDOW
     assert "VersionUpdate" in update.summary and "Failed" in update.summary and "no capacity" in update.summary
-    call = aws.called("eks", "list-updates")[0]
-    assert call[call.index("--max-items") + 1] == "5"
     assert_read_only(ctx, aws, kube)
 
 
@@ -163,13 +191,13 @@ def test_unknown_cluster_is_an_error_not_a_crash(config_data, tmp_path):
     assert fake_aws.calls == []
 
 
-def test_account_mismatch_stops_the_run(config_data, tmp_path):
+def test_account_mismatch_is_a_fact_and_no_call_is_made(config_data, tmp_path):
     ctx, fake_aws, fake_kube = make_context(config_data, tmp_path, aws_answers(), collector="eks", account="staging")
     COLLECTOR.run(ctx, {"cluster": CLUSTER, "namespace": "web"})
-    assert ctx.evidence.errors[0]["code"] == "AccountMismatch"
-    assert "prod-main" in ctx.evidence.errors[0]["message"] and "staging" in ctx.evidence.errors[0]["message"]
+    assert len(ctx.evidence.facts) == 1 and ctx.evidence.facts[0].kind == "derived"
+    summary = ctx.evidence.facts[0].summary
+    assert "prod-main" in summary and "staging" in summary and CLUSTER in summary
     assert fake_aws.calls == [] and fake_kube.calls == []
-
 
 def test_the_cluster_region_is_used(config_data, tmp_path):
     config_data["eks_clusters"][CLUSTER]["region"] = "us-east-1"
@@ -178,33 +206,107 @@ def test_the_cluster_region_is_used(config_data, tmp_path):
     assert call[call.index("--region") + 1] == "us-east-1"
 
 
-def test_unhealthy_pods_with_reasons_and_logs(config_data, tmp_path):
-    crashing = pod(restarts=5, ready=False, waiting={"reason": "CrashLoopBackOff", "message": "back-off 5m restarting"},
-                   terminated={"reason": "OOMKilled", "exitCode": 137})
-    kube = kube_answers(**{"get pods": {"items": [pod(name="healthy-1"), crashing, pod(name="done", phase="Succeeded", ready=False)]},
-                           "logs payments-api-abc": "starting\nfatal: cannot connect to db"})
+IN_LOG = ["2026-10-04T10:30:00.123456789Z starting", "2026-10-04T11:00:00.5Z fatal: cannot connect to db"]
+BEFORE_LOG = "2026-10-04T09:59:00.000000001Z before the incident"
+AFTER_LOG = "2026-10-04T12:30:00.000000000Z after the incident"
+LOG_TEXT = "\n".join([BEFORE_LOG, *IN_LOG, AFTER_LOG])
+
+
+def crashing_pod():
+    return pod(restarts=5, ready=False, waiting={"reason": "CrashLoopBackOff", "message": "back-off 5m restarting"},
+               terminated={"reason": "OOMKilled", "exitCode": 137})
+
+
+def test_unhealthy_pod_summary(config_data, tmp_path):
+    kube = kube_answers(**{"get pods": {"items": [pod(name="healthy-1"), crashing_pod(),
+                                                   pod(name="done", phase="Succeeded", ready=False)]}})
     ctx, aws, fake_kube = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"})
-    facts = with_text(ctx, "Pod payments-api-abc")
+    facts = with_text(ctx, "Pod payments-api-abc is")
     assert len(facts) == 1 and facts[0].kind == "current"
     for part in ("Running", "5 restarts", "CrashLoopBackOff", "OOMKilled", "137"):
         assert part in facts[0].summary
     assert "back-off 5m restarting" in facts[0].excerpt
     assert with_text(ctx, "Pod healthy-1") == [] and with_text(ctx, "Pod done") == []
-    logs = [f for f in ctx.evidence.facts if "fatal: cannot connect" in f.excerpt]
-    assert len(logs) == 2 and any("previous" in f.summary for f in logs)
-    log_calls = [c for c in fake_kube.calls if "logs" in c]
-    assert len(log_calls) == 2
-    for call in log_calls:
-        assert call[call.index("--tail") + 1] == "50" and call[call.index("--since") + 1] == "120m"
-    assert sum("--previous" in c for c in log_calls) == 1
     assert_read_only(ctx, aws, fake_kube)
 
 
-def test_log_without_restarts_has_no_previous_call(config_data, tmp_path):
-    kube = kube_answers(**{"get pods": {"items": [pod(ready=False, phase="Pending")]}})
-    ctx, _, fake_kube = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"})
-    assert not any("--previous" in c for c in fake_kube.calls)
-    assert any("logs" in c for c in fake_kube.calls)
+def test_logs_cover_the_incident_window_not_the_last_minutes(config_data, tmp_path):
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    logs = {("payments-api-abc", "app", True): LOG_TEXT}
+    ctx, aws, fake_kube = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"}, logs=logs)
+    call = log_calls(fake_kube)[0]
+    assert call[call.index("--since-time") + 1] == "2026-10-04T10:00:00Z"
+    assert "--timestamps" in call and "--since" not in call
+    assert call[call.index("--limit-bytes") + 1] == "200000"
+    assert int(call[call.index("--tail") + 1]) <= 5000
+    fact = next(f for f in ctx.evidence.facts if "fatal: cannot connect" in f.excerpt)
+    assert "before the incident" not in fact.excerpt and "after the incident" not in fact.excerpt
+    assert "2026-10-04T10:30:00Z" in fact.summary and "2026-10-04T11:00:00Z" in fact.summary
+    assert "app" in fact.summary
+    assert_read_only(ctx, aws, fake_kube)
+
+
+def test_no_log_line_inside_the_window_is_a_derived_fact(config_data, tmp_path):
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    logs = {("payments-api-abc", "app", True): "\n".join([BEFORE_LOG, AFTER_LOG])}
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"}, logs=logs)
+    derived = [f for f in ctx.evidence.facts if f.kind == "derived" and "no log line" in f.summary.lower()]
+    assert len(derived) == 1 and "app" in derived[0].summary
+    assert not any("incident" in f.excerpt for f in ctx.evidence.facts)
+
+
+def test_only_the_last_fifty_lines_of_the_window_are_kept(config_data, tmp_path):
+    lines = [f"2026-10-04T10:{n // 60:02d}:{n % 60:02d}.000000000Z line-{n:03d}" for n in range(80)]
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): "\n".join(lines)})
+    fact = next(f for f in ctx.evidence.facts if "line-079" in f.excerpt)
+    assert "50 lines" in fact.summary and "line-029" not in fact.excerpt
+
+
+def test_current_and_previous_logs_for_a_running_container_that_restarted(config_data, tmp_path):
+    running = pod(containers=[container(ready=False, restarts=2)])
+    kube = kube_answers(**{"get pods": {"items": [running]}})
+    _, _, fake_kube = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"})
+    calls = log_calls(fake_kube)
+    assert len(calls) == 2 and sum("--previous" in c for c in calls) == 1
+    assert all(c[c.index("-c") + 1] == "app" for c in calls)
+
+
+def test_logs_come_from_the_failing_container_not_the_sidecar(config_data, tmp_path):
+    sidecar_first = pod(containers=[
+        container(name="proxy"),
+        container(name="app", ready=False, restarts=3, state={"waiting": {"reason": "CrashLoopBackOff"}},
+                  last={"reason": "Error", "exitCode": 1}),
+    ])
+    kube = kube_answers(**{"get pods": {"items": [sidecar_first]}})
+    ctx, aws, fake_kube = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"})
+    calls = log_calls(fake_kube)
+    assert calls and all(c[c.index("-c") + 1] == "app" for c in calls)
+    assert all("--previous" in c for c in calls)
+    assert_read_only(ctx, aws, fake_kube)
+
+
+def test_no_previous_logs_for_a_container_that_never_restarted(config_data, tmp_path):
+    kube = kube_answers(**{"get pods": {"items": [pod(containers=[container(ready=False, restarts=0)])]}})
+    _, _, fake_kube = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"})
+    assert len(log_calls(fake_kube)) == 1 and not any("--previous" in c for c in log_calls(fake_kube))
+
+
+def test_no_logs_for_a_container_that_never_started(config_data, tmp_path):
+    waiting = pod(phase="Pending", containers=[container(ready=False, state={"waiting": {"reason": "ImagePullBackOff"}})])
+    ctx, _, fake_kube = run(config_data, tmp_path, kube=kube_answers(**{"get pods": {"items": [waiting]}}),
+                            targets={"namespace": "web"})
+    assert log_calls(fake_kube) == [] and ctx.evidence.errors == []
+    assert with_text(ctx, "ImagePullBackOff")
+
+
+def test_at_most_two_containers_per_pod_are_read(config_data, tmp_path):
+    three = pod(containers=[container(name=n, ready=False) for n in ("a", "b", "c")])
+    _, _, fake_kube = run(config_data, tmp_path, kube=kube_answers(**{"get pods": {"items": [three]}}),
+                          targets={"namespace": "web"})
+    assert {c[c.index("-c") + 1] for c in log_calls(fake_kube)} == {"a", "b"}
+
 
 
 def test_warning_events_inside_the_window(config_data, tmp_path):
@@ -215,10 +317,29 @@ def test_warning_events_inside_the_window(config_data, tmp_path):
     assert found[0].time == IN_WINDOW and "Pod/payments-api-abc" in found[0].summary and "7 times" in found[0].summary
     assert "Back-off restarting failed container" in found[0].excerpt
     assert with_text(ctx, "Old") == [] and with_text(ctx, "Pulled") == []
-    call = next(c for c in fake_kube.calls if "events" in c)
-    assert "--sort-by=.lastTimestamp" in call
     assert_read_only(ctx, aws, fake_kube)
 
+
+def events_found(config_data, tmp_path, *events):
+    ctx, _, _ = run(config_data, tmp_path, kube=kube_answers(**{"get events": {"items": list(events)}}),
+                    targets={"namespace": "web"})
+    return [f for f in ctx.evidence.facts if "Warning event" in f.summary]
+
+
+def test_recurring_event_that_began_in_the_window_and_still_fires_is_kept(config_data, tmp_path):
+    found = events_found(config_data, tmp_path, event(first="2026-10-04T10:30:00Z", when="2026-10-04T13:00:00Z"))
+    assert len(found) == 1 and found[0].time == "2026-10-04T10:30:00Z"
+    assert "2026-10-04T10:30:00Z" in found[0].summary and "2026-10-04T13:00:00Z" in found[0].summary
+
+
+def test_event_that_spans_the_whole_window_is_kept(config_data, tmp_path):
+    assert len(events_found(config_data, tmp_path, event(first="2026-10-04T08:00:00Z", when="2026-10-04T13:00:00Z"))) == 1
+
+
+def test_events_entirely_outside_the_window_are_dropped(config_data, tmp_path):
+    assert events_found(config_data, tmp_path,
+                        event(first="2026-10-04T07:00:00Z", when="2026-10-04T08:00:00Z"),
+                        event(first="2026-10-04T13:00:00Z", when="2026-10-04T14:00:00Z")) == []
 
 def test_workload_status_and_rollout_history(config_data, tmp_path):
     kube = kube_answers(**{"get deployment/payments-api": deployment(desired=3, ready=1, updated=2, conditions=[
@@ -258,37 +379,64 @@ def test_access_denied_on_one_aws_call_keeps_the_rest(config_data, tmp_path):
 def test_pod_log_secrets_never_reach_the_document(config_data, tmp_path):
     password = "pw" + "3" * 10
     key = "AKIA" + "D" * 16
-    message = f"password={password} failed"
     crashing = pod(ready=False, restarts=1, waiting={"reason": "Error", "message": f"token={password}"})
-    kube = kube_answers(**{"get pods": {"items": [crashing]}, "logs payments-api-abc": f"{message} key {key}",
+    kube = kube_answers(**{"get pods": {"items": [crashing]},
                            "get events": {"items": [event(message=f"password={password}")]}})
-    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"})
+    logs = {("payments-api-abc", "app", True): f"2026-10-04T10:30:00Z password={password} failed key {key}"}
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"}, logs=logs)
     document = ctx.evidence.to_json()
     assert password not in document and key not in document
     assert "failed" in document
 
-
 def test_log_excerpt_is_the_last_500_characters(config_data, tmp_path):
-    log = "a" * 3000 + "THE-END"
-    kube = kube_answers(**{"get pods": {"items": [pod(ready=False, phase="Pending")]}, "logs payments-api-abc": log})
-    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"})
+    lines = [f"2026-10-04T10:30:{n:02d}.000000000Z {'a' * 100}" for n in range(40)]
+    lines[-1] += " THE-END"
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): "\n".join(lines)})
     excerpt = next(f.excerpt for f in ctx.evidence.facts if f.excerpt.endswith("THE-END"))
     assert len(excerpt) <= 500
 
-
 def test_pod_event_and_log_caps(config_data, tmp_path):
-    pods = [pod(name=f"p-{n:02d}", ready=False, phase="Pending") for n in range(40)]
+    pods = [pod(name=f"p-{n:02d}", containers=[container(ready=False)]) for n in range(40)]
     events = [event(reason=f"Reason{n}", when=f"2026-10-04T10:{n % 60:02d}:00Z") for n in range(50)]
     kube = kube_answers(**{"get pods": {"items": pods}, "get events": {"items": events}})
     ctx, _, fake_kube = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"})
     assert len(with_text(ctx, "Pod p-")) == 30
     assert len(with_text(ctx, "Warning event")) == 40
-    assert len([c for c in fake_kube.calls if "logs" in c]) == 3
+    assert len({c[c.index("logs") + 1] for c in log_calls(fake_kube)}) == 3
     assert with_text(ctx, "10 more pods")
-
 
 def test_nodegroup_cap(config_data, tmp_path):
     names = [f"ng-{n}" for n in range(12)]
     ctx, aws, _ = run(config_data, tmp_path, aws_answers(**{"eks list-nodegroups": {"nodegroups": names}}))
     assert len(aws.called("eks", "describe-nodegroup")) == 10
     assert with_text(ctx, "12 nodegroups")
+
+
+def test_updates_are_listed_twenty_at_a_time(config_data, tmp_path):
+    _, aws, _ = run(config_data, tmp_path)
+    call = aws.called("eks", "list-updates")[0]
+    assert call[call.index("--max-items") + 1] == "20"
+
+
+def test_only_updates_created_in_the_window_are_kept_among_many(config_data, tmp_path):
+    ids = [f"u{n}" for n in range(20)]
+    ctx, aws, _ = run(config_data, tmp_path, aws_answers(**{
+        "eks list-updates": {"updateIds": ids}, "eks describe-update": update_reply()}))
+    assert len(aws.called("eks", "describe-update")) == 20
+    assert len(with_text(ctx, "Update u1")) == 20
+
+
+def test_at_most_ten_workloads_are_read(config_data, tmp_path):
+    names = ",".join(f"deployment/app-{n}" for n in range(12))
+    ctx, _, fake_kube = run(config_data, tmp_path, targets={"namespace": "web", "workloads": names})
+    reads = [c for c in fake_kube.calls if "get" in c and any(a.startswith("deployment/") for a in c)]
+    assert len(reads) == 10
+    derived = with_text(ctx, "12 workloads")
+    assert len(derived) == 1 and derived[0].kind == "derived"
+
+
+def test_access_denied_on_the_cluster_is_not_reported_as_not_found(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, aws_answers(**{"eks describe-cluster": access_denied("DescribeCluster")}))
+    assert ctx.evidence.facts == [] and ctx.evidence.errors[0]["code"] == "AccessDeniedException"
