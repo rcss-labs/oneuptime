@@ -1,4 +1,5 @@
 import json
+import shlex
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
@@ -18,7 +19,7 @@ ANSWERS = {
     "_nodes/stats/jvm,fs,os,thread_pool": {"nodes": {"n1": {"name": "data-1"}}},
     "_cat/indices": [{"health": "green", "index": "app-logs-1"}],
     "_cat/shards": [{"index": "app-logs-1", "shard": "0", "prirep": "p", "state": "STARTED"}],
-    "_cluster/allocation/explain": (400, {"error": "none"}),
+    "_cluster/allocation/explain": (400, {"error": {"reason": "unable to find any unassigned shards to explain"}}),
     "app-logs-*/_mapping": {"app-logs-1": {"mappings": {"properties": {"message": {"type": "text"}}}}},
     "app-logs-*/_count": {"count": 7},
     "app-logs-*/_search": {
@@ -255,3 +256,61 @@ def test_a_bad_fixture_directory_exits_2(skill_dir, tmp_path, monkeypatch, capsy
     code = opensearch_query.main(["health", "--cluster", "logs-prod", "--skill-dir", str(skill_dir)])
     assert code == 2
     assert "not a directory" in capsys.readouterr().err
+
+
+# fix round 1
+
+def test_fact_commands_are_the_runnable_invocation(skill_dir, capsys):
+    run(skill_dir, "histogram", *WINDOWED, "--query", "level:ERROR", "--filter", "service=checkout",
+        "--interval", "15m")
+    command = json.loads(capsys.readouterr().out)["facts"][0]["command"]
+    assert shlex.split(command) == [
+        "opensearch_query.py", "histogram", "--cluster", "logs-prod", "--index", "app-logs-*",
+        "--start", START, "--end", END, "--query", "level:ERROR", "--filter", "service=checkout",
+        "--interval", "15m"]
+
+
+def test_state_commands_carry_a_short_invocation(skill_dir, capsys):
+    run(skill_dir, "health")
+    command = json.loads(capsys.readouterr().out)["facts"][0]["command"]
+    assert shlex.split(command) == ["opensearch_query.py", "health", "--cluster", "logs-prod"]
+
+
+def test_unexpected_response_shapes_exit_6_without_a_traceback(skill_dir, capsys):
+    cases = [
+        ("histogram", WINDOWED, {"app-logs-*/_search": {"hits": {}}}),
+        ("health", [], {"_cluster/health": "not json"}),
+        ("search", WINDOWED, {"app-logs-*/_search": "oops"}),
+        ("mapping", ["--index", "app-logs-*"], {"app-logs-*/_mapping": {"i": {"mappings": {"properties": {"f": 5}}}}}),
+    ]
+    for name, extra, answers in cases:
+        code, _ = run(skill_dir, name, *extra, transport=FakeTransport(answers))
+        captured = capsys.readouterr()
+        assert code == 6, name
+        assert captured.err.strip().startswith("unexpected response from the cluster"), name
+        assert "Traceback" not in captured.err and len(captured.err.strip().splitlines()) == 1
+
+
+def test_a_refused_query_string_exits_5_with_the_policy_reason(skill_dir, capsys):
+    code, transport = run(skill_dir, "search", *WINDOWED, "--query", "message:/err.*/")
+    assert code == 5 and transport.requests == []
+    assert "refused by the read policy" in capsys.readouterr().err
+
+
+def test_cluster_error_text_is_redacted_on_stderr(skill_dir, capsys):
+    secret = "AKIA" + "E" * 16
+    transport = FakeTransport({"_cluster/health": (400, {"error": f"bad key {secret}"})})
+    code, _ = run(skill_dir, "health", transport=transport)
+    err = capsys.readouterr().err
+    assert code == 6 and secret not in err
+
+
+def test_search_order_option(skill_dir, capsys):
+    _, transport = run(skill_dir, "search", *WINDOWED, "--order", "desc")
+    assert transport.requests[0].body["sort"] == [{"@timestamp": {"order": "desc"}}]
+
+
+def test_state_subcommand_help_says_there_is_no_time_range(capsys):
+    with pytest.raises(SystemExit):
+        opensearch_query.main(["health", "--help"])
+    assert "no time range" in capsys.readouterr().out

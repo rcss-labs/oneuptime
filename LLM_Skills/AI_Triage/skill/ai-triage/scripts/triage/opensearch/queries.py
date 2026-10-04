@@ -1,6 +1,9 @@
 """The queries of the OpenSearch tool. Each one sends requests through the client and records bounded facts.
 
 Every search body comes from search_body, so a query can only ask for shapes the read policy allows.
+
+The state-only queries (health, nodes, indices, shards, allocation-explain, mapping) read the current state.
+Their evidence window is only the minute before the run; it is not a query range.
 """
 from __future__ import annotations
 
@@ -14,6 +17,7 @@ from typing import Any
 from triage.config import OpenSearchCluster
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME, Evidence
 from triage.opensearch.client import OpenSearchClient, OpenSearchError
+from triage.redact import Redactor
 from triage.opensearch.policy import Request, search_body
 from triage.window import Window, WindowError, format_time, parse_time
 
@@ -23,6 +27,11 @@ MAX_BUCKET_FACTS = 100
 MAX_MAPPING_FIELDS = 200
 MAX_TOP_MESSAGES = 20
 MAX_DECIDERS = 5
+MAX_SUMMARY_MESSAGE = 300
+MAX_DATA_MESSAGE = 500
+NO_MESSAGE = "(no message field)"
+NO_UNASSIGNED_TEXT = "unable to find any unassigned shards"
+SHARD_COLUMNS = "index,shard,prirep,state,unassigned.reason,node"
 HISTOGRAM_NAME = "by_time"
 TOP_MESSAGES_NAME = "top_messages"
 HEALTH_ORDER = {"green": 0, "yellow": 1, "red": 2}
@@ -39,10 +48,11 @@ class QueryContext:
     limits: dict[str, int]
     window: Window
     evidence: Evidence
+    invocation: str = ""  # the tool command line that is running; it becomes each fact's command
 
 
 def _command(ctx: QueryContext, request: Request) -> str:
-    return f"opensearch {ctx.cluster.name} {request.method} {request.path}"
+    return ctx.invocation or f"opensearch {ctx.cluster.name} {request.method} {request.path}"
 
 
 def _send(ctx: QueryContext, request: Request) -> tuple[Any, str]:
@@ -87,6 +97,33 @@ def _hit_moment(value: Any) -> datetime | None:
         except WindowError:
             return None
     return None
+
+
+def _shorten(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _asked(ctx: QueryContext, index: str, query: str | None, filters: dict[str, str] | None) -> dict:
+    """What a windowed fact was queried with, so that a count is never read as covering more than it did."""
+    return {"index": index, "query": query, "filters": dict(filters or {}), "window": ctx.window.iso()}
+
+
+def _flag_partial(ctx: QueryContext, answer: dict, index: str, command: str) -> None:
+    reasons = []
+    if answer.get("timed_out"):
+        reasons.append("the search timed out")
+    if answer.get("terminated_early"):
+        reasons.append("the search terminated early at the per-shard document limit")
+    shard_info = answer.get("_shards") or {}
+    if shard_info.get("failed"):
+        reasons.append(f"{shard_info['failed']} of {shard_info.get('total', '?')} shards failed")
+    if reasons:
+        ctx.evidence.truncated = True
+        ctx.evidence.add(
+            kind=DERIVED, resource=index, command=command,
+            summary=f"Results are partial, counts are lower bounds: {'; '.join(reasons)}",
+            data={"partial": reasons},
+        )
 
 
 def _total_hits(response: dict) -> int:
@@ -140,8 +177,8 @@ def nodes(ctx: QueryContext) -> None:
             if stats.get("rejected")
         }
         rejected_text = (
-            "rejections: " + ", ".join(f"{pool}={count}" for pool, count in rejections.items())
-            if rejections else "no thread pool rejections"
+            "thread pool rejections since node start: " + ", ".join(f"{pool}={n}" for pool, n in rejections.items())
+            if rejections else "no thread pool rejections since node start"
         )
         disk_text = f"{disk_free}% free" if disk_free is not None else "unknown"
         ctx.evidence.add(
@@ -151,7 +188,7 @@ def nodes(ctx: QueryContext) -> None:
                 f"CPU {cpu if cpu is not None else 'unknown'}%, {rejected_text}"
             ),
             data={"heap_used_percent": heap, "disk_free_percent": disk_free, "cpu_percent": cpu,
-                  "rejections": rejections},
+                  "rejections_since_node_start": rejections},
         )
 
 
@@ -184,7 +221,7 @@ def indices(ctx: QueryContext, index: str | None = None) -> None:
 
 
 def shards(ctx: QueryContext) -> None:
-    rows, command = _send(ctx, Request("GET", "_cat/shards", {"format": "json"}))
+    rows, command = _send(ctx, Request("GET", "_cat/shards", {"format": "json", "h": SHARD_COLUMNS}))
     unstarted = [row for row in rows if row.get("state") != "STARTED"]
     ctx.evidence.add(
         kind=CURRENT, resource=f"cluster/{ctx.cluster.name}", command=command,
@@ -211,7 +248,7 @@ def allocation_explain(ctx: QueryContext) -> None:
     try:
         answer, command = _send(ctx, request)
     except OpenSearchError as error:
-        if error.status != 400:
+        if error.status != 400 or NO_UNASSIGNED_TEXT not in str(error):
             raise
         ctx.evidence.add(
             kind=CURRENT, resource=f"cluster/{ctx.cluster.name}", command=_command(ctx, request),
@@ -275,7 +312,7 @@ def count(ctx: QueryContext, index: str, query: str | None = None, filters: dict
         summary += " with " + ", ".join(f"{key}={value}" for key, value in filters.items())
     ctx.evidence.add(
         kind=DERIVED, resource=index, command=command, summary=summary,
-        data={"count": number, "query": query, "filters": filters or {}},
+        data={"count": number, **_asked(ctx, index, query, filters)},
     )
 
 
@@ -288,6 +325,8 @@ def histogram(
     body = _query_body(ctx, query, filters, size=0, aggs=aggs)
     answer, command = _send(ctx, Request("POST", f"{index}/_search", body=body))
     found = [b for b in answer["aggregations"][HISTOGRAM_NAME]["buckets"] if b["doc_count"] > 0]
+    asked = _asked(ctx, index, query, filters)
+    _flag_partial(ctx, answer, index, command)
     if not found:
         _add_empty_fact(ctx, index, command)
         return
@@ -300,7 +339,7 @@ def histogram(
         ctx.evidence.add(
             kind=INCIDENT_TIME, time=start, resource=index, command=command,
             summary=f"{bucket['doc_count']} documents in the {interval} bucket starting {start}",
-            data={"count": bucket["doc_count"], "interval": interval},
+            data={"count": bucket["doc_count"], "interval": interval, **asked},
         )
     peak = max(found, key=lambda bucket: bucket["doc_count"])
     peak_start = format_time(datetime.fromtimestamp(peak["key"] / 1000, tz=timezone.utc))
@@ -308,7 +347,7 @@ def histogram(
     ctx.evidence.add(
         kind=DERIVED, resource=index, command=command,
         summary=f"Peak: {peak['doc_count']} documents in the {interval} bucket starting {peak_start}, {total} documents in all",
-        data={"count": peak["doc_count"], "bucket_start": peak_start, "total": total, "interval": interval},
+        data={"count": peak["doc_count"], "bucket_start": peak_start, "total": total, "interval": interval, **asked},
     )
 
 
@@ -335,6 +374,7 @@ def top_messages(
             raise
         _top_messages_from_hits(ctx, index, query, filters, field)
         return
+    _flag_partial(ctx, answer, index, command)
     found = answer.get("aggregations", {}).get(TOP_MESSAGES_NAME, {}).get("buckets", [])
     if not found and _total_hits(answer) > 0:
         _top_messages_from_hits(ctx, index, query, filters, field)
@@ -342,12 +382,20 @@ def top_messages(
     if not found:
         _add_empty_fact(ctx, index, command)
         return
+    asked = _asked(ctx, index, query, filters)
     for bucket in found[:MAX_TOP_MESSAGES]:
+        message = ctx.evidence.redactor.text(_as_text(bucket["key"]))
         ctx.evidence.add(
-            kind=DERIVED, resource=index, command=command, excerpt=_as_text(bucket["key"]),
-            summary=f"{bucket['doc_count']} occurrences of: {_as_text(bucket['key'])}",
-            data={"message": _as_text(bucket["key"]), "count": bucket["doc_count"], "method": "terms aggregation"},
+            kind=DERIVED, resource=index, command=command, excerpt=message,
+            summary=f"{bucket['doc_count']} occurrences of: {_shorten(message, MAX_SUMMARY_MESSAGE)}",
+            data={"message": _shorten(message, MAX_DATA_MESSAGE), "count": bucket["doc_count"],
+                  "method": "terms aggregation", **asked},
         )
+
+
+def _group_key(redactor: Redactor, hit: dict, field: str) -> str:
+    text = _as_text(_lookup(hit.get("_source") or {}, field))
+    return normalise_message(redactor.text(text)) if text else NO_MESSAGE
 
 
 def _top_messages_from_hits(
@@ -355,29 +403,35 @@ def _top_messages_from_hits(
 ) -> None:
     body = _query_body(ctx, query, filters, size=ctx.limits["opensearch_max_hits"])
     answer, command = _send(ctx, Request("POST", f"{index}/_search", body=body))
+    _flag_partial(ctx, answer, index, command)
     hits = answer.get("hits", {}).get("hits", [])
     if not hits:
         _add_empty_fact(ctx, index, command)
         return
     if _total_hits(answer) > len(hits):
         ctx.evidence.truncated = True
-    groups = Counter(normalise_message(_as_text(_lookup(hit.get("_source", {}), field))) for hit in hits)
+    redactor = ctx.evidence.redactor
+    # Redact first: normalising first would break the patterns that recognise keys and tokens.
+    groups = Counter(_group_key(redactor, hit, field) for hit in hits)
+    asked = _asked(ctx, index, query, filters)
     for message, number in groups.most_common(MAX_TOP_MESSAGES):
         ctx.evidence.add(
             kind=DERIVED, resource=index, command=command, excerpt=message,
-            summary=f"{number} of {len(hits)} sampled hits: {message}",
-            data={"message": message, "count": number, "method": f"grouped sample of {len(hits)} hits"},
+            summary=f"{number} of {len(hits)} sampled hits: {_shorten(message, MAX_SUMMARY_MESSAGE)}",
+            data={"message": _shorten(message, MAX_DATA_MESSAGE), "count": number,
+                  "method": f"grouped sample of {len(hits)} hits", **asked},
         )
 
 
 def search(
     ctx: QueryContext, index: str, query: str | None = None, filters: dict[str, str] | None = None,
-    size: int | None = None,
+    size: int | None = None, order: str = "asc",
 ) -> None:
     max_hits = ctx.limits["opensearch_max_hits"]
     size = max_hits if size is None else max(0, min(size, max_hits))
-    body = _query_body(ctx, query, filters, size=size)
+    body = _query_body(ctx, query, filters, size=size, sort_order=order)
     answer, command = _send(ctx, Request("POST", f"{index}/_search", body=body))
+    _flag_partial(ctx, answer, index, command)
     hits = answer.get("hits", {}).get("hits", [])
     if not hits:
         _add_empty_fact(ctx, index, command)
@@ -385,8 +439,9 @@ def search(
     if _total_hits(answer) > len(hits):
         ctx.evidence.truncated = True
     cluster = ctx.cluster
+    asked = _asked(ctx, index, query, filters)
     for hit in hits:
-        source = hit.get("_source", {})
+        source = hit.get("_source") or {}
         raw_time = _lookup(source, cluster.time_field)
         moment = _hit_moment(raw_time)
         data = {cluster.time_field: raw_time}
@@ -401,5 +456,5 @@ def search(
         ctx.evidence.add(
             kind=INCIDENT_TIME if moment else DERIVED, time=moment, resource=where, command=command,
             summary=f"{level} log line in {where}" if level is not None else f"Log line in {where}",
-            data=data, excerpt=_as_text(_lookup(source, cluster.message_field)),
+            data={**data, "asked": asked}, excerpt=_as_text(_lookup(source, cluster.message_field)),
         )

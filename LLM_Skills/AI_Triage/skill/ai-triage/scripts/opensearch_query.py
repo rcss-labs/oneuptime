@@ -7,6 +7,7 @@ Exit codes: 0 done, 2 usage or config error, 5 refused by the read policy, 6 clu
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,11 +19,13 @@ from triage.fixtures import FixtureError, fixture_dir, replay_banner, transport_
 from triage.opensearch import queries
 from triage.opensearch.client import OpenSearchClient, OpenSearchError, Transport, urllib_transport
 from triage.opensearch.policy import Refused
+from triage.redact import Redactor
 from triage.window import Window, WindowError, make_window
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 INTERVALS = ("1m", "5m", "15m", "1h")
 STATE_WINDOW = timedelta(minutes=1)
+STATE_NOTE = "Reads the current state; takes no time range."
 
 
 def _positive_int(text: str) -> int:
@@ -65,15 +68,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="opensearch_query", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="subcommand", required=True, metavar="SUBCOMMAND")
 
-    def add(name: str, help_text: str) -> argparse.ArgumentParser:
-        return sub.add_parser(name, parents=[common], help=help_text, description=help_text)
+    def add(name: str, help_text: str, state_only: bool = False) -> argparse.ArgumentParser:
+        description = f"{help_text}. {STATE_NOTE}" if state_only else help_text
+        return sub.add_parser(name, parents=[common], help=help_text, description=description)
 
-    add("health", "cluster status, node count, shards, pending tasks")
-    add("nodes", "per node heap, disk, CPU and thread pool rejections")
-    _add_index(add("indices", "indices that are not green, with counts by health"), required=False)
-    add("shards", "shards that are not STARTED")
-    add("allocation-explain", "why a shard is unassigned")
-    _add_index(add("mapping", "field names and types"), required=True)
+    add("health", "cluster status, node count, shards, pending tasks", True)
+    add("nodes", "per node heap, disk, CPU and thread pool rejections", True)
+    _add_index(add("indices", "indices that are not green, with counts by health", True), required=False)
+    add("shards", "shards that are not STARTED", True)
+    add("allocation-explain", "why a shard is unassigned", True)
+    _add_index(add("mapping", "field names and types", True), required=True)
     _add_window_options(add("count", "number of matching documents"))
     histogram = add("histogram", "matching documents per time bucket")
     _add_window_options(histogram)
@@ -84,6 +88,7 @@ def _build_parser() -> argparse.ArgumentParser:
     found = add("search", "matching log lines")
     _add_window_options(found)
     found.add_argument("--size", type=_positive_int, help="number of hits; clamped to the configured limit")
+    found.add_argument("--order", choices=("asc", "desc"), default="asc", help="oldest first (asc) or newest first (desc)")
     return parser
 
 
@@ -97,6 +102,24 @@ def _window_for(args: argparse.Namespace, max_hours: int) -> Window:
         return make_window(args.start, args.end, max_hours)
     now = datetime.now(timezone.utc)
     return Window(now - STATE_WINDOW, now)
+
+
+def _invocation(args: argparse.Namespace) -> str:
+    """The command line that reproduces this query, quoted so that it can be pasted into a shell."""
+    words = ["opensearch_query.py", args.subcommand, "--cluster", args.cluster]
+    for option, value in (("--index", args.index if hasattr(args, "index") else None),
+                          ("--start", getattr(args, "start", None)), ("--end", getattr(args, "end", None)),
+                          ("--query", getattr(args, "query", None))):
+        if value:
+            words += [option, value]
+    for key, value in getattr(args, "filter", None) or []:
+        words += ["--filter", f"{key}={value}"]
+    for option, name in (("--interval", "interval"), ("--field", "field"), ("--size", "size")):
+        if getattr(args, name, None):
+            words += [option, str(getattr(args, name))]
+    if getattr(args, "order", "asc") != "asc":
+        words += ["--order", args.order]
+    return shlex.join(words)
 
 
 def _runner(args: argparse.Namespace) -> Callable[[queries.QueryContext], None]:
@@ -120,7 +143,7 @@ def _runner(args: argparse.Namespace) -> Callable[[queries.QueryContext], None]:
         return lambda ctx: queries.histogram(ctx, args.index, args.interval, args.query, filters)
     if name == "top-messages":
         return lambda ctx: queries.top_messages(ctx, args.index, args.query, filters, args.field)
-    return lambda ctx: queries.search(ctx, args.index, args.query, filters, args.size)
+    return lambda ctx: queries.search(ctx, args.index, args.query, filters, args.size, args.order)
 
 
 def main(argv: list[str] | None = None, transport: Transport | None = None) -> int:
@@ -146,13 +169,15 @@ def main(argv: list[str] | None = None, transport: Transport | None = None) -> i
         return _fail(str(error), 2)
     evidence = Evidence("opensearch", cluster.account, cluster.name, window)
     client = OpenSearchClient(cluster, config.limits, transport=transport or urllib_transport)
-    ctx = queries.QueryContext(client, cluster, config.limits, window, evidence)
+    ctx = queries.QueryContext(client, cluster, config.limits, window, evidence, _invocation(args))
     try:
         _runner(args)(ctx)
     except Refused as refusal:
         return _fail(f"refused by the read policy: {refusal}", 5)
     except OpenSearchError as error:
-        return _fail(f"OpenSearch error: {error}", 6)
+        return _fail(f"OpenSearch error: {Redactor().text(str(error))}", 6)
+    except (KeyError, TypeError, AttributeError, ValueError, IndexError) as error:
+        return _fail(f"unexpected response from the cluster ({type(error).__name__})", 6)
     if args.case_dir:
         path = evidence.write(args.case_dir, args.suffix)
         print(f"{path} facts={len(evidence.facts)} errors={len(evidence.errors)} truncated={evidence.truncated}")

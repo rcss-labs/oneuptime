@@ -99,10 +99,10 @@ def test_nodes_one_fact_per_node_with_computed_percentages(cluster):
     assert transport.requests == [Request("GET", "_nodes/stats/jvm,fs,os,thread_pool")]
     first, second = ctx.evidence.facts
     assert first.kind == "current" and first.resource == "node/data-1"
-    assert first.summary == "Node data-1: heap 91% used, disk 12.3% free, CPU 40%, rejections: write=12"
+    assert first.summary == "Node data-1: heap 91% used, disk 12.3% free, CPU 40%, thread pool rejections since node start: write=12"
     assert first.data == {"heap_used_percent": 91, "disk_free_percent": 12.3, "cpu_percent": 40,
-                          "rejections": {"write": 12}}
-    assert second.summary == "Node data-2: heap 50% used, disk 50.0% free, CPU 10%, no thread pool rejections"
+                          "rejections_since_node_start": {"write": 12}}
+    assert second.summary == "Node data-2: heap 50% used, disk 50.0% free, CPU 10%, no thread pool rejections since node start"
     assert_all_pass_policy(transport, cluster)
 
 
@@ -153,7 +153,7 @@ def test_shards_lists_only_shards_that_are_not_started(cluster):
     ]
     ctx, transport = make_context(cluster, {"_cat/shards": rows})
     queries.shards(ctx)
-    assert transport.requests == [Request("GET", "_cat/shards", {"format": "json"})]
+    assert transport.requests == [Request("GET", "_cat/shards", {"format": "json", "h": "index,shard,prirep,state,unassigned.reason,node"})]
     summary, shard = ctx.evidence.facts
     assert summary.summary == "2 shards, 1 not STARTED"
     assert shard.kind == "current"
@@ -332,7 +332,8 @@ def test_top_messages_uses_a_keyword_terms_aggregation(cluster):
     first, second = ctx.evidence.facts
     assert first.kind == "derived"
     assert first.summary == "30 occurrences of: db timeout"
-    assert first.data == {"message": "db timeout", "count": 30, "method": "terms aggregation"}
+    assert {k: first.data[k] for k in ("message", "count", "method")} == {
+        "message": "db timeout", "count": 30, "method": "terms aggregation"}
     assert second.data["count"] == 5
     assert_all_pass_policy(transport, cluster)
 
@@ -359,8 +360,8 @@ def test_top_messages_falls_back_to_grouping_hits_when_the_cluster_errors(cluste
     assert "aggs" not in transport.requests[1].body
     assert transport.requests[1].body["size"] == 50
     first, second = ctx.evidence.facts
-    assert first.data == {"message": "timeout after # ms for request #", "count": 2,
-                          "method": "grouped sample of 3 hits"}
+    assert {k: first.data[k] for k in ("message", "count", "method")} == {
+        "message": "timeout after # ms for request #", "count": 2, "method": "grouped sample of 3 hits"}
     assert first.summary == "2 of 3 sampled hits: timeout after # ms for request #"
     assert second.data["message"] == "disk full on node #"
     assert_all_pass_policy(transport, cluster)
@@ -421,8 +422,10 @@ def test_search_one_fact_per_hit_with_only_the_allowed_fields(cluster):
     assert first.kind == "incident_time" and first.time == "2026-10-04T10:01:00Z"
     assert first.excerpt == "db timeout"
     assert first.resource == "app-logs-1"
-    assert first.data == {"@timestamp": "2026-10-04T10:01:00Z", "level": "ERROR", "service": "checkout"}
-    assert second.data == {"@timestamp": "2026-10-04T10:02:30Z", "service": "checkout"}
+    hit_data = {key: value for key, value in first.data.items() if key != "asked"}
+    assert hit_data == {"@timestamp": "2026-10-04T10:01:00Z", "level": "ERROR", "service": "checkout"}
+    assert {key: v for key, v in second.data.items() if key != "asked"} == {
+        "@timestamp": "2026-10-04T10:02:30Z", "service": "checkout"}
     assert ctx.evidence.truncated is False
     assert_all_pass_policy(transport, cluster)
 
@@ -467,3 +470,133 @@ def test_search_handles_epoch_millis_and_dotted_message_field(config_data):
     queries.search(ctx, INDEX)
     fact = ctx.evidence.facts[0]
     assert fact.excerpt == "nested" and fact.time == "2026-10-04T10:00:00Z"
+
+
+# fix round 1
+
+SECRETS_LINE_PARTS = {
+    "key": "AKIA" + "AB12" * 4,
+    "jwt": ".".join(["eyJ" + "hbGciOiJIUzI1NiJ9", "eyJ" + "zdWIiOiIxMjM0NTY3ODkwIn0", "abc123DEF456ghi789"]),
+    "email": "ops" + "@" + "example.com",
+    "token": "tok" + "9f8e7d6c5b4a" * 2,
+}
+
+
+def test_fallback_redacts_before_it_normalises(cluster):
+    parts = SECRETS_LINE_PARTS
+    message = (f"login key {parts['key']} jwt {parts['jwt']} mail {parts['email']} "
+               f"token={parts['token']} failed")
+    hits = {"hits": {"total": {"value": 1}, "hits": [hit(message)]}}
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": Sequence([(400, {}), hits])})
+    queries.top_messages(ctx, INDEX)
+    output = ctx.evidence.to_json()
+    for fragment in ("AKIAAB", "AB12AB12", "hbGciOi", "zdWIiOi", "abc123DEF", "example.com", "ops@", "9f8e7d6c"):
+        assert fragment not in output, fragment
+    assert "failed" in output
+
+
+def test_fallback_groups_messages_that_differ_only_in_the_secret(cluster):
+    first = "login key " + "AKIA" + "AB12" * 4
+    second = "login key " + "AKIA" + "CD34" * 4
+    hits = {"hits": {"total": {"value": 2}, "hits": [hit(first), hit(second)]}}
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": Sequence([(400, {}), hits])})
+    queries.top_messages(ctx, INDEX)
+    (fact,) = ctx.evidence.facts
+    assert fact.data["count"] == 2
+
+
+LONG_MESSAGE = "word " * 400
+
+
+def test_long_messages_are_cut_in_summary_and_data(cluster):
+    hits = {"hits": {"total": {"value": 1}, "hits": [hit(LONG_MESSAGE)]}}
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": Sequence([(400, {}), hits])})
+    queries.top_messages(ctx, INDEX)
+    fact = ctx.evidence.facts[0]
+    assert len(fact.summary) <= 340 and len(fact.data["message"]) <= 500 and len(fact.excerpt) <= 500
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": terms((LONG_MESSAGE, 3))})
+    queries.top_messages(ctx, INDEX)
+    fact = ctx.evidence.facts[0]
+    assert len(fact.summary) <= 340 and len(fact.data["message"]) <= 500
+
+
+def test_a_hit_without_the_message_field_is_labelled(cluster):
+    hits = {"hits": {"total": {"value": 1}, "hits": [{"_index": "i", "_source": {"@timestamp": START}}]}}
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": Sequence([(400, {}), hits])})
+    queries.top_messages(ctx, INDEX)
+    assert ctx.evidence.facts[0].data["message"] == "(no message field)"
+
+
+@pytest.mark.parametrize("flags, words", [
+    ({"timed_out": True}, "timed out"),
+    ({"terminated_early": True}, "terminated early"),
+    ({"_shards": {"failed": 2, "total": 5}}, "2 of 5 shards failed"),
+])
+def test_partial_answers_are_flagged(cluster, flags, words):
+    for call in (
+        lambda ctx: queries.histogram(ctx, INDEX),
+        lambda ctx: queries.search(ctx, INDEX),
+        lambda ctx: queries.top_messages(ctx, INDEX),
+    ):
+        answer = {**buckets((MS_10_00, 3)), **terms(("m", 3)), **flags,
+                  "hits": {"total": {"value": 1}, "hits": [hit("m")]}}
+        answer["aggregations"] = {**buckets((MS_10_00, 3))["aggregations"], **terms(("m", 3))["aggregations"]}
+        ctx, _ = make_context(cluster, {"app-logs-*/_search": answer})
+        call(ctx)
+        partial = [f for f in ctx.evidence.facts if "partial" in f.summary]
+        assert len(partial) == 1 and partial[0].kind == "derived" and words in partial[0].summary
+        assert ctx.evidence.truncated is True
+
+
+def test_complete_answers_have_no_partial_fact(cluster):
+    answer = {**buckets((MS_10_00, 3)), "timed_out": False, "_shards": {"failed": 0, "total": 5}}
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": answer})
+    queries.histogram(ctx, INDEX)
+    assert not any("partial" in f.summary for f in ctx.evidence.facts)
+
+
+def test_windowed_facts_record_what_was_asked(cluster):
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": buckets((MS_10_00, 3))})
+    queries.histogram(ctx, INDEX, query="level:ERROR", filters={"service": "checkout"})
+    for fact in ctx.evidence.facts:
+        assert fact.data["index"] == INDEX
+        assert fact.data["query"] == "level:ERROR"
+        assert fact.data["filters"] == {"service": "checkout"}
+        assert fact.data["window"] == {"start": START, "end": END}
+
+
+def test_search_and_top_messages_facts_record_what_was_asked(cluster):
+    hits = {"hits": {"total": {"value": 1}, "hits": [hit("m")]}}
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": hits})
+    queries.search(ctx, INDEX, query="m", filters={"a": "b"})
+    asked = ctx.evidence.facts[0].data["asked"]
+    assert asked["query"] == "m" and asked["filters"] == {"a": "b"} and asked["index"] == INDEX
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": terms(("m", 1))})
+    queries.top_messages(ctx, INDEX, query="m")
+    assert ctx.evidence.facts[0].data["query"] == "m"
+
+
+def test_the_invocation_becomes_the_fact_command(cluster):
+    ctx, _ = make_context(cluster, {"_cluster/health": {"status": "green"}})
+    ctx.invocation = "opensearch_query.py health --cluster logs-prod"
+    queries.health(ctx)
+    assert ctx.evidence.facts[0].command == "opensearch_query.py health --cluster logs-prod"
+
+
+def test_a_null_source_does_not_crash_search(cluster):
+    hits = {"hits": {"total": {"value": 1}, "hits": [{"_index": "i", "_source": None}]}}
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": hits})
+    queries.search(ctx, INDEX)
+    assert len(ctx.evidence.facts) == 1
+
+
+def test_search_order_desc_is_sent(cluster):
+    ctx, transport = make_context(cluster, {"app-logs-*/_search": {"hits": {"total": 0, "hits": []}}})
+    queries.search(ctx, INDEX, order="desc")
+    assert transport.requests[0].body["sort"] == [{"@timestamp": {"order": "desc"}}]
+
+
+def test_allocation_explain_only_treats_the_no_unassigned_400_as_nothing_to_explain(cluster):
+    ctx, _ = make_context(cluster, {"_cluster/allocation/explain": (400, {"error": "parse failure"})})
+    with pytest.raises(OpenSearchError):
+        queries.allocation_explain(ctx)
