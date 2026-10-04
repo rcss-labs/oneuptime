@@ -382,3 +382,44 @@ def test_listener_facts_and_certificate_lookups_are_capped_with_notes(config_dat
     assert len(aws.called("acm", "describe-certificate")) == 20
     assert by_summary(ctx, "10 listeners were not listed") and by_summary(ctx, "10 certificates were not checked")
     assert by_summary(ctx, "HTTPCode_ELB_5XX_Count") and not ctx.evidence.truncated
+
+
+def many_certificate_listeners(count):
+    listeners = []
+    for n in range(count):
+        https = listener(8000 + n, "HTTPS", f"{LISTENER_ARN}{n}")
+        https["Certificates"] = [{"CertificateArn": f"{CERT_ARN}{n}"}]
+        listeners.append(https)
+    return {"Listeners": listeners}
+
+
+def test_the_soonest_expiring_certificates_are_the_ones_described(config_data, tmp_path):
+    summaries = [{"CertificateArn": f"{CERT_ARN}{n}", "NotAfter": "2027-10-04T00:00:00+00:00"} for n in range(25)]
+    summaries[24]["NotAfter"] = "2026-10-04T11:00:00+00:00"
+    summaries[23]["NotAfter"] = "2026-10-20T00:00:00+00:00"
+    answers = healthy_answers(**{"elbv2 describe-listeners": many_certificate_listeners(25),
+                                 "acm list-certificates": {"CertificateSummaryList": summaries}})
+    ctx, aws, _ = run(config_data, tmp_path, answers)
+    described = [value_of_option(c, "--certificate-arn") for c in aws.called("acm", "describe-certificate")]
+    assert len(described) == 20 and described[:2] == [f"{CERT_ARN}24", f"{CERT_ARN}23"]
+    assert len(aws.called("acm", "list-certificates")) == 1
+    assert by_summary(ctx, "5 certificates were not checked")
+
+
+def test_certificates_are_not_ranked_when_they_all_fit(config_data, tmp_path):
+    answers = healthy_answers(**{"elbv2 describe-listeners": many_certificate_listeners(3)})
+    _, aws, _ = run(config_data, tmp_path, answers)
+    assert aws.called("acm", "list-certificates") == []
+
+
+def test_a_failed_certificate_list_falls_back_to_listener_order(config_data, tmp_path):
+    answers = healthy_answers(**{"elbv2 describe-listeners": many_certificate_listeners(25),
+                                 "acm list-certificates": access_denied("ListCertificates")})
+    ctx, aws, _ = run(config_data, tmp_path, answers)
+    described = [value_of_option(c, "--certificate-arn") for c in aws.called("acm", "describe-certificate")]
+    assert described[0] == f"{CERT_ARN}0" and len(described) == 20
+    assert [e["code"] for e in ctx.evidence.errors] == ["AccessDeniedException"]
+
+
+def value_of_option(call, option):
+    return call[call.index(option) + 1]

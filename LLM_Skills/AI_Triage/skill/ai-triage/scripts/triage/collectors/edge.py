@@ -205,6 +205,19 @@ def _add_group_attributes(ctx: CollectContext, resource: str, group: dict) -> No
     )
 
 
+def _soonest_first(ctx: CollectContext, certificates: list[str]) -> list[str]:
+    """Order the certificates by expiry using one list call; certificates it does not know about go last."""
+    reply = ctx.aws("acm", "list-certificates", ["--max-items", "1000"])
+    if reply is None:
+        return certificates
+    expiry = {
+        c.get("CertificateArn"): parse_iso(c.get("NotAfter")) for c in reply.get("CertificateSummaryList", [])
+    }
+    known = [arn for arn in certificates if expiry.get(arn) is not None]
+    unknown = [arn for arn in certificates if expiry.get(arn) is None]
+    return sorted(known, key=lambda arn: expiry[arn]) + unknown
+
+
 def _add_certificate(ctx: CollectContext, resource: str, arn: str) -> None:
     reply = ctx.aws("acm", "describe-certificate", ["--certificate-arn", arn])
     certificate = (reply or {}).get("Certificate")
@@ -343,6 +356,8 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         _add_target_health(ctx, resource, group, unhealthy)
         _add_group_attributes(ctx, resource, group)
     _add_unhealthy_targets(ctx, resource, unhealthy)
+    if len(certificates) > MAX_CERTIFICATES:
+        certificates = _soonest_first(ctx, certificates)
     for certificate in certificates[:MAX_CERTIFICATES]:
         _add_certificate(ctx, resource, certificate)
     if len(certificates) > MAX_CERTIFICATES:
