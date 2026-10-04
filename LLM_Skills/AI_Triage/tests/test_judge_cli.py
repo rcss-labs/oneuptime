@@ -276,3 +276,104 @@ def test_run_with_a_draft_that_breaks_a_rule_exits_2_and_asks_nothing(command, s
     judge = FakeJudge(make_responder())
     assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 2
     assert "duplicate cause id C1" in capsys.readouterr().err and judge.calls == []
+
+
+# the run command retires the summary first
+
+@pytest.fixture
+def judged_case(command, skill_dir, case_dir):
+    invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=FakeJudge(make_responder()))
+    assert (case_dir / "judgments" / "summary.json").is_file()
+    return case_dir
+
+
+def test_a_failure_before_judging_still_retires_the_old_summary(command, skill_dir, judged_case):
+    def retired():
+        return not (judged_case / "judgments" / "summary.json").exists() and (judged_case / "judgments" / "summary.json.stale").is_file()
+
+    (skill_dir / "judgments" / "questions.json").write_text("{}")
+    assert invoke(command, skill_dir, "run", "--case-dir", str(judged_case), judge=FakeJudge()) == 1 and retired()
+
+
+def test_a_broken_config_still_retires_the_old_summary(command, skill_dir, judged_case):
+    (skill_dir / "config" / "triage-config.yaml").write_text("x: 1")
+    assert invoke(command, skill_dir, "run", "--case-dir", str(judged_case), judge=FakeJudge()) == 2
+    assert not (judged_case / "judgments" / "summary.json").exists()
+
+
+def test_a_broken_case_still_retires_the_old_summary(command, skill_dir, judged_case):
+    (judged_case / "case.json").write_text("{}")
+    assert invoke(command, skill_dir, "run", "--case-dir", str(judged_case), judge=FakeJudge()) == 2
+    assert not (judged_case / "judgments" / "summary.json").exists()
+
+
+def test_a_run_for_a_case_without_a_summary_just_fails_normally(command, skill_dir, tmp_path):
+    assert invoke(command, skill_dir, "run", "--case-dir", str(tmp_path / "nowhere"), judge=FakeJudge()) == 2
+
+
+def test_an_oversized_draft_exits_2_with_no_calls_and_no_files(command, skill_dir, case_dir, capsys):
+    report = json.loads((case_dir / "report.json").read_text())
+    report["causes"][0]["statement"] = "word " * 2000
+    (case_dir / "report.json").write_text(json.dumps(report))
+    judge = FakeJudge(make_responder())
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 2
+    assert "8000" in capsys.readouterr().err and judge.calls == []
+    assert list((case_dir / "judgments").glob("0*.json")) == []
+
+
+def test_an_action_without_a_cause_exits_2(command, skill_dir, case_dir):
+    report = json.loads((case_dir / "report.json").read_text())
+    report["actions"][0]["cause"] = "C9"
+    (case_dir / "report.json").write_text(json.dumps(report))
+    judge = FakeJudge(make_responder())
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 2 and judge.calls == []
+
+
+def test_a_malformed_answer_run_writes_a_failed_summary_and_warns(command, skill_dir, case_dir, capsys):
+    from triage.judge_client import JudgeUnavailable
+    judge = FakeJudge()
+    base = make_responder()
+
+    def answer(state, questions):
+        if len(judge.calls) == 9:
+            raise JudgeUnavailable("MalformedAnswer: action_specific")
+        return base(state, questions)
+
+    judge.answers = answer
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 0
+    captured = capsys.readouterr()
+    assert str(case_dir / "judgments" / "summary.json") in captured.out and "run again" in captured.err
+    assert json.loads((case_dir / "judgments" / "summary.json").read_text())["status"] == "failed"
+
+
+# ad hoc: id, reason, size, odd summaries
+
+@pytest.mark.parametrize("bad_id", ["Deploy", "1deploy", "deploy-trigger", "d" * 41, "deploy trigger", "a/b"])
+def test_adhoc_id_must_be_a_short_lowercase_name(command, skill_dir, case_dir, tmp_path, bad_id):
+    judge = adhoc_judge()
+    assert invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", adhoc_file(tmp_path, id=bad_id), judge=judge) == 1
+    assert judge.calls == []
+
+
+def test_adhoc_reason_is_redacted_before_it_is_stored(command, skill_dir, case_dir, tmp_path, config_data):
+    account_id = config_data["accounts"]["prod-main"]["account_id"]
+    secret = "hunter" + "2"
+    path = adhoc_file(tmp_path, reason=f"Checking {account_id} with password={secret}")
+    invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", path, judge=adhoc_judge())
+    stored = (case_dir / "judgments" / "summary.json").read_text()
+    assert account_id not in stored and secret not in stored and "prod-main" in stored
+
+
+def test_adhoc_question_text_is_limited_to_2000_characters(command, skill_dir, case_dir, tmp_path, capsys):
+    question = {**ADHOC_QUESTION, "instructions": "Is it? " + "x" * 2000}
+    judge = adhoc_judge()
+    assert invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", adhoc_file(tmp_path, question=question), judge=judge) == 1
+    assert "2000" in capsys.readouterr().err and judge.calls == []
+
+
+@pytest.mark.parametrize("text", ["[1, 2]", "null", '"x"'])
+def test_adhoc_with_a_summary_that_is_not_an_object_exits_1(command, skill_dir, case_dir, tmp_path, text, capsys):
+    (case_dir / "judgments").mkdir(exist_ok=True)
+    (case_dir / "judgments" / "summary.json").write_text(text)
+    assert invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", adhoc_file(tmp_path), judge=adhoc_judge()) == 1
+    assert "summary.json" in capsys.readouterr().err

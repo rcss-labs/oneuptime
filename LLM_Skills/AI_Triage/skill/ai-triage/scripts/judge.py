@@ -23,6 +23,7 @@ from triage.judge import (
     describe_candidates,
     incident_state,
     match_resource,
+    retire_summary,
     run_adhoc,
     run_judgments,
 )
@@ -70,7 +71,9 @@ def _rng(case_dir: Path) -> random.Random:
 def _run(args: argparse.Namespace, config, judge: Judge | None) -> int:
     questions = load_questions(default_questions_path(args.skill_dir))
     judge = judge if judge is not None else TypeSafeJudge(config.typesafe_model)
-    run_judgments(args.case_dir, config, judge, questions, _rng(args.case_dir))
+    summary = run_judgments(args.case_dir, config, judge, questions, _rng(args.case_dir))
+    if summary.get("status") == "failed":
+        print(f"judging failed ({summary['typesafe']}); every label is candidate", file=sys.stderr)
     print(args.case_dir / "judgments" / "summary.json")
     return 0
 
@@ -105,6 +108,8 @@ def main(argv: list[str] | None = None, judge: Judge | None = None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"run": _run, "locate": _locate, "adhoc": _adhoc}[args.subcommand]
     try:
+        if args.subcommand == "run":
+            retire_summary(args.case_dir)  # first, so that no later failure leaves an old summary looking current
         config = load_config(default_config_path(args.skill_dir))
         return handler(args, config, judge)
     except (ConfigError, MapError, CaseError) as error:

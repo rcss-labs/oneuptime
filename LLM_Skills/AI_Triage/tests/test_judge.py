@@ -483,6 +483,145 @@ def test_a_finding_that_cites_ten_facts_is_allowed(tmp_path, config):
     assert run(case_dir, config, FakeJudge(make_responder()))["typesafe"] == "available"
 
 
+# a failure part-way never raises a label
+
+def failing_at(call_number, reason, responder=None):
+    responder = responder or make_responder()
+    judge = FakeJudge()
+
+    def answer(state, questions):
+        if len(judge.calls) == call_number:
+            raise JudgeUnavailable(reason)
+        return responder(state, questions)
+
+    judge.answers = answer
+    return judge
+
+
+@pytest.mark.parametrize("reason", ["MalformedAnswer: action_specific", "MissingAnswer for action_specific"])
+def test_a_malformed_answer_is_a_failed_run_with_every_label_candidate(tmp_path, config, reason):
+    case_dir = build_case(tmp_path, config)
+    summary = run(case_dir, config, failing_at(9, reason))
+    assert summary["status"] == "failed" and summary["typesafe"].startswith(f"unavailable: {reason}")
+    assert {cause["label"] for cause in summary["causes"].values()} == {"candidate"}
+    assert {action["label"] for action in summary["actions"].values()} == {"candidate"}
+    assert all("run again" in cause["reasons"][0] for cause in summary["causes"].values())
+    assert "run again" in summary["actions"]["A1"]["reasons"][0]
+    assert summary["findings"] == {} and len(summary["draft_digest"]) == 64
+
+
+def test_an_unavailable_service_part_way_keeps_the_probable_cap_when_nothing_is_ruled_out(tmp_path, config):
+    summary = run(build_case(tmp_path, config), config, failing_at(9, "the connection failed"))
+    assert summary["status"] == "unavailable" and summary["causes"]["C1"]["label"] == "probable"
+
+
+def test_an_unavailable_service_part_way_keeps_a_cause_the_answers_rule_out_at_candidate(tmp_path, config):
+    verified_against = make_responder(relations={CLAIM_3: ("supports", 0.95)})
+    summary = run(build_case(tmp_path, config), config, failing_at(9, "down", verified_against))
+    cause = summary["causes"]["C1"]
+    assert cause["label"] == "candidate"
+    assert any("compute-3" in reason for reason in cause["reasons"]) and any("unavailable" in reason for reason in cause["reasons"])
+
+
+def test_a_contradicted_supporting_finding_in_hand_keeps_the_cause_at_candidate(tmp_path, config):
+    responder = make_responder(relations={CLAIM_1: ("contradicts", 0.9), CLAIM_3: ("says_nothing", 0.9)})
+    summary = run(build_case(tmp_path, config), config, failing_at(4, "down", responder))
+    assert summary["causes"]["C1"]["label"] == "candidate"
+
+
+def test_a_scope_answer_in_hand_that_misses_keeps_the_cause_at_candidate(tmp_path, config):
+    summary = run(build_case(tmp_path, config), config, failing_at(6, "down", make_responder(scope="broader")))
+    assert summary["causes"]["C1"]["label"] == "candidate"
+
+
+def test_findings_not_yet_judged_do_not_count_against_a_cause(tmp_path, config):
+    summary = run(build_case(tmp_path, config), config, failing_at(2, "down"))
+    assert summary["causes"]["C2"]["label"] == "candidate"  # the draft label already was
+    assert summary["causes"]["C1"]["label"] == "probable"
+
+
+def test_a_judged_contradicting_finding_that_came_back_uncertain_caps_the_cause_at_probable(tmp_path, config):
+    responder = make_responder(relations={CLAIM_3: ("says_nothing", 0.5)})
+    cause = run(build_case(tmp_path, config), config, FakeJudge(responder))["causes"]["C1"]
+    assert cause["gates"]["no_contradiction"] is True and cause["label"] == "probable"
+    assert any("compute-3" in reason and "uncertain" in reason for reason in cause["reasons"])
+
+
+def test_a_contradiction_judged_as_not_holding_lets_the_cause_stay_confirmed(tmp_path, config):
+    for relation in (("says_nothing", 0.9), ("contradicts", 0.9)):
+        case_dir = tmp_path / relation[0]
+        case_dir.mkdir()
+        cause = run(build_case(case_dir, config), config, FakeJudge(make_responder(relations={CLAIM_3: relation})))["causes"]["C1"]
+        assert cause["label"] == "confirmed"
+
+
+# everything is measured before the first call
+
+def huge(value):
+    return "word " * (value // 5 + 1)
+
+
+@pytest.mark.parametrize("change", [
+    lambda r: r["causes"][0].update(statement=huge(9000)),
+    lambda r: r.update(symptoms=[huge(9000)]),
+    lambda r: r["actions"][0].update(change=huge(9000)),
+    lambda r: r["summary"].update(scope=huge(9000)),
+])
+def test_an_oversized_state_is_refused_before_the_first_call(tmp_path, config, change):
+    case_dir = build_case(tmp_path, config)
+    edit_report(case_dir, change)
+    judge = FakeJudge(make_responder())
+    with pytest.raises(DraftRuleError, match="8000"):
+        run(case_dir, config, judge)
+    assert judge.calls == [] and list((case_dir / "judgments").glob("0*.json")) == []
+
+
+def test_a_finding_with_oversized_evidence_is_refused_before_the_first_call(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    checked = json.loads((case_dir / "findings" / "checked.json").read_text())
+    ids = [f"gone:ecs-{number:04d}" for number in range(10)]
+    checked["valid"][0]["fact_ids"] = ids
+    checked["valid"][0]["fact_summaries"] = {fact_id: huge(900) for fact_id in ids}
+    (case_dir / "findings" / "checked.json").write_text(json.dumps(checked))
+    judge = FakeJudge(make_responder())
+    with pytest.raises(DraftRuleError, match="compute-1"):
+        run(case_dir, config, judge)
+    assert judge.calls == []
+
+
+# other draft problems
+
+def test_an_action_whose_cause_does_not_exist_is_refused_before_any_call(tmp_path, config):
+    for bad in ("C9", 7, None):
+        case_dir = tmp_path / str(bad)
+        case_dir.mkdir()
+        build_case(case_dir, config)
+        edit_report(case_dir, lambda r: r["actions"][1].update(cause=bad))
+        judge = FakeJudge(make_responder())
+        with pytest.raises(DraftRuleError, match="A2"):
+            run(case_dir, config, judge)
+        assert judge.calls == []
+
+
+def test_a_checked_json_in_the_old_shape_is_refused(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    checked = json.loads((case_dir / "findings" / "checked.json").read_text())
+    checked["valid"][0]["fact_ids"] = ["ecs-0001"]
+    checked["valid"][0]["fact_summaries"] = ["Essential container exited"]
+    (case_dir / "findings" / "checked.json").write_text(json.dumps(checked))
+    judge = FakeJudge(make_responder())
+    with pytest.raises(DraftRuleError, match="findings check"):
+        run(case_dir, config, judge)
+    assert judge.calls == []
+
+
+def test_prepare_state_replaces_float_and_dashed_account_ids(config):
+    account_id = config.accounts["prod-main"].account_id
+    dashed = "-".join(account_id[start:start + 4] for start in (0, 4, 8))
+    result = prepare_state({"OwnerId": float(account_id), "text": f"account {dashed} here", "other": f"{dashed}0"}, config, Redactor())
+    assert result == {"OwnerId": "prod-main", "text": "account prod-main here", "other": f"{dashed}0"}
+
+
 # digests
 
 def test_the_summary_stores_a_digest_beside_each_cause_and_action(tmp_path, config):

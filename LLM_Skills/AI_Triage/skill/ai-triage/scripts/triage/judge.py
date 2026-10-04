@@ -26,8 +26,12 @@ from triage.window import parse_time
 
 SUMMARY_NAME = "summary.json"
 UNAVAILABLE_NOTE = "TypeSafe was unavailable; this label is Claude's own estimate, capped at probable"
+RUN_AGAIN = "judging must be run again"
 UNAVAILABLE_ACTION_NOTE = "TypeSafe was unavailable; no action can be recommended without its checks"
 _ACCOUNT_NUMBER_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
+_DASHED_ACCOUNT_RE = re.compile(r"(?<![\d-])(\d{4})-(\d{4})-(\d{4})(?![\d-])")
+MAX_ADHOC_QUESTION_CHARS = 2000
+_ADHOC_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 MAX_STATE_CHARS = 8000
 MAX_FACTS_PER_FINDING = 10
 _STORED_NAME_RE = re.compile(r"^(\d{3})-")
@@ -51,7 +55,10 @@ class DraftRuleError(JudgmentError):
 def _replace_accounts(value: Any, aliases: dict[str, str]) -> Any:
     if isinstance(value, int) and not isinstance(value, bool) and _ACCOUNT_NUMBER_RE.fullmatch(str(value)):
         return aliases.get(str(value), "<ACCOUNT>")
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer() and _ACCOUNT_NUMBER_RE.fullmatch(str(int(value))):
+        return aliases.get(str(int(value)), "<ACCOUNT>")
     if isinstance(value, str):
+        value = _DASHED_ACCOUNT_RE.sub(lambda match: aliases.get("".join(match.groups()), match.group()), value)
         return _ACCOUNT_NUMBER_RE.sub(lambda match: aliases.get(match.group(), "<ACCOUNT>"), value)
     if isinstance(value, dict):
         return {_replace_accounts(key, aliases): _replace_accounts(item, aliases) for key, item in value.items()}
@@ -140,12 +147,31 @@ def _evidence_of(finding: dict, facts: dict[str, dict]) -> list[dict]:
     return [{"summary": fact.get("summary", ""), "excerpt": fact.get("excerpt", "")} for fact in cited]
 
 
+def _finding_state(finding: dict, facts: dict[str, dict]) -> dict:
+    return {"claim": finding["claim"], "evidence": _evidence_of(finding, facts)}
+
+
+def _cause_state(cause: dict, symptoms: list[str], scope: str) -> dict:
+    return {"hypothesis": _judged_cause(cause)["statement"], "symptoms": symptoms, "observed_scope": scope}
+
+
+def _ranking_state(symptoms: list[str], candidates: dict, order: list[str]) -> dict:
+    return {"symptoms": symptoms, "candidates": {cause_id: candidates[cause_id] for cause_id in order}}
+
+
+def _action_state(action: dict, statements: dict[str, str]) -> dict:
+    return {"cause": statements.get(action.get("cause"), ""), "action": {name: action.get(name) for name in _ACTION_STATE_FIELDS}}
+
+
 def judge_findings(
     session: JudgeSession, questions: dict[str, dict], findings: dict[str, dict], facts: dict[str, dict],
-    ordered_ids: list[str], limit: int,
+    ordered_ids: list[str], limit: int, results: dict[str, dict] | None = None,
 ) -> dict[str, dict]:
-    """Finding id to relation, confidence, and verdict. Findings beyond the limit are uncertain and not asked."""
-    results: dict[str, dict] = {}
+    """Finding id to relation, confidence, and verdict. Findings beyond the limit are uncertain and not asked.
+
+    `results` may be passed in to keep what was judged when a later call fails.
+    """
+    results = {} if results is None else results
     thresholds = session.config.typesafe_thresholds
     for position, finding_id in enumerate(finding_id for finding_id in ordered_ids if finding_id in findings):
         if position >= limit:
@@ -153,7 +179,7 @@ def judge_findings(
                                    "reason": f"Not judged: only the first {limit} findings are judged"}
             continue
         finding = findings[finding_id]
-        state = {"claim": finding["claim"], "evidence": _evidence_of(finding, facts)}
+        state = _finding_state(finding, facts)
         answer = session.ask("finding", finding_id, state, {"evidence_relation": questions["evidence_relation"]}).answers["evidence_relation"]
         results[finding_id] = {"relation": answer["choice"], "confidence": compose.probability(answer["confidence"]),
                                "verdict": compose.finding_verdict(answer, thresholds)}
@@ -167,12 +193,12 @@ def _judged_cause(cause: dict) -> dict:
 
 def judge_causes(
     session: JudgeSession, questions: dict[str, dict], causes: list[dict], symptoms: list[str], scope: str,
+    results: dict[str, dict] | None = None,
 ) -> dict[str, dict]:
     asked = {name: questions[name] for name in ("symptom_fit", "scope_fit")}
-    results = {}
+    results = {} if results is None else results
     for cause in causes:
-        judged = _judged_cause(cause)
-        state = {"hypothesis": judged["statement"], "symptoms": symptoms, "observed_scope": scope}
+        state = _cause_state(cause, symptoms, scope)
         answers = session.ask("cause", cause["id"], state, asked).answers
         results[cause["id"]] = {"symptom_fit": answers["symptom_fit"], "scope_fit": answers["scope_fit"]}
     return results
@@ -194,7 +220,7 @@ def rank_causes(
     orders = [first, first[::-1]]
     answers = []
     for position, order in enumerate(orders, start=1):
-        state = {"symptoms": symptoms, "candidates": {cause_id: candidates[cause_id] for cause_id in order}}
+        state = _ranking_state(symptoms, candidates, order)
         question = build_choice(questions["cause_rank"], options, first)
         if position == 2:  # the whole option list is reversed, so the fallback comes first
             question["criteria"] = dict(reversed(list(question["criteria"].items())))
@@ -210,7 +236,7 @@ def judge_actions(
     statements = {cause["id"]: cause["statement"] for cause in causes}
     results = {}
     for action in actions:
-        state = {"cause": statements.get(action.get("cause"), ""), "action": {name: action.get(name) for name in _ACTION_STATE_FIELDS}}
+        state = _action_state(action, statements)
         answers = session.ask("action", action["id"], state, asked).answers
         results[action["id"]] = {"target": answers["remediation_target"], "specific": answers["action_specific"]}
     return results
@@ -309,6 +335,10 @@ def _draft_rule_errors(report: dict, reserved_ids: frozenset[str]) -> list[str]:
             if entry["id"] in seen:
                 errors.append(f"report.json: duplicate {kind} id {entry['id']}")
             seen.add(entry["id"])
+    cause_ids = {cause["id"] for cause in report["causes"]}
+    for action in report.get("actions", []):
+        if not isinstance(action.get("cause"), str) or action["cause"] not in cause_ids:
+            errors.append(f"report.json: action {action['id']} names a cause that does not exist")
     for cause in report["causes"]:
         if cause["id"] in reserved_ids:
             errors.append(f"report.json: the cause id {cause['id']} is reserved for a question option; rename the cause")
@@ -338,58 +368,111 @@ def _base_summary(config: TriageConfig, typesafe: str, model: str | None, judged
 
 def _minimal_adhoc_entries(case_dir: Path) -> list:
     """The ad hoc list of a summary that only ad hoc questions wrote; empty when there is none."""
-    try:
-        summary = json.loads((Path(case_dir) / "judgments" / SUMMARY_NAME).read_text())
-    except (OSError, ValueError):
+    for name in (SUMMARY_NAME, SUMMARY_NAME + ".stale"):
+        try:
+            summary = json.loads((Path(case_dir) / "judgments" / name).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(summary, dict) and summary.get("judged") is False:
+            return list(summary.get("adhoc") or [])
         return []
-    if not isinstance(summary, dict) or summary.get("judged") is not False:
-        return []
-    return list(summary.get("adhoc") or [])
+    return []
 
 
 def _draft_label(cause: dict) -> str:
     return cause.get("label") if cause.get("label") in compose.LABEL_ORDER else "candidate"
 
 
-def _unavailable_summary(config: TriageConfig, report: dict, findings: dict[str, dict], reason: str, model: str | None) -> dict:
-    summary = _base_summary(config, f"unavailable: {reason}", model)
-    for cause in report["causes"]:
-        summary["causes"][cause["id"]] = {
-            "label": compose.cap_label(_draft_label(cause), "probable"), "gates": {}, "rank_probability": None,
-            "symptom_fit": None, "scope": None, "reasons": [UNAVAILABLE_NOTE],
-            "digest": cause_digest(cause, findings),
-        }
-    for action in report.get("actions", []):
-        summary["actions"][action["id"]] = {
-            "label": "candidate", "target": None, "target_confidence": None, "specific": None,
-            "reasons": [UNAVAILABLE_ACTION_NOTE],
-            "digest": action_digest(action),
-        }
-    return summary
+def _failed_run(reason: str) -> bool:
+    """A malformed or missing answer is a failed run, not an unavailable service."""
+    return reason.startswith(("MalformedAnswer", "MissingAnswer"))
 
 
 def _verdict(verdicts: dict[str, dict], finding_id: str) -> str:
     return verdicts.get(finding_id, {}).get("verdict", "uncertain")
 
 
+def _finding_gates(cause: dict, verdicts: dict[str, dict], partial: bool = False) -> tuple[dict[str, bool], list[str], list[str]]:
+    """The evidence and no_contradiction gates, their reasons, and the contradicting findings judged uncertain.
+
+    With `partial`, only findings that already have a verdict count; the rest are not yet known.
+    """
+    supporting, against = cause.get("supporting", []), cause.get("contradicting", [])
+    seen_support = [finding_id for finding_id in supporting if not partial or finding_id in verdicts]
+    seen_against = [finding_id for finding_id in against if not partial or finding_id in verdicts]
+    unverified = [finding_id for finding_id in seen_support if _verdict(verdicts, finding_id) != "verified"]
+    contradicted = [finding_id for finding_id in seen_support if _verdict(verdicts, finding_id) == "contradicted"]
+    opposed = [finding_id for finding_id in seen_against if _verdict(verdicts, finding_id) == "verified"]
+    unjudged = [finding_id for finding_id in seen_against if verdicts.get(finding_id, {}).get("relation") is None]
+    uncertain = [finding_id for finding_id in seen_against
+                 if finding_id not in unjudged and _verdict(verdicts, finding_id) == "uncertain"]
+    gates = {
+        "evidence": (partial or bool(supporting)) and not unverified,
+        "no_contradiction": not contradicted and not opposed and not unjudged,
+    }
+    reasons = [f"Supporting finding {finding_id} was judged {_verdict(verdicts, finding_id)}, not verified" for finding_id in unverified]
+    reasons += [f"Supporting finding {finding_id} is contradicted by its own evidence" for finding_id in contradicted]
+    reasons += [f"Finding {finding_id}, listed as contradicting this cause, is verified" for finding_id in opposed]
+    reasons += [f"Finding {finding_id}, listed as contradicting this cause, was not judged" for finding_id in unjudged]
+    return gates, reasons, uncertain
+
+
+def _stopped_summary(
+    config: TriageConfig, report: dict, findings: dict[str, dict], reason: str, model: str | None,
+    verdicts: dict[str, dict], cause_answers: dict[str, dict],
+) -> dict:
+    """The summary of a run that stopped part-way: a failed run, or a service that became unavailable."""
+    failed = _failed_run(reason)
+    summary = _base_summary(config, f"unavailable: {reason}; judging failed and {RUN_AGAIN}" if failed else f"unavailable: {reason}", model)
+    summary["status"] = "failed" if failed else "unavailable"
+    for cause in report["causes"]:
+        known_failures = _known_failures(cause, verdicts, cause_answers)
+        if failed:
+            label, reasons = "candidate", [f"Judging failed ({reason}); {RUN_AGAIN}; this label is held at candidate"]
+        else:
+            label = "candidate" if known_failures else compose.cap_label(_draft_label(cause), "probable")
+            reasons = [UNAVAILABLE_NOTE, *known_failures]
+        summary["causes"][cause["id"]] = {
+            "label": label, "gates": {}, "rank_probability": None, "symptom_fit": None, "scope": None,
+            "reasons": reasons, "digest": cause_digest(cause, findings),
+        }
+    note = f"Judging failed ({reason}); {RUN_AGAIN}" if failed else UNAVAILABLE_ACTION_NOTE
+    for action in report.get("actions", []):
+        summary["actions"][action["id"]] = {
+            "label": "candidate", "target": None, "target_confidence": None, "specific": None,
+            "reasons": [note], "digest": action_digest(action),
+        }
+    return summary
+
+
+def _known_failures(cause: dict, verdicts: dict[str, dict], cause_answers: dict[str, dict]) -> list[str]:
+    """Why the answers already in hand rule a cause out; empty when they do not."""
+    gates, reasons, _ = _finding_gates(cause, verdicts, partial=True)
+    failures = list(reasons) if not all(gates.values()) else []
+    answers = cause_answers.get(cause["id"])
+    if answers:
+        fit = compose.symptom_fit_value(answers["symptom_fit"])
+        if fit is None or not fit >= compose.SYMPTOM_FIT_MIN:
+            failures.append(f"Symptom fit is {compose.number(fit)}, below {compose.number(compose.SYMPTOM_FIT_MIN)}")
+        if answers["scope_fit"].get("choice") != "matches":
+            failures.append(f"The scope answer is {answers['scope_fit'].get('choice')}, not matches")
+    return failures
+
+
 def _cause_gates(
     cause: dict, verdicts: dict[str, dict], findings: dict[str, dict], incident_start, thresholds: dict,
     rank: dict, fit: float | None, scope: str,
-) -> tuple[dict[str, bool], bool, float | None, list[str]]:
-    """The six gates of a cause, whether the ranking picked it twice, its lower ranking probability, and reasons."""
+) -> tuple[dict[str, bool], bool, float | None, list[str], list[str]]:
+    """The six gates of a cause, whether the ranking picked it twice, its lower ranking probability, reasons,
+    and the contradicting findings that came back uncertain."""
     cause_id, supporting = cause["id"], cause.get("supporting", [])
     picked = [compose.probability(answer["probabilities"].get(cause_id)) for answer in rank["answers"]]
     low = None if None in picked else min(picked)
     top = rank["choices"] == [cause_id, cause_id]
     timing = compose.timing_gate(cause, findings, incident_start)
-    unverified = [finding_id for finding_id in supporting if _verdict(verdicts, finding_id) != "verified"]
-    contradicted = [finding_id for finding_id in supporting if _verdict(verdicts, finding_id) == "contradicted"]
-    listed_against = cause.get("contradicting", [])
-    opposed = [finding_id for finding_id in listed_against if _verdict(verdicts, finding_id) == "verified"]
-    unjudged = [finding_id for finding_id in listed_against if verdicts.get(finding_id, {}).get("relation") is None]
+    finding_gates, finding_reasons, uncertain = _finding_gates(cause, verdicts)
     gates = {
-        "evidence": bool(supporting) and not unverified,
-        "no_contradiction": not contradicted and not opposed and not unjudged,
+        **finding_gates,
         "rank": top and low is not None and low >= thresholds["cause_top_probability"],
         "timing": timing is True,
         "symptom_fit": fit is not None and fit >= compose.SYMPTOM_FIT_MIN,
@@ -398,10 +481,7 @@ def _cause_gates(
     reasons = []
     if not supporting:
         reasons.append("The cause lists no supporting findings")
-    reasons += [f"Supporting finding {finding_id} was judged {_verdict(verdicts, finding_id)}, not verified" for finding_id in unverified]
-    reasons += [f"Supporting finding {finding_id} is contradicted by its own evidence" for finding_id in contradicted]
-    reasons += [f"Finding {finding_id}, listed as contradicting this cause, is verified" for finding_id in opposed]
-    reasons += [f"Finding {finding_id}, listed as contradicting this cause, was not judged" for finding_id in unjudged]
+    reasons += finding_reasons
     if not gates["rank"]:
         if top:
             reasons.append(f"Ranking picked this cause with probability {compose.number(low)}, below {compose.number(thresholds['cause_top_probability'])}")
@@ -415,7 +495,9 @@ def _cause_gates(
         reasons.append(f"Symptom fit is {compose.number(fit)}, below {compose.number(compose.SYMPTOM_FIT_MIN)}")
     if not gates["scope"]:
         reasons.append(f"The scope answer is {scope}, not matches")
-    return gates, top, low, reasons
+    reasons += [f"Finding {finding_id}, listed as contradicting this cause, was judged uncertain; the label is capped at probable"
+                for finding_id in uncertain]
+    return gates, top, low, reasons, uncertain
 
 
 def _compose_summary(
@@ -424,15 +506,19 @@ def _compose_summary(
 ) -> dict:
     thresholds = config.typesafe_thresholds
     summary = _base_summary(config, "available", model)
+    summary["status"] = "complete"
     summary["findings"] = verdicts
     for cause in report["causes"]:
         answers = cause_answers[cause["id"]]
         score = answers["symptom_fit"]
         fit = compose.symptom_fit_value(score)
         scope = answers["scope_fit"]["choice"]
-        gates, top, low, reasons = _cause_gates(cause, verdicts, findings, incident_start, thresholds, rank, fit, scope)
+        gates, top, low, reasons, uncertain = _cause_gates(cause, verdicts, findings, incident_start, thresholds, rank, fit, scope)
+        label = compose.cause_label(gates, top)
+        if uncertain:
+            label = compose.cap_label(label, "probable")
         summary["causes"][cause["id"]] = {
-            "label": compose.cause_label(gates, top), "gates": gates, "rank_probability": low,
+            "label": label, "gates": gates, "rank_probability": low,
             "symptom_fit": fit, "scope": scope, "reasons": reasons,
             "digest": cause_digest(cause, findings),
         }
@@ -475,34 +561,73 @@ def _reserved_ids(questions: dict[str, dict]) -> frozenset[str]:
     return frozenset(name for question_id in ("cause_rank", "resource_match") for name in questions[question_id].get("fallback", {}))
 
 
+def retire_summary(case_dir: Path) -> None:
+    """Rename an existing summary.json to summary.json.stale, so that no failure can leave an old one looking current."""
+    summary_path = Path(case_dir) / "judgments" / SUMMARY_NAME
+    if summary_path.is_file():
+        os.replace(summary_path, summary_path.with_name(SUMMARY_NAME + ".stale"))
+
+
+def _check_findings_shape(findings: dict[str, dict]) -> None:
+    for finding_id, finding in findings.items():
+        if not isinstance(finding.get("fact_summaries"), dict) or not all(
+                isinstance(fact_id, str) and ":" in fact_id for fact_id in finding.get("fact_ids", [])):
+            raise DraftRuleError([f"findings/checked.json is in an old shape (finding {finding_id}); run the findings check again"])
+
+
+def check_state_sizes(
+    session: JudgeSession, report: dict, findings: dict[str, dict], facts: dict[str, dict], ordered_ids: list[str],
+) -> None:
+    """Build every state the run would send and refuse the run, before any call, when one is too long."""
+    causes, symptoms = report["causes"], report["symptoms"]
+    scope = report["summary"].get("scope", "")
+    statements = {cause["id"]: cause["statement"] for cause in causes}
+    states = [(f"finding {finding_id}", _finding_state(findings[finding_id], facts)) for finding_id in ordered_ids if finding_id in findings]
+    states += [(f"cause {cause['id']}", _cause_state(cause, symptoms, scope)) for cause in causes]
+    claims = {cause["id"]: {"statement": cause["statement"], "supporting_evidence": [
+        findings[finding_id]["claim"] for finding_id in cause.get("supporting", []) if finding_id in findings]} for cause in causes}
+    states.append(("the ranking", _ranking_state(symptoms, claims, list(claims))))
+    states += [(f"action {action['id']}", _action_state(action, statements)) for action in report.get("actions", [])]
+    errors = []
+    for name, state in states:
+        size = len(json.dumps(_json_safe(session.prepare(state))))
+        if size > MAX_STATE_CHARS:
+            errors.append(f"the state for {name} is {size} characters, over the limit of {MAX_STATE_CHARS}; shorten it")
+    if errors:
+        raise DraftRuleError(errors)
+
+
 def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions: dict[str, dict], rng: random.Random) -> dict:
     """Ask every fixed question about the report draft, store the exchanges, and write judgments/summary.json."""
     case_dir = Path(case_dir)
     adhoc = _minimal_adhoc_entries(case_dir)
-    summary_path = case_dir / "judgments" / SUMMARY_NAME
-    stale_path = summary_path.with_name(SUMMARY_NAME + ".stale")
-    if summary_path.is_file():  # a run that fails must not leave an older summary that still vouches for labels
-        os.replace(summary_path, stale_path)
+    retire_summary(case_dir)
     case = load_case(case_dir)
     report = load_report_draft(case_dir, _reserved_ids(questions))
     findings = valid_findings(case_dir)
+    _check_findings_shape(findings)
     _check_citation_counts(report["causes"], findings)
+    facts = load_facts(case_dir)
     session = JudgeSession(judge, JudgmentStore(case_dir), config, Redactor())
     causes, actions = report["causes"], report.get("actions", [])
+    ordered_ids = _finding_order(causes)
+    check_state_sizes(session, report, findings, facts, ordered_ids)
+    verdicts: dict[str, dict] = {}
+    cause_answers: dict[str, dict] = {}
     try:
-        verdicts = judge_findings(session, questions, findings, load_facts(case_dir), _finding_order(causes), compose.MAX_FINDINGS_JUDGED)
-        cause_answers = judge_causes(session, questions, causes, report["symptoms"], report["summary"].get("scope", ""))
+        judge_findings(session, questions, findings, facts, ordered_ids, compose.MAX_FINDINGS_JUDGED, verdicts)
+        judge_causes(session, questions, causes, report["symptoms"], report["summary"].get("scope", ""), cause_answers)
         rank = rank_causes(session, questions, causes, report["symptoms"], findings, verdicts, rng)
         action_answers = judge_actions(session, questions, actions, causes)
     except JudgeUnavailable as unavailable:
-        summary = _unavailable_summary(config, report, findings, unavailable.reason, session.model)
+        summary = _stopped_summary(config, report, findings, unavailable.reason, session.model, verdicts, cause_answers)
     else:
         summary = _compose_summary(config, report, findings, parse_time(case["incident_start"]), session.model,
                                    verdicts, cause_answers, rank, action_answers)
     summary["draft_digest"] = draft_digest(report, findings, case_identity(case))
     summary["adhoc"] = adhoc
     write_summary(case_dir, summary)
-    stale_path.unlink(missing_ok=True)
+    (case_dir / "judgments" / (SUMMARY_NAME + ".stale")).unlink(missing_ok=True)
     return summary
 
 
@@ -522,9 +647,13 @@ def parse_adhoc(document: Any) -> tuple[str, str, Any, dict]:
     if not isinstance(question, dict):
         errors.append("question must be an object")
     elif isinstance(document.get("id"), str):
+        if not _ADHOC_ID_RE.match(document["id"]):
+            errors.append("id must be 1 to 40 characters: a lower-case letter, then lower-case letters, digits, or underscores")
         if document["id"] in REQUIRED_IDS:
             errors.append(f"id {document['id']} belongs to a fixed question; choose another id")
         errors += _check_question(document["id"] or "question", question)
+        if len(json.dumps(question)) > MAX_ADHOC_QUESTION_CHARS:
+            errors.append(f"the question text is over the limit of {MAX_ADHOC_QUESTION_CHARS} characters")
         if "criteria_from" in question:
             errors.append("an ad hoc question must list its options in criteria, not criteria_from")
     if errors:
@@ -538,10 +667,10 @@ def run_adhoc(case_dir: Path, session: JudgeSession, config: TriageConfig, docum
     try:
         reply = session.ask("adhoc", question_id, state, {question_id: session.prepare(question)})
     except JudgeUnavailable as unavailable:
-        _record_adhoc(case_dir, config, {"id": question_id, "reason": reason, "unavailable": unavailable.reason},
+        _record_adhoc(case_dir, config, {"id": question_id, "reason": session.prepare(reason), "unavailable": unavailable.reason},
                       f"unavailable: {unavailable.reason}", None)
         return {"id": question_id, "unavailable": unavailable.reason}
-    _record_adhoc(case_dir, config, {"id": question_id, "reason": reason}, "available", reply.model)
+    _record_adhoc(case_dir, config, {"id": question_id, "reason": session.prepare(reason)}, "available", reply.model)
     return {"id": question_id, "answer": _json_safe(reply.answers[question_id])}
 
 
@@ -555,5 +684,7 @@ def _record_adhoc(case_dir: Path, config: TriageConfig, entry: dict, typesafe: s
             raise JudgmentError([f"{path}: not valid JSON ({error})"]) from error
     else:
         summary = _base_summary(config, typesafe, model, judged=False)
+    if not isinstance(summary, dict):
+        raise JudgmentError([f"{path}: must hold a JSON object"])
     summary.setdefault("adhoc", []).append(entry)
     write_summary(case_dir, summary)
