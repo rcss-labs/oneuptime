@@ -9,11 +9,14 @@ from urllib.parse import urlparse
 
 import yaml
 
-ACCOUNT_ID_RE = re.compile(r"^\d{12}$")
-REGION_RE = re.compile(r"^[a-z]{2}(-[a-z]+)+-\d$")
+ACCOUNT_ID_RE = re.compile(r"\d{12}")
+REGION_RE = re.compile(r"[a-z]{2}(-[a-z]+)+-\d")
+# Names the guard trusts when it compares them with a command line.
+SIMPLE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+# One index name or one trailing-star pattern: no commas, no remote clusters, no bare stars.
+INDEX_PATTERN_RE = re.compile(r"[a-z0-9][a-z0-9._-]{2,}\*?")
 PROFILE_PREFIX = "triage-"
 DEFAULT_PERMISSION_SET = "ai-triage-read-only"
-FORBIDDEN_INDEX_PATTERNS = frozenset({"", "*", "_all"})
 CONFIG_FILE_NAME = "triage-config.yaml"
 
 DEFAULT_LIMITS = {
@@ -21,6 +24,12 @@ DEFAULT_LIMITS = {
     "logs_insights_max_log_groups": 5,
     "opensearch_max_hits": 50,
     "opensearch_timeout_seconds": 10,
+}
+MAX_LIMITS = {
+    "max_window_hours": 48,
+    "logs_insights_max_log_groups": 20,
+    "opensearch_max_hits": 500,
+    "opensearch_timeout_seconds": 60,
 }
 DEFAULT_THRESHOLDS = {
     "evidence_supports": 0.8,
@@ -128,6 +137,25 @@ def _optional_text(section: dict[str, Any], key: str, default: str | None, where
     return value.strip()
 
 
+def is_index_pattern(value: Any) -> bool:
+    """True for a single index name or a pattern with one trailing star."""
+    return isinstance(value, str) and INDEX_PATTERN_RE.fullmatch(value) is not None
+
+
+def is_simple_name(value: Any) -> bool:
+    return isinstance(value, str) and SIMPLE_NAME_RE.fullmatch(value) is not None
+
+
+def _check_name(name: str, where: str, errors: list[str]) -> None:
+    if not is_simple_name(name):
+        errors.append(f"{where}: name must use lower-case letters, digits, and dashes only")
+
+
+def _check_triage_name(value: str, where: str, errors: list[str]) -> None:
+    if value and (not value.startswith(PROFILE_PREFIX) or not is_simple_name(value)):
+        errors.append(f"{where}: must start with '{PROFILE_PREFIX}' and use lower-case letters, digits, and dashes only")
+
+
 def _parse_accounts(raw: dict[str, Any], errors: list[str]) -> dict[str, Account]:
     accounts: dict[str, Account] = {}
     if not raw:
@@ -135,16 +163,16 @@ def _parse_accounts(raw: dict[str, Any], errors: list[str]) -> dict[str, Account
     seen_profiles: set[str] = set()
     for alias, body in raw.items():
         where = f"accounts.{alias}"
+        _check_name(str(alias), where, errors)
         if not isinstance(body, dict):
             errors.append(f"{where}: must be a mapping")
             continue
         raw_account_id = body.get("account_id")
         account_id = raw_account_id if isinstance(raw_account_id, str) else ""
-        if not ACCOUNT_ID_RE.match(account_id):
+        if not ACCOUNT_ID_RE.fullmatch(account_id):
             errors.append(f"{where}.account_id: must be 12 digits written in quotes")
         profile = _text(body, "profile", where, errors)
-        if profile and not profile.startswith(PROFILE_PREFIX):
-            errors.append(f"{where}.profile: must start with '{PROFILE_PREFIX}'")
+        _check_triage_name(profile, f"{where}.profile", errors)
         if profile in seen_profiles:
             errors.append(f"{where}.profile: '{profile}' is used by more than one account")
         seen_profiles.add(profile)
@@ -153,7 +181,7 @@ def _parse_accounts(raw: dict[str, Any], errors: list[str]) -> dict[str, Account
             errors.append(f"{where}.regions: must be a non-empty list")
             regions = []
         for region in regions:
-            if not isinstance(region, str) or not REGION_RE.match(region):
+            if not isinstance(region, str) or not REGION_RE.fullmatch(region):
                 errors.append(f"{where}.regions: '{region}' is not a region name")
         accounts[str(alias)] = Account(str(alias), account_id, profile, tuple(str(r) for r in regions))
     return accounts
@@ -163,6 +191,7 @@ def _parse_opensearch(raw: dict[str, Any], accounts: dict[str, Account], errors:
     clusters: dict[str, OpenSearchCluster] = {}
     for name, body in raw.items():
         where = f"opensearch_clusters.{name}"
+        _check_name(str(name), where, errors)
         if not isinstance(body, dict):
             errors.append(f"{where}: must be a mapping")
             continue
@@ -178,8 +207,8 @@ def _parse_opensearch(raw: dict[str, Any], accounts: dict[str, Account], errors:
             errors.append(f"{where}.allowed_index_patterns: must be a non-empty list")
             patterns = []
         for pattern in patterns:
-            if not isinstance(pattern, str) or pattern.strip() in FORBIDDEN_INDEX_PATTERNS:
-                errors.append(f"{where}.allowed_index_patterns: '{pattern}' is too broad")
+            if not is_index_pattern(pattern):
+                errors.append(f"{where}.allowed_index_patterns: {pattern!r} must be a single index pattern such as app-logs-*")
         time_field = _text(body, "time_field", where, errors)
         verify_tls = body.get("verify_tls", True)
         if not isinstance(verify_tls, bool):
@@ -199,6 +228,7 @@ def _parse_eks(raw: dict[str, Any], accounts: dict[str, Account], errors: list[s
     clusters: dict[str, EksCluster] = {}
     for name, body in raw.items():
         where = f"eks_clusters.{name}"
+        _check_name(str(name), where, errors)
         if not isinstance(body, dict):
             errors.append(f"{where}: must be a mapping")
             continue
@@ -209,13 +239,19 @@ def _parse_eks(raw: dict[str, Any], accounts: dict[str, Account], errors: list[s
             errors.append(f"{where}.account: unknown account '{account}'")
         elif account and region and region not in accounts[account].regions:
             errors.append(f"{where}.region: '{region}' is not listed for account '{account}'")
-        if context and not context.startswith(PROFILE_PREFIX):
-            errors.append(f"{where}.context: must start with '{PROFILE_PREFIX}'")
+        _check_triage_name(context, f"{where}.context", errors)
         clusters[str(name)] = EksCluster(str(name), account, region, context)
     return clusters
 
 
-def _parse_numbers(raw: dict[str, Any], defaults: dict[str, Any], where: str, kind: type, errors: list[str]) -> dict[str, Any]:
+def _parse_numbers(
+    raw: dict[str, Any],
+    defaults: dict[str, Any],
+    where: str,
+    kind: type,
+    errors: list[str],
+    maximums: dict[str, int] | None = None,
+) -> dict[str, Any]:
     result = dict(defaults)
     for key, value in raw.items():
         if key not in defaults:
@@ -227,11 +263,23 @@ def _parse_numbers(raw: dict[str, Any], defaults: dict[str, Any], where: str, ki
         if kind is int and (not isinstance(value, int) or value <= 0):
             errors.append(f"{where}.{key}: must be a positive whole number")
             continue
+        if kind is int and maximums and value > maximums[key]:
+            errors.append(f"{where}.{key}: must be at most {maximums[key]}")
+            continue
         if kind is float and not 0 <= value <= 1:
             errors.append(f"{where}.{key}: must be between 0 and 1")
             continue
         result[key] = kind(value)
     return result
+
+
+def _parent_page_id(value: Any, errors: list[str]) -> str:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return str(value)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    errors.append("confluence.parent_page_id: must be set to a non-empty string or a whole number")
+    return ""
 
 
 def parse_config(data: Any) -> TriageConfig:
@@ -250,9 +298,7 @@ def parse_config(data: Any) -> TriageConfig:
 
     confluence = _section(data, "confluence", errors, required=True)
     space_key = _text(confluence, "space_key", "confluence", errors) if confluence else ""
-    parent_page_id = str(confluence.get("parent_page_id", "")).strip() if confluence else ""
-    if confluence and not parent_page_id:
-        errors.append("confluence.parent_page_id: must be set")
+    parent_page_id = _parent_page_id(confluence.get("parent_page_id"), errors) if confluence else ""
 
     slack = _section(data, "slack", errors, required=False)
     slack_channel = slack.get("default_channel")
@@ -270,7 +316,7 @@ def parse_config(data: Any) -> TriageConfig:
         errors.append("cases_dir: must be a non-empty string")
         cases_dir = "~/.ai-triage/cases"
 
-    limits = _parse_numbers(_section(data, "limits", errors, required=False), DEFAULT_LIMITS, "limits", int, errors)
+    limits = _parse_numbers(_section(data, "limits", errors, required=False), DEFAULT_LIMITS, "limits", int, errors, MAX_LIMITS)
     typesafe = _section(data, "typesafe", errors, required=False)
     model = typesafe.get("model", "jev-latest")
     if not isinstance(model, str) or not model.strip():

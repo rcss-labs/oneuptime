@@ -48,7 +48,7 @@ def test_all_problems_are_reported_together(config_data):
         (lambda d: d["accounts"]["staging"].update(profile="triage-prod-main"), "used by more than one account"),
         (lambda d: d["opensearch_clusters"]["logs-prod"].update(account="nope"), "unknown account 'nope'"),
         (lambda d: d["opensearch_clusters"]["logs-prod"].update(endpoint="opensearch.internal"), "must be an http or https URL"),
-        (lambda d: d["opensearch_clusters"]["logs-prod"].update(allowed_index_patterns=["*"]), "is too broad"),
+        (lambda d: d["opensearch_clusters"]["logs-prod"].update(allowed_index_patterns=["*"]), "must be a single index pattern such as app-logs-*"),
         (lambda d: d["eks_clusters"]["platform-prod"].update(region="us-west-2"), "is not listed for account"),
         (lambda d: d["eks_clusters"]["platform-prod"].update(context="admin"), "context: must start with 'triage-'"),
         (lambda d: d.pop("confluence"), "confluence: missing"),
@@ -143,3 +143,93 @@ def test_wrong_connection_setting_is_reported_with_other_problems(config_data):
     joined = "\n".join(excinfo.value.errors)
     assert "opensearch_clusters.logs-prod.verify_tls: must be true or false" in joined
     assert "accounts.prod-main.account_id" in joined
+
+
+INDEX_PATTERN_ERROR = "must be a single index pattern such as app-logs-*"
+
+
+def errors_for(config_data):
+    with pytest.raises(ConfigError) as excinfo:
+        parse_config(config_data)
+    return excinfo.value.errors
+
+
+@pytest.mark.parametrize("pattern", ["app-logs-*", "app-logs", "a.b_c-1*", "abc", "svc2-*"])
+def test_single_index_patterns_are_accepted(config_data, pattern):
+    config_data["opensearch_clusters"]["logs-prod"]["allowed_index_patterns"] = [pattern]
+    assert parse_config(config_data).opensearch_clusters["logs-prod"].allowed_index_patterns == (pattern,)
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    ["*", "*,*", "*:*", "a*", "ab*", "_all", "", "app-*-logs", "app-**", "*app-logs", "app-logs-*,other-*",
+     "remote:app-logs-*", "App-Logs-*", "-app-logs", "app logs-*", "app-logs-*\n", "app-logs\n", None, 7],
+)
+def test_other_index_patterns_are_rejected(config_data, pattern):
+    config_data["opensearch_clusters"]["logs-prod"]["allowed_index_patterns"] = [pattern]
+    assert any(INDEX_PATTERN_ERROR in e for e in errors_for(config_data))
+
+
+@pytest.mark.parametrize("bad", ["Prod", "prod_main", "-prod", "prod main", "prod\n", "prod,x", ""])
+def test_account_alias_must_be_a_simple_name(config_data, bad):
+    config_data["accounts"][bad] = config_data["accounts"].pop("staging")
+    assert any("accounts" in e and "name" in e for e in errors_for(config_data))
+
+
+@pytest.mark.parametrize("bad", ["Logs", "logs_prod", "-logs", "logs prod"])
+def test_opensearch_cluster_name_must_be_a_simple_name(config_data, bad):
+    config_data["opensearch_clusters"][bad] = config_data["opensearch_clusters"].pop("logs-prod")
+    assert any(f"opensearch_clusters.{bad}" in e and "name" in e for e in errors_for(config_data))
+
+
+@pytest.mark.parametrize("bad", ["Platform", "platform_prod", "platform prod", "-p"])
+def test_eks_cluster_name_must_be_a_simple_name(config_data, bad):
+    config_data["eks_clusters"][bad] = config_data["eks_clusters"].pop("platform-prod")
+    assert any(f"eks_clusters.{bad}" in e and "name" in e for e in errors_for(config_data))
+
+
+@pytest.mark.parametrize("bad", ["triage-Prod", "triage-a_b", "triage-a b", "triage-a,b", "triage-a:b"])
+def test_profile_must_be_a_simple_triage_name(config_data, bad):
+    config_data["accounts"]["prod-main"]["profile"] = bad
+    assert any("accounts.prod-main.profile" in e for e in errors_for(config_data))
+
+
+@pytest.mark.parametrize("bad", ["triage-Prod", "triage-a_b", "triage-a b", "triage-a:b"])
+def test_context_must_be_a_simple_triage_name(config_data, bad):
+    config_data["eks_clusters"]["platform-prod"]["context"] = bad
+    assert any("eks_clusters.platform-prod.context" in e for e in errors_for(config_data))
+
+
+@pytest.mark.parametrize("key, value", [("account_id", "111111111111\n")])
+def test_account_id_rejects_trailing_newline(config_data, key, value):
+    config_data["accounts"]["prod-main"][key] = value
+    assert any("accounts.prod-main.account_id" in e for e in errors_for(config_data))
+
+
+def test_region_rejects_trailing_newline(config_data):
+    config_data["accounts"]["prod-main"]["regions"] = ["eu-west-1\n"]
+    assert any("accounts.prod-main.regions" in e for e in errors_for(config_data))
+
+
+def test_parent_page_id_accepts_string_and_number(config_data):
+    config_data["confluence"]["parent_page_id"] = 123456
+    assert parse_config(config_data).confluence_parent_page_id == "123456"
+    config_data["confluence"]["parent_page_id"] = " 987 "
+    assert parse_config(config_data).confluence_parent_page_id == "987"
+
+
+@pytest.mark.parametrize("value", [None, [], ["1"], {"a": 1}, "  ", True, 1.5, -3])
+def test_parent_page_id_rejects_other_values(config_data, value):
+    config_data["confluence"]["parent_page_id"] = value
+    assert any("confluence.parent_page_id" in e for e in errors_for(config_data))
+
+
+@pytest.mark.parametrize(
+    "key, limit",
+    [("max_window_hours", 48), ("logs_insights_max_log_groups", 20), ("opensearch_max_hits", 500), ("opensearch_timeout_seconds", 60)],
+)
+def test_limits_have_upper_bounds(config_data, key, limit):
+    config_data["limits"][key] = limit
+    assert parse_config(config_data).limits[key] == limit
+    config_data["limits"][key] = limit + 1
+    assert any(f"limits.{key}" in e and f"at most {limit}" in e for e in errors_for(config_data))
