@@ -345,8 +345,8 @@ def test_a_run_confirms_a_cause_whose_gates_all_pass(tmp_path, config):
     assert cause["rank_probability"] == 0.72 and cause["scope"] == "matches"
     assert cause["symptom_fit"] == pytest.approx(2.5 / 3)
     action = summary["actions"]["A1"]
-    assert action.pop("digest")
-    assert action == {"label": "recommended", "target": "addresses_cause", "target_confidence": 0.9, "specific": 0.88, "reasons": []}
+    assert len(action["digest"]) == 64
+    assert {key: value for key, value in action.items() if key != "digest"} == {"label": "recommended", "target": "addresses_cause", "target_confidence": 0.9, "specific": 0.88, "reasons": []}
     assert summary["ask_engineer"] == [] and summary["adhoc"] == []
     assert json.loads((case_dir / "judgments" / "summary.json").read_text()) == summary
 
