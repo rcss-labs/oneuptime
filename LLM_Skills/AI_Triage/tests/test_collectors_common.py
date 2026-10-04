@@ -274,3 +274,31 @@ def test_split_csv(value, expected):
 def test_url_with_a_single_label_host_is_reduced_to_its_origin_under_a_setting_name():
     assert shown("http://api:8080/x?token=abc", "API_URL") == "http://api:8080"
     assert shown("http://api:8080/x", "X") == hidden("http://api:8080/x")
+
+
+@pytest.mark.parametrize("name", ["X", "VALUE", "DATA", "MISC"])
+@pytest.mark.parametrize("value", ["john.doe", "john.doe:1234", "example.com:443", "example.com"])
+def test_two_label_hosts_are_hidden_under_innocent_names(name, value):
+    assert shown(value, name) == hidden(value)
+
+
+def test_two_label_hosts_are_shown_under_setting_names():
+    assert shown("example.com:443", "API_HOST") == "example.com:443"
+    assert shown("example.com", "API_HOST") == "example.com"
+
+
+def test_three_label_hosts_are_shown_under_any_name():
+    assert shown("db.prod.example.com") == "db.prod.example.com"
+    assert shown("cache.internal.example.com:6379", "X") == "cache.internal.example.com:6379"
+
+
+def test_url_origin_with_two_labels_is_still_shown_under_any_name():
+    assert shown("https://example.com/x") == "https://example.com"
+
+
+def test_changed_two_label_value_prints_neither_side():
+    old = env_summary([("X", "john.doe")])
+    new = env_summary([("X", "jane.roe")])
+    result = env_changes(old, new, {"X"})
+    assert result == ["X changed (values hidden)"]
+    assert "john" not in result[0] and "jane" not in result[0]

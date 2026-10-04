@@ -166,6 +166,16 @@ def _setting_shaped(text: str) -> bool:
     )
 
 
+def _enough_labels(host_and_port: str) -> bool:
+    """Outside setting-like names a dotted host needs three labels; first.last and user:pin look the same."""
+    host = host_and_port.rpartition(":")[0] if host_and_port.count(":") == 1 else host_and_port
+    try:
+        ipaddress.IPv4Address(host)
+        return True
+    except ValueError:
+        return host.count(".") >= 2 or host.startswith("[")
+
+
 def _secret_or_personal_name(name: str) -> bool:
     parts = set(key_components(name))
     return looks_secret_key(name) or bool(parts & (_SECRET_NAME_WORDS | _PERSONAL_NAME_WORDS))
@@ -193,7 +203,7 @@ def shown_env_value(name: str, value: Any) -> str:
         return _origin(text, setting) or _hidden(value)
     if _BOOLEAN_RE.fullmatch(text) or _REGION_RE.fullmatch(text):
         return text
-    if not _LONG_HEX_RE.fullmatch(text) and _host_and_port(text, setting):
+    if not _LONG_HEX_RE.fullmatch(text) and _host_and_port(text, setting) and (setting or _enough_labels(text)):
         return text
     if setting and _setting_shaped(text):
         return text
