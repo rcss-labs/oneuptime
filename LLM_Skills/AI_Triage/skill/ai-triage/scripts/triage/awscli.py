@@ -44,7 +44,10 @@ class AwsResult:
 
 
 def subprocess_runner(argv: list[str], timeout: int) -> tuple[int, str, str]:
-    completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+    # Output may be cut inside a multi-byte character (kubectl logs --limit-bytes), so never decode strictly.
+    completed = subprocess.run(
+        argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False
+    )
     return completed.returncode, completed.stdout, completed.stderr
 
 

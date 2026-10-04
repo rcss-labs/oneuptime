@@ -119,3 +119,15 @@ def test_a_read_still_runs(tmp_path):
     result = run_kubectl(["get", "pods"], kubeconfig=tmp_path / "kubeconfig", context="triage-x", namespace="web",
                          runner=lambda argv, timeout: (0, "ok", ""))
     assert result.ok
+
+
+def test_kubectl_output_cut_in_the_middle_of_a_character_is_decoded(monkeypatch, tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "kubectl"
+    stub.write_text("#!/bin/sh\nprintf 'log line \\342\\202'\n")  # as kubectl logs --limit-bytes can end
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    result = run_kubectl(["get", "pods"], kubeconfig=tmp_path / "kubeconfig", context="triage-x", namespace="web")
+    assert result.ok
+    assert result.stdout.startswith("log line ") and "\ufffd" in result.stdout

@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from triage.awscli import REFUSED, AwsResult, run_aws
+from triage.awscli import REFUSED, AwsResult, run_aws, subprocess_runner
 
 
 def runner_returning(code, stdout="", stderr=""):
@@ -148,3 +148,28 @@ def test_error_codes_may_contain_dots():
     stderr = "An error occurred (InvalidGroup.NotFound) when calling the DescribeSecurityGroups operation: x"
     result = run_aws("ec2", "describe-security-groups", profile="triage-a", region="eu-west-1", runner=runner_returning(254, "", stderr))
     assert result.error_code == "InvalidGroup.NotFound"
+
+
+def put_stub_on_path(monkeypatch, tmp_path, name, shell_body):
+    """A fake command that prints bytes, so no real aws or kubectl is ever run."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / name
+    stub.write_text(f"#!/bin/sh\n{shell_body}\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+
+
+def test_runner_replaces_output_cut_in_the_middle_of_a_character(monkeypatch, tmp_path):
+    # \342\202 is the first two bytes of a three-byte character, as when output is cut by a byte limit.
+    put_stub_on_path(monkeypatch, tmp_path, "aws", "printf 'out \\342\\202'; printf 'err \\360\\237' >&2; exit 3")
+    code, stdout, stderr = subprocess_runner(["aws", "x"], 10)
+    assert code == 3
+    assert stdout == "out \ufffd" and stderr == "err \ufffd"
+
+
+def test_run_aws_survives_error_text_cut_in_the_middle_of_a_character(monkeypatch, tmp_path):
+    put_stub_on_path(monkeypatch, tmp_path, "aws", "printf 'AccessDenied \\342\\202' >&2; exit 254")
+    result = run_aws("ecs", "list-clusters", profile="triage-a", region="eu-west-1")
+    assert not result.ok
+    assert "AccessDenied" in (result.error_message or "")
