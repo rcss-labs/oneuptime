@@ -5,6 +5,7 @@ check_request refuses everything that is not listed here. When in doubt, it refu
 from __future__ import annotations
 
 import fnmatch
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -31,6 +32,7 @@ COUNT_KEYS = frozenset({"query"})
 EXPLAIN_KEYS = frozenset({"index", "shard", "primary"})
 QUERY_STRING_KEYS = frozenset({"query", "default_field", "allow_leading_wildcard", "lenient", "default_operator"})
 HISTOGRAM_INTERVALS = frozenset({"1m", "5m", "15m", "1h"})
+FIELD_NAME_RE = re.compile(r"[A-Za-z0-9_.@-]+")
 TIMEOUT_RE = re.compile(r"([0-9]+)(ms|s)")
 MAX_QUERY_STRING_CHARS = 500
 MAX_SOURCE_FIELDS = 20
@@ -160,11 +162,9 @@ def _check_range(clause: dict, cluster: OpenSearchCluster, limits: dict[str, int
     bounds = ranges.get(cluster.time_field)
     if not isinstance(bounds, dict):
         raise Refused(f"range must be on the time field '{cluster.time_field}'")
-    _check_keys(bounds, frozenset({"gte", "lte", "format"}), "range")
+    _check_keys(bounds, frozenset({"gte", "lte"}), "range")
     if "gte" not in bounds or "lte" not in bounds:
         raise Refused("time range must have gte and lte")
-    if "format" in bounds and not isinstance(bounds["format"], str):
-        raise Refused("range format must be a string")
     start = _parse_time(bounds["gte"], "gte")
     end = _parse_time(bounds["lte"], "lte")
     if end <= start:
@@ -180,6 +180,8 @@ def _check_term(clause: dict) -> None:
     field_name, value = next(iter(term.items()))
     if not isinstance(field_name, str) or not isinstance(value, (str, int, float, bool)):
         raise Refused("term value must be a string, number, or boolean")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise Refused("term value must be a finite number")
 
 
 def _check_exists(clause: dict) -> None:
@@ -207,6 +209,18 @@ def _check_filters(filters: Any, cluster: OpenSearchCluster, limits: dict[str, i
         raise Refused(f"query needs exactly one time range filter on '{cluster.time_field}', found {ranges}")
 
 
+def _check_no_regex_or_fuzzy(text: str) -> None:
+    """Refuse an unescaped / or ~: they start regex and fuzzy matching, which scan the whole term dictionary."""
+    escaped = False
+    for char in text:
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char in "/~":
+            raise Refused(f"query_string has an unescaped '{char}' (regex and fuzzy matching are not allowed)")
+
+
 def _check_query_string(must: Any) -> None:
     if not isinstance(must, list) or len(must) > 1:
         raise Refused("bool must holds at most one query_string clause")
@@ -219,6 +233,14 @@ def _check_query_string(must: Any) -> None:
         text = spec.get("query")
         if not isinstance(text, str) or len(text) > MAX_QUERY_STRING_CHARS:
             raise Refused(f"query_string query must be a string of at most {MAX_QUERY_STRING_CHARS} characters")
+        _check_no_regex_or_fuzzy(text)
+        default_field = spec.get("default_field", "x")
+        if not isinstance(default_field, str) or not FIELD_NAME_RE.fullmatch(default_field):
+            raise Refused("query_string default_field must match [A-Za-z0-9_.@-]+")
+        if spec.get("default_operator", "AND") not in ("AND", "OR"):
+            raise Refused("query_string default_operator must be AND or OR")
+        if not isinstance(spec.get("lenient", True), bool):
+            raise Refused("query_string lenient must be a boolean")
 
 
 def _check_query(body: dict, cluster: OpenSearchCluster, limits: dict[str, int]) -> None:
@@ -318,6 +340,17 @@ def _check_search_body(body: dict, cluster: OpenSearchCluster, limits: dict[str,
         _check_aggs(body["aggs"], cluster)
 
 
+def _check_explain_values(body: dict, cluster: OpenSearchCluster) -> None:
+    if "index" in body:
+        if not isinstance(body["index"], str):
+            raise Refused("explain index must be a string")
+        _check_index(body["index"], cluster)
+    if "shard" in body and not _is_int(body["shard"]):
+        raise Refused("explain shard must be a whole number")
+    if "primary" in body and not isinstance(body["primary"], bool):
+        raise Refused("explain primary must be a boolean")
+
+
 def _check_body(request: Request, route: str, cluster: OpenSearchCluster, limits: dict[str, int]) -> None:
     body = request.body
     takes_body = route in POST_SUFFIXES or route == EXPLAIN_PATH
@@ -337,6 +370,7 @@ def _check_body(request: Request, route: str, cluster: OpenSearchCluster, limits
         _check_query(body, cluster, limits)
     else:
         _check_keys(body, EXPLAIN_KEYS, "body")
+        _check_explain_values(body, cluster)
 
 
 def check_request(request: Request, cluster: OpenSearchCluster, limits: dict[str, int]) -> None:

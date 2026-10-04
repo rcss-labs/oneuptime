@@ -97,7 +97,7 @@ class OpenSearchClient:
             )
         except OSError as error:
             raise OpenSearchError(f"network failure: {error}") from error
-        if status >= 400:
+        if not 200 <= status < 300:
             raise OpenSearchError(f"HTTP {status}: {text[:MAX_ERROR_CHARS]}", status)
         try:
             return json.loads(text)

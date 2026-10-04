@@ -452,7 +452,6 @@ ALLOW_LIST_ACCEPTED = [
         {"term": {"level": "error"}}, {"term": {"status": 500}}, {"term": {"ok": False}}, {"exists": {"field": "trace.id"}},
         must=[{"query_string": {"query": "a" * 500, "default_field": "message", "allow_leading_wildcard": False,
                                 "lenient": True, "default_operator": "AND"}}]))),
-    ("range with format", with_range(gte=START, lte=END, format="strict_date_time_no_millis")),
     ("terms aggregation", valid_body(aggs=TERMS)),
     ("histogram aggregation", valid_body(aggs=HISTOGRAM)),
     ("histogram without min_doc_count", valid_body(aggs={"h": {"date_histogram": {"field": "@timestamp", "fixed_interval": "1h"}}})),
@@ -499,3 +498,81 @@ def test_search_body_refuses_aggregations_outside_the_two_shapes(cluster, aggs):
 def test_search_body_refuses_an_overlong_query_string(cluster):
     with pytest.raises(Refused, match="500"):
         search_body(cluster, WINDOW, LIMITS, query_string="a" * 501)
+
+
+# ---- fix round 2 ----
+
+def qs_body(**spec):
+    spec.setdefault("allow_leading_wildcard", False)
+    return valid_body(**query_with(must=[{"query_string": spec}]))
+
+
+ROUND_TWO_REFUSALS = [
+    ("range format years", with_range(gte=START, lte=END, format="SSSS-MM-dd'T'yy:mm:ss'Z'"), "format"),
+    ("range format epoch_second", with_range(gte=START, lte=END, format="epoch_second"), "format"),
+    ("range format multi", with_range(gte=START, lte=END, format="yyyy||epoch_millis"), "format"),
+    ("regex in query_string", qs_body(query="message:/a.*b.*c/"), "unescaped"),
+    ("lone slash", qs_body(query="a/b"), "unescaped"),
+    ("fuzzy", qs_body(query="timeout~5"), "unescaped"),
+    ("proximity", qs_body(query='"a b"~100'), "unescaped"),
+    ("slash after an escaped backslash", qs_body(query="a\\\\/b"), "unescaped"),
+    ("default_field wildcard", qs_body(query="a", default_field="*"), "default_field"),
+    ("default_field with a comma", qs_body(query="a", default_field="a,b"), "default_field"),
+    ("default_field empty", qs_body(query="a", default_field=""), "default_field"),
+    ("default_field not a string", qs_body(query="a", default_field=1), "default_field"),
+    ("default_operator other", qs_body(query="a", default_operator="and"), "default_operator"),
+    ("default_operator not a string", qs_body(query="a", default_operator=1), "default_operator"),
+    ("lenient a string", qs_body(query="a", lenient="true"), "lenient"),
+    ("term NaN", valid_body(**query_with({"term": {"a": float("nan")}})), "term"),
+    ("term infinity", valid_body(**query_with({"term": {"a": float("inf")}})), "term"),
+    ("term minus infinity", valid_body(**query_with({"term": {"a": float("-inf")}})), "term"),
+]
+
+
+@pytest.mark.parametrize("label,body,fragment", ROUND_TWO_REFUSALS, ids=[row[0] for row in ROUND_TWO_REFUSALS])
+def test_round_two_refusals(cluster, label, body, fragment):
+    assert fragment in search_refusal(cluster, body)
+
+
+@pytest.mark.parametrize("text", ["a\\/b", "a\\~2", "path\\/to\\/file", "a\\\\\\/b", "plain AND text", "error*"])
+def test_escaped_slash_and_tilde_are_allowed(cluster, text):
+    check_request(Request("POST", f"{INDEX}/_search", {}, qs_body(query=text)), cluster, LIMITS)
+
+
+def test_valid_query_string_options_are_allowed(cluster):
+    body = qs_body(query="a", default_field="kubernetes.pod_name@x-1", default_operator="OR", lenient=False)
+    check_request(Request("POST", f"{INDEX}/_search", {}, body), cluster, LIMITS)
+
+
+def test_search_body_refuses_a_regex_query_string(cluster):
+    with pytest.raises(Refused, match="unescaped"):
+        search_body(cluster, WINDOW, LIMITS, query_string="/a.*b/")
+
+
+def explain(body):
+    return Request("POST", "_cluster/allocation/explain", {}, body)
+
+
+@pytest.mark.parametrize(
+    "body,fragment",
+    [
+        ({"index": "other-index"}, "index"),
+        ({"index": "*"}, "index"),
+        ({"index": "app-logs-1,app-logs-2"}, "index"),
+        ({"index": 5}, "index"),
+        ({"index": INDEX, "shard": "0"}, "shard"),
+        ({"index": INDEX, "shard": True}, "shard"),
+        ({"index": INDEX, "shard": 1.5}, "shard"),
+        ({"index": INDEX, "shard": 0, "primary": "true"}, "primary"),
+        ({"index": INDEX, "shard": 0, "primary": 1}, "primary"),
+    ],
+)
+def test_explain_body_values_are_checked(cluster, body, fragment):
+    with pytest.raises(Refused) as caught:
+        check_request(explain(body), cluster, LIMITS)
+    assert fragment in str(caught.value)
+
+
+@pytest.mark.parametrize("body", [{}, {"index": INDEX}, {"index": INDEX, "shard": 0, "primary": False}, {"primary": True}])
+def test_explain_body_valid_shapes_are_allowed(cluster, body):
+    check_request(explain(body), cluster, LIMITS)

@@ -143,8 +143,17 @@ def test_an_http_error_raises_with_status_and_a_short_message(cluster):
     assert "x" * 301 not in str(caught.value)
 
 
-def test_status_399_is_not_an_error(cluster):
-    transport = RecordingTransport(status=399, text="{}")
+@pytest.mark.parametrize("status", [100, 199, 300, 304, 399])
+def test_any_status_outside_2xx_is_an_error(cluster, status):
+    transport = RecordingTransport(status=status, text="{}")
+    with pytest.raises(OpenSearchError) as caught:
+        OpenSearchClient(cluster, LIMITS, transport=transport).request(Request("GET", "_nodes"))
+    assert caught.value.status == status
+
+
+@pytest.mark.parametrize("status", [200, 204, 299])
+def test_2xx_statuses_succeed(cluster, status):
+    transport = RecordingTransport(status=status, text="{}")
     assert OpenSearchClient(cluster, LIMITS, transport=transport).request(Request("GET", "_nodes")) == {}
 
 
