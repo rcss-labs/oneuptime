@@ -55,6 +55,37 @@ FORBIDDEN_NAME_PARTS = ("credentials", "token", "password", "secretvalue")
 # apigateway:GET on any other path can return API key values (/apikeys, /usageplans/*/keys).
 API_GATEWAY_PATH_PREFIXES = ("/restapis/", "/apis/", "/domainnames/")
 API_GATEWAY_EXACT_PATHS = ("/account",)
+# Every Allow action the shipped policy may hold, in lower case. Add one deliberately, with a review.
+APPROVED_ALLOW_ACTIONS: frozenset[str] = frozenset(
+    {
+        "acm:describecertificate", "apigateway:get", "application-autoscaling:describescalabletargets",
+        "application-autoscaling:describescalingactivities", "application-autoscaling:describescalingpolicies",
+        "cloudformation:describestackevents", "cloudformation:describestackresources", "cloudfront:getdistribution",
+        "cloudfront:getdistributionconfig", "cloudwatch:describealarmhistory", "cloudwatch:describealarms",
+        "cloudwatch:describealarmsformetric", "codebuild:batchgetbuilds", "codepipeline:getpipelineexecution",
+        "codepipeline:getpipelinestate", "codepipeline:listactionexecutions", "codepipeline:listpipelineexecutions",
+        "config:batchgetresourceconfig", "config:getresourceconfighistory", "ec2:getconsoleoutput",
+        "ecr:describeimages", "ecr:describeimagescanfindings", "elasticfilesystem:describeaccesspoints",
+        "elasticfilesystem:describefilesystempolicy", "elasticfilesystem:describelifecycleconfiguration",
+        "elasticfilesystem:describemounttargets", "elasticfilesystem:describemounttargetsecuritygroups",
+        "elasticloadbalancing:describelistenercertificates", "elasticloadbalancing:describerules",
+        "elasticloadbalancing:describetags", "elasticloadbalancing:describetargetgroupattributes",
+        "es:describedomain", "es:describedomainchangeprogress", "es:describedomainconfig", "es:describedomainhealth",
+        "es:describedomainnodes", "es:describedomains", "es:listtags", "health:describeaffectedentities",
+        "health:describeeventdetails", "health:describeevents", "iam:getpolicy", "iam:getpolicyversion",
+        "iam:getrole", "iam:getrolepolicy", "iam:simulateprincipalpolicy", "kms:describekey", "kms:getkeypolicy",
+        "lambda:getaccountsettings", "lambda:getalias", "lambda:geteventsourcemapping",
+        "lambda:getfunctionconcurrency", "lambda:getfunctionconfiguration", "lambda:getfunctioneventinvokeconfig",
+        "lambda:getfunctionurlconfig", "logs:filterlogevents", "logs:getlogevents", "logs:getloggroupfields",
+        "logs:getlogrecord", "logs:getqueryresults", "logs:startquery", "logs:stopquery", "pi:describedimensionkeys",
+        "pi:getdimensionkeydetails", "pi:getresourcemetadata", "pi:getresourcemetrics",
+        "pi:listavailableresourcedimensions", "pi:listavailableresourcemetrics", "rds:downloaddblogfileportion",
+        "secretsmanager:describesecret", "secretsmanager:listsecrets", "servicequotas:getservicequota",
+        "servicequotas:listservicequotas", "sns:gettopicattributes", "ssm:describeparameters", "ssm:getparameter",
+        "ssm:getparameters", "ssm:getparametersbypath", "tag:getresources", "tag:gettagkeys", "tag:gettagvalues",
+        "wafv2:getrulegroup", "wafv2:getsampledrequests", "wafv2:getwebacl", "wafv2:getwebaclforresource",
+    }
+)
 ACCOUNT_ID_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
 
 
@@ -133,6 +164,11 @@ def check_policy(document: Any, raw_text: str) -> list[str]:
         for action in actions:
             lowered = action.lower()
             service, _, name = action.partition(":")
+            if lowered not in APPROVED_ALLOW_ACTIONS:
+                problems.append(
+                    f"{where}: '{action}' is not on the approved list; "
+                    "add it to APPROVED_ALLOW_ACTIONS deliberately, with a review"
+                )
             if not service or not name:
                 problems.append(f"{where}: '{action}' is not a service:Action pair")
             elif "*" in action or "?" in action:

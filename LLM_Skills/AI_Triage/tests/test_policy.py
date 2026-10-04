@@ -4,7 +4,7 @@ import json
 import pytest
 
 from conftest import ROOT
-from triage.policy_check import check_policy
+from triage.policy_check import APPROVED_ALLOW_ACTIONS, check_policy
 
 POLICY_PATH = ROOT / "iam" / "ai-triage-inline-policy.json"
 
@@ -121,7 +121,7 @@ def test_action_names_are_compared_without_regard_to_case(policy, action, expect
 
 
 def test_lower_case_read_names_are_still_reads(policy):
-    assert problems(allow(policy, "ec2:describeinstances", "logs:startquery")) == []
+    assert problems(allow(policy, *[a.lower() for a in ("logs:GetLogEvents", "logs:StartQuery")])) == []
 
 
 def test_required_deny_in_another_case_counts(policy):
@@ -210,3 +210,24 @@ def test_api_gateway_resources_on_the_allowlist_are_accepted(policy, resource):
 )
 def test_secret_returning_reads_are_reported(policy, action):
     assert any("must never be granted" in p for p in problems(allow(policy, action)))
+
+
+NOT_APPROVED = [
+    "s3-outposts:GetObject", "s3-outposts:GetObjectVersion", "lightsail:DownloadDefaultKeyPair",
+    "lightsail:GetInstanceAccessDetails", "glue:GetConnection", "gamelift:GetInstanceAccess",
+    "dynamodb:GetRecords", "athena:GetQueryResults", "glacier:GetJobOutput", "ebs:GetSnapshotBlock",
+    "mediastore:GetObject", "kinesisvideo:GetMedia", "codecommit:GetFile", "codecommit:GetBlob",
+    "appsync:ListApiKeys", "ec2:DescribeSomethingNew", "ECS:describeservices ",
+]
+
+
+@pytest.mark.parametrize("action", NOT_APPROVED)
+def test_actions_not_on_the_approved_list_are_reported(policy, action):
+    expected = f"'{action}' is not on the approved list; add it to APPROVED_ALLOW_ACTIONS deliberately, with a review"
+    assert any(expected in p for p in problems(allow(policy, action)))
+
+
+def test_approved_list_and_shipped_policy_are_the_same_set(policy):
+    shipped = {a.lower() for s in policy["Statement"] if s["Effect"] == "Allow" for a in s["Action"]}
+    assert shipped == set(APPROVED_ALLOW_ACTIONS)
+    assert all(action == action.lower() for action in APPROVED_ALLOW_ACTIONS)
