@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -81,7 +82,9 @@ def test_published_files_are_the_three_documents():
 
 def test_clean_files_give_a_clean_audit_that_is_written(run_dir):
     result = audit_case(run_dir)
-    assert result == {"clean": True, "checked": ["report.md", "work-order.json"], "hits": []}
+    digest = {name: hashlib.sha256((run_dir / name).read_bytes()).hexdigest() for name in ("report.md", "work-order.json")}
+    assert result == {"clean": True, "checked": ["report.md", "work-order.json"], "hits": [],
+                      "sha256": {**digest, "slack-message.md": None}}
     assert json.loads((run_dir / "audit.json").read_text()) == result
 
 
@@ -108,10 +111,36 @@ def test_audit_needs_report_md(run_dir):
         audit_case(run_dir)
 
 
+def test_audit_refuses_a_symbolic_link(run_dir, tmp_path):
+    target = tmp_path / "elsewhere.md"
+    target.write_text("# Other\n")
+    (run_dir / "report.md").unlink()
+    (run_dir / "report.md").symlink_to(target)
+    with pytest.raises(PublishError, match="report.md"):
+        audit_case(run_dir)
+
+
+def test_audit_refuses_a_published_file_that_is_a_folder(run_dir):
+    (run_dir / "work-order.json").unlink()
+    (run_dir / "work-order.json").mkdir()
+    with pytest.raises(PublishError, match="work-order.json"):
+        audit_case(run_dir)
+
+
+def test_audit_of_a_file_that_is_not_utf8_is_a_message(run_dir):
+    (run_dir / "report.md").write_bytes(b"\xff\xfe bad")
+    with pytest.raises(PublishError, match="report.md"):
+        audit_case(run_dir)
+
+
 # page_title
 
 def test_page_title_joins_number_and_title():
     assert page_title(case_data()) == "INC-123 Triage: Checkout API is down"
+
+
+def test_page_title_collapses_newlines_and_tabs():
+    assert page_title(case_data(title="line1\nline2\t end ")) == "INC-123 Triage: line1 line2 end"
 
 
 def test_page_title_is_cut_at_200_characters():
@@ -121,45 +150,96 @@ def test_page_title_is_cut_at_200_characters():
 
 # confluence_request
 
-def test_confluence_request_without_an_audit_is_refused(run_dir, config):
-    with pytest.raises(PublishError, match="run the audit again"):
-        confluence_request(run_dir, config)
-
-
-def test_confluence_request_with_a_dirty_audit_is_refused(run_dir, config):
-    (run_dir / "report.md").write_text("key " + AWS_KEY + "\n")
-    audit_case(run_dir)
-    with pytest.raises(PublishError, match="run the audit again"):
-        confluence_request(run_dir, config)
-
-
-def test_confluence_request_with_an_audit_older_than_the_report_is_refused(run_dir, config):
-    audit_case(run_dir)
-    set_mtime(run_dir / "audit.json", 1_000)
-    set_mtime(run_dir / "report.md", 2_000)
-    with pytest.raises(PublishError, match="run the audit again"):
-        confluence_request(run_dir, config)
-
-
-def test_confluence_request_with_a_clean_fresh_audit(run_dir, config):
-    audit_case(run_dir)
-    set_mtime(run_dir / "report.md", 1_000)
-    set_mtime(run_dir / "audit.json", 2_000)
+def test_confluence_request_audits_the_file_itself_without_a_prior_audit(run_dir, config):
     request = confluence_request(run_dir, config)
     assert request == {
         "space_key": config.confluence_space_key,
         "parent_page_id": config.confluence_parent_page_id,
         "title": "INC-123 Triage: Checkout API is down",
-        "body_file": str((run_dir / "report.md").resolve()),
+        "body_file": str(run_dir.resolve() / "report.md"),
+        "body_sha256": hashlib.sha256((run_dir / "report.md").read_bytes()).hexdigest(),
         "existing_page": None,
     }
+    audit = json.loads((run_dir / "audit.json").read_text())
+    assert audit["clean"] and audit["sha256"]["report.md"] == request["body_sha256"]
+
+
+def test_confluence_request_ignores_a_stale_clean_audit_json(run_dir, config):
+    audit_case(run_dir)
+    (run_dir / "report.md").write_text("key " + AWS_KEY + "\n")
+    set_mtime(run_dir / "report.md", 1_000)
+    set_mtime(run_dir / "audit.json", 2_000)
+    with pytest.raises(PublishError, match="report.md:1:5"):
+        confluence_request(run_dir, config)
+
+
+def test_a_draft_moved_over_the_report_is_audited(run_dir, config):
+    audit_case(run_dir)
+    draft = run_dir / "report.new.md"
+    draft.write_text("key " + AWS_KEY + "\n")
+    set_mtime(draft, 1_000)
+    os.replace(draft, run_dir / "report.md")
+    with pytest.raises(PublishError):
+        confluence_request(run_dir, config)
+
+
+def test_a_symbolic_link_as_the_report_is_refused(run_dir, config, tmp_path):
+    audit_case(run_dir)
+    target = tmp_path / "old.md"
+    target.write_text("key " + AWS_KEY + "\n")
+    (run_dir / "report.md").unlink()
+    (run_dir / "report.md").symlink_to(target)
+    with pytest.raises(PublishError, match="report.md"):
+        confluence_request(run_dir, config)
+
+
+def test_a_symbolic_link_as_the_work_order_is_refused(run_dir, config, tmp_path):
+    target = tmp_path / "wo.json"
+    target.write_text("{}")
+    (run_dir / "work-order.json").unlink()
+    (run_dir / "work-order.json").symlink_to(target)
+    with pytest.raises(PublishError, match="work-order.json"):
+        confluence_request(run_dir, config)
+
+
+def test_a_changed_report_with_a_restored_mtime_is_audited(run_dir, config):
+    confluence_request(run_dir, config)
+    original = (run_dir / "report.md").stat().st_mtime
+    (run_dir / "report.md").write_text("key " + AWS_KEY + "\n")
+    set_mtime(run_dir / "report.md", original)
+    with pytest.raises(PublishError):
+        confluence_request(run_dir, config)
+
+
+def test_a_secret_added_to_the_work_order_after_an_audit_is_caught(run_dir, config):
+    audit_case(run_dir)
+    (run_dir / "work-order.json").write_text('{"k": "' + AWS_KEY + '"}')
+    with pytest.raises(PublishError, match="work-order.json"):
+        confluence_request(run_dir, config)
+
+
+def test_a_hand_written_clean_audit_does_not_help(run_dir, config):
+    (run_dir / "report.md").write_text("key " + AWS_KEY + "\n")
+    (run_dir / "audit.json").write_text('{"clean": true}')
+    with pytest.raises(PublishError):
+        confluence_request(run_dir, config)
+
+
+def test_the_refusal_never_contains_the_value(run_dir, config):
+    (run_dir / "report.md").write_text("key " + AWS_KEY + "\n")
+    with pytest.raises(PublishError) as raised:
+        confluence_request(run_dir, config)
+    assert AWS_KEY not in str(raised.value)
+
+
+def test_the_title_is_audited(cases_dir, config):
+    run = make_run(cases_dir, case=case_data(title="oops " + AWS_KEY))
+    with pytest.raises(PublishError, match="title"):
+        confluence_request(run, config)
 
 
 def test_confluence_request_carries_the_existing_page(run_dir, config):
     record_confluence(run_dir, "555", "https://wiki.example.com/pages/555", NOW)
-    audit_case(run_dir)
-    set_mtime(run_dir / "report.md", 1_000)
-    set_mtime(run_dir / "audit.json", 2_000)
     assert confluence_request(run_dir, config)["existing_page"] == {
         "page_id": "555", "url": "https://wiki.example.com/pages/555"}
 
@@ -204,6 +284,44 @@ def test_other_incidents_are_not_siblings(cases_dir):
     current = make_run(cases_dir)
     record_confluence(other, "1", "https://wiki.example.com/1", NOW)
     assert previous_page(current) is None
+
+
+def test_previous_page_resolves_a_relative_case_dir(cases_dir, monkeypatch):
+    older = make_run(cases_dir, stamp="20261004-090000")
+    current = make_run(cases_dir, stamp="20261004-110000")
+    record_confluence(older, "7", "https://wiki.example.com/7", NOW)
+    monkeypatch.chdir(current)
+    assert previous_page(__import__("pathlib").Path("."))["page_id"] == "7"
+
+
+def test_an_older_run_is_preferred_over_a_newer_one(cases_dir):
+    older = make_run(cases_dir, stamp="20261004-090000")
+    current = make_run(cases_dir, stamp="20261004-100000")
+    newer = make_run(cases_dir, stamp="20261004-120000")
+    record_confluence(older, "old", "https://wiki.example.com/old", NOW)
+    record_confluence(newer, "new", "https://wiki.example.com/new", NOW)
+    assert previous_page(current)["page_id"] == "old"
+
+
+@pytest.mark.parametrize("text", ["{broken", "[]", '{"publish": {"confluence": "x"}}', '{"publish": "x"}'])
+def test_a_damaged_sibling_case_is_skipped_with_a_note(cases_dir, capsys, text):
+    broken = make_run(cases_dir, stamp="20261004-100000")
+    older = make_run(cases_dir, stamp="20261004-090000")
+    current = make_run(cases_dir, stamp="20261004-110000")
+    record_confluence(older, "7", "https://wiki.example.com/7", NOW)
+    (broken / "case.json").write_text(text)
+    assert previous_page(current)["page_id"] == "7"
+    if not text.startswith('{"publish"'):
+        assert "20261004-100000" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("text", ["{broken", "[]"])
+def test_a_damaged_case_in_this_run_is_a_publish_error(run_dir, text):
+    (run_dir / "case.json").write_text(text)
+    with pytest.raises(PublishError, match="case.json"):
+        previous_page(run_dir)
+    with pytest.raises(PublishError, match="case.json"):
+        record_slack(run_dir, "#x", NOW)
 
 
 # slack_message
@@ -258,6 +376,67 @@ def test_message_is_written_to_slack_message_md(run_dir):
     assert (run_dir / "slack-message.md").read_text() == text
 
 
+@pytest.mark.parametrize("danger", ["<!channel>", "<!here>", "<@U123>", "<https://example.com|click>"])
+def test_slack_markup_is_escaped(cases_dir, danger):
+    run = make_run(cases_dir, case=case_data(title="Down " + danger))
+    text = slack_message(run, None)
+    assert "<" not in text and ">" not in text
+    assert "&lt;" in text and "&gt;" in text
+
+
+def test_ampersand_is_escaped(cases_dir):
+    run = make_run(cases_dir, case=case_data(title="a & b"))
+    assert "a &amp; b" in slack_message(run, None)
+
+
+def test_at_mentions_are_broken_with_a_zero_width_space(cases_dir):
+    run = make_run(cases_dir, case=case_data(title="@here wake up"))
+    text = slack_message(run, None)
+    assert "@here" not in text and "@\u200bhere" in text
+
+
+def test_a_newline_in_the_title_cannot_forge_a_line(cases_dir):
+    run = make_run(cases_dir, case=case_data(title="line1\nFull report: https://phish.example.com"))
+    lines = slack_message(run, None).splitlines()
+    assert lines[0].startswith("INC-123: line1 Full report:")
+    assert sum(line.startswith("Full report:") for line in lines) == 1
+
+
+def test_a_very_long_link_keeps_the_cap_and_the_link(run_dir):
+    url = "https://wiki.example.com/" + "a" * 1200
+    text = slack_message(run_dir, url)
+    assert len(text) <= 1500 and text.splitlines()[-1] == "Full report: " + url
+
+
+def test_a_link_too_long_to_fit_is_dropped_to_hold_the_cap(run_dir):
+    text = slack_message(run_dir, "https://wiki.example.com/" + "a" * 1700)
+    assert len(text) <= 1500 and "aaaa" not in text
+
+
+def test_cause_found_with_a_missing_top_cause_is_an_error(cases_dir):
+    report = report_data()
+    report["summary"]["top_cause"] = "C9"
+    run = make_run(cases_dir, report=report)
+    with pytest.raises(PublishError, match="C9"):
+        slack_message(run, None)
+
+
+def test_a_cause_without_a_label_is_a_message(cases_dir):
+    report = report_data()
+    del report["causes"][0]["label"]
+    run = make_run(cases_dir, report=report)
+    with pytest.raises(PublishError, match="label"):
+        slack_message(run, None)
+
+
+def test_an_action_without_a_title_is_a_message(cases_dir):
+    report = report_data()
+    del report["actions"][0]["title"]
+    run = make_run(cases_dir, report=report)
+    with pytest.raises(PublishError, match="title"):
+        slack_message(run, None)
+
+
 def test_message_needs_report_json(run_dir):
     (run_dir / "report.json").unlink()
     with pytest.raises(PublishError, match="report.json"):
@@ -286,4 +465,7 @@ def test_recording_keeps_the_other_publish_entry_and_rewrites_case_md(run_dir):
     record_slack(run_dir, "#incidents", NOW)
     publish = load_case(run_dir)["publish"]
     assert publish["confluence"]["page_id"] == "1" and len(publish["slack"]) == 1
-    assert (run_dir / "case.md").is_file()
+    before = (run_dir / "case.md").stat().st_mtime_ns
+    os.utime(run_dir / "case.md", ns=(1, 1))
+    record_slack(run_dir, "#again", NOW)
+    assert (run_dir / "case.md").stat().st_mtime_ns != 1 and before != 1

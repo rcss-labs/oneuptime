@@ -82,22 +82,27 @@ def test_audit_without_a_report_exits_one(skill_dir, case_dir):
     assert result.returncode == 1 and "report.md" in result.stderr
 
 
-def test_confluence_before_the_audit_exits_one(skill_dir, case_dir):
+def test_confluence_with_a_secret_exits_one_and_prints_no_request(skill_dir, case_dir):
+    (case_dir / "report.md").write_text("a\nkey " + AWS_KEY + "\n")
     result = run(skill_dir, "confluence", "--case-dir", str(case_dir))
-    assert result.returncode == 1 and "run the audit again" in result.stderr
-    assert result.stdout == ""
+    assert result.returncode == 1 and result.stdout == ""
+    assert "report.md:2:5" in result.stderr and AWS_KEY not in result.stderr
 
 
 def test_confluence_prints_the_request_as_json(skill_dir, case_dir):
-    import os
-    assert run(skill_dir, "audit", "--case-dir", str(case_dir)).returncode == 0
-    os.utime(case_dir / "report.md", (1_000, 1_000))
     result = run(skill_dir, "confluence", "--case-dir", str(case_dir))
     assert result.returncode == 0, result.stderr
     request = json.loads(result.stdout)
-    assert set(request) == {"space_key", "parent_page_id", "title", "body_file", "existing_page"}
+    assert set(request) == {"space_key", "parent_page_id", "title", "body_file", "body_sha256", "existing_page"}
     assert request["title"] == "INC-123 Triage: Checkout API is down"
     assert request["existing_page"] is None
+
+
+def test_confluence_with_a_damaged_case_json_is_one_line_without_a_traceback(skill_dir, case_dir):
+    (case_dir / "case.json").write_text("{broken")
+    result = run(skill_dir, "confluence", "--case-dir", str(case_dir))
+    assert result.returncode == 1 and "Traceback" not in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1
 
 
 def test_confluence_with_a_bad_config_exits_two(tmp_path, case_dir):
@@ -117,10 +122,10 @@ def test_slack_message_prints_writes_and_audits(skill_dir, case_dir):
     assert audit["clean"] and "slack-message.md" in audit["checked"]
 
 
-def test_slack_message_exits_one_when_the_audit_is_no_longer_clean(skill_dir, case_dir):
+def test_slack_message_prints_nothing_when_the_audit_is_not_clean(skill_dir, case_dir):
     (case_dir / "work-order.json").write_text('{"note": "' + AWS_KEY + '"}')
     result = run(skill_dir, "slack-message", "--case-dir", str(case_dir))
-    assert result.returncode == 1
+    assert result.returncode == 1 and result.stdout == ""
     assert "work-order.json:1:" in result.stderr
     assert AWS_KEY not in result.stdout + result.stderr
 

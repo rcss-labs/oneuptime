@@ -74,11 +74,12 @@ def _confluence(args: argparse.Namespace) -> int:
 
 
 def _slack_message(args: argparse.Namespace) -> int:
-    print(slack_message(args.case_dir, args.confluence_url))
+    message = slack_message(args.case_dir, args.confluence_url)
     result = audit_case(args.case_dir)
     if not result["clean"]:
         _print_audit(result, sys.stderr)
         return 1
+    print(message)
     return 0
 
 
