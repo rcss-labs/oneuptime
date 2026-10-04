@@ -1,4 +1,7 @@
-"""Run one read-only kubectl call with the triage kubeconfig and an explicit context."""
+"""Run one read-only kubectl call with the triage kubeconfig and an explicit context.
+
+run_kubectl refuses anything the guard would not allow, so no collector can issue a write.
+"""
 from __future__ import annotations
 
 import subprocess
@@ -6,7 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from triage.awscli import Runner, subprocess_runner
+from triage.awscli import REFUSED, Runner, subprocess_runner
+from triage.guard_kubectl import check_kubectl
+from triage.verdict import ALLOW
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,9 @@ def run_kubectl(
     scope = ["-n", namespace] if namespace else ["-A"] if all_namespaces else []
     argv = ["kubectl", "--kubeconfig", str(kubeconfig), "--context", context, *scope, *args]
     frozen = tuple(argv)
+    verdict = check_kubectl(frozen, (), str(kubeconfig), frozenset({context}))
+    if verdict.kind != ALLOW:
+        return KubectlResult(False, "", f"{REFUSED}: {verdict.reason}", frozen)
     try:
         code, stdout, stderr = runner(argv, timeout)
     except FileNotFoundError:

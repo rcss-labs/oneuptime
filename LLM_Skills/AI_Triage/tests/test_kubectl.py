@@ -57,7 +57,7 @@ def test_timeout_is_passed_to_the_runner():
 
 
 def test_failure_carries_trimmed_stderr():
-    result = call(["get", "pods"], runner_returning(1, "", "  Error from server (Forbidden): nope\n"))
+    result = call(["get", "pods"], runner_returning(1, "", "  Error from server (Forbidden): nope\n"), namespace="web")
     assert not result.ok
     assert result.error_message == "Error from server (Forbidden): nope"
     assert result.stdout == ""
@@ -67,7 +67,7 @@ def test_missing_binary_is_reported():
     def runner(argv, timeout):
         raise FileNotFoundError("kubectl")
 
-    result = call(["get", "pods"], runner)
+    result = call(["get", "pods"], runner, namespace="web")
     assert not result.ok
     assert result.error_message == "the kubectl command was not found"
 
@@ -76,7 +76,7 @@ def test_timeout_is_reported():
     def runner(argv, timeout):
         raise subprocess.TimeoutExpired(argv, timeout)
 
-    result = call(["get", "pods"], runner, timeout=5)
+    result = call(["get", "pods"], runner, namespace="web", timeout=5)
     assert not result.ok
     assert result.error_message == "no answer within 5 seconds"
 
@@ -99,3 +99,23 @@ def test_every_built_argv_for_a_read_verb_is_allowed_by_the_guard(args, scope):
     call(args, runner, **scope)
     verdict = check_kubectl(tuple(runner.argv), (), str(KUBECONFIG), frozenset({CONTEXT}))
     assert verdict.kind == ALLOW, verdict
+
+
+def test_a_write_is_refused_without_calling_the_runner(tmp_path):
+    calls = []
+
+    def runner(argv, timeout):
+        calls.append(argv)
+        return 0, "", ""
+
+    result = run_kubectl(["delete", "pod", "x"], kubeconfig=tmp_path / "kubeconfig", context="triage-x", namespace="web", runner=runner)
+    assert not result.ok
+    assert result.error_message.startswith("RefusedByGuard: ")
+    assert calls == []
+    assert result.argv[-3:] == ("delete", "pod", "x")
+
+
+def test_a_read_still_runs(tmp_path):
+    result = run_kubectl(["get", "pods"], kubeconfig=tmp_path / "kubeconfig", context="triage-x", namespace="web",
+                         runner=lambda argv, timeout: (0, "ok", ""))
+    assert result.ok

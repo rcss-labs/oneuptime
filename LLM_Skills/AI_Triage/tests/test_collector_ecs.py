@@ -259,16 +259,36 @@ def test_access_denied_on_one_call_keeps_the_rest(config_data, tmp_path):
 
 def test_assert_read_only_fails_on_a_write(config_data, tmp_path):
     ctx, aws, kube = make_context(config_data, tmp_path, {})
-    ctx.aws("ecs", "stop-task", ["--cluster", "checkout", "--task", "abc"])
+    # run_aws refuses writes, so call the fake runner directly as a buggy collector bypassing it would.
+    aws(["aws", "ecs", "stop-task", "--cluster", "checkout", "--task", "abc", "--profile", "triage-prod-main",
+         "--region", "eu-west-1"], 60)
     with pytest.raises(AssertionError, match="stop-task"):
         assert_read_only(ctx, aws, kube)
+
+
+def test_assert_read_only_fails_on_a_kubectl_write(config_data, tmp_path):
+    ctx, aws, kube = make_context(config_data, tmp_path, {})
+    kube(["kubectl", "--kubeconfig", str(tmp_path / "config" / "kubeconfig"), "--context", "triage-platform-prod",
+          "-n", "web", "delete", "pod", "x"], 60)
+    with pytest.raises(AssertionError, match="delete"):
+        assert_read_only(ctx, aws, kube)
+
+
+def test_a_refused_write_through_the_context_is_an_evidence_error(config_data, tmp_path):
+    ctx, aws, kube = make_context(config_data, tmp_path, {})
+    assert ctx.aws("ecs", "stop-task", ["--task", "abc"]) is None
+    assert ctx.evidence.errors[0]["code"] == "RefusedByGuard"
+    assert ctx.kubectl("platform-prod", ["delete", "pod", "x"], namespace="web") is None
+    assert ctx.evidence.errors[1]["code"] == "RefusedByGuard"
+    assert aws.calls == [] and kube.calls == []
 
 
 def test_assert_read_only_checks_kubectl(config_data, tmp_path):
     ctx, aws, kube = make_context(config_data, tmp_path, {}, kube_answers={"get pods": {"items": []}})
     ctx.kubectl("platform-prod", ["get", "pods"], namespace="web")
     assert_read_only(ctx, aws, kube)
-    ctx.kubectl("platform-prod", ["delete", "pod", "x"], namespace="web")
+    kube(["kubectl", "--kubeconfig", str(tmp_path / "config" / "kubeconfig"), "--context", "triage-platform-prod",
+          "delete", "pod", "x"], 60)
     with pytest.raises(AssertionError, match="delete"):
         assert_read_only(ctx, aws, kube)
 
