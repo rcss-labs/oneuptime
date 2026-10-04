@@ -424,3 +424,46 @@ def test_the_skill_interpreter_may_be_named_python_or_python3():
     assert kind(f"{SKILL}/.venv/bin/python3 {SCRIPT}/anything_new.py") == PASS
     assert kind(f"FOO=1 {SKILL}/.venv/bin/python3 {SCRIPT}/preflight.py") == ASK
     assert kind(f"{SKILL}/.venv/../.venv/bin/python3 {SCRIPT}/preflight.py") == PASS
+
+
+# ---- fix round 3 -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # zsh drops the 2 before &>, bash keeps it: the verb is delete in zsh, get for a bash-style reading
+        f"kubectl {KUBE_OK} 2&>/dev/null get delete namespace payments",
+        f"kubectl {KUBE_OK} -n 2&>/dev/null get delete namespace payments",
+        f"kubectl {KUBE_OK} 2&>>/dev/null get pods",
+        f"aws ecs list-clusters 9&>/dev/null {AWS_OK}",
+        f"aws ecs list-clusters {AWS_OK} 9>/dev/null",
+        f"aws ecs list-clusters {AWS_OK} >| out.txt",
+    ],
+)
+def test_descriptor_glued_redirects_never_get_allow(command):
+    assert kind(command) in (ASK, DENY)
+
+
+def test_a_spaced_digit_before_an_ampersand_redirect_is_an_argument_not_a_descriptor():
+    assert kind(f"aws ecs list-clusters {AWS_OK} 2>/dev/null | head -3") == ALLOW
+    assert kind(f"kubectl {KUBE_OK} get pods 2>&1 | head -3") == ALLOW
+
+
+@pytest.mark.parametrize(
+    "word", ["repeat", "while", "until", "recurse", "range", "limit"]
+)
+def test_jq_filters_that_could_never_end_are_not_allowed(word):
+    assert kind(f"aws ecs list-clusters {AWS_OK} | jq '{word}(.)'") == PASS
+    assert kind(f"aws ecs list-clusters {AWS_OK} | jq -r '[{word}(1;2)]'") == PASS
+
+
+def test_the_three_everyday_commands_stay_allowed(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert kind('"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/preflight.py"') == ALLOW
+    assert kind(
+        f"aws ecs describe-services --cluster c --services s {AWS_OK} --query 'services[0].events[:5]' 2>/dev/null | jq -r '.[]'"
+    ) == ALLOW
+    assert kind(
+        'kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context triage-prod-main -n payments get pods -o json'.replace("triage-prod-main", "triage-platform-prod")
+    ) == ALLOW

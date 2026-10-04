@@ -37,8 +37,9 @@ OWN_SCRIPTS = frozenset(
 )
 
 JQ_FLAGS = frozenset({"-r", "-c", "-S", "-e", "-M", "--raw-output", "--compact-output", "--sort-keys"})
-# jq programs that could read the environment or other files, or shell-quote output.
-JQ_FORBIDDEN = ("env", "$ENV", "input", "$__loc__", "@sh", "import", "include", "modulemeta", "get_search_list")
+# jq programs that could read the environment or other files, shell-quote output, or never end.
+JQ_FORBIDDEN = ("env", "$ENV", "input", "$__loc__", "@sh", "import", "include", "modulemeta", "get_search_list",
+                "repeat", "while", "until", "recurse", "range", "limit")
 GREP_FLAGS = frozenset({"-i", "-v", "-c", "-E", "-F", "-o", "-n", "-w"})
 GREP_VALUE_FLAGS = frozenset({"-m", "-A", "-B", "-C"})
 WC_FLAGS = frozenset({"-l", "-c", "-w", "-m"})
