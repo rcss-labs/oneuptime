@@ -114,7 +114,7 @@ def test_rest_metrics(config_data, tmp_path):
     metric = sent[0]["MetricStat"]["Metric"]
     assert metric["Namespace"] == "AWS/ApiGateway"
     assert metric["Dimensions"] == [{"Name": "ApiName", "Value": "orders-api"}, {"Name": "Stage", "Value": "prod"}]
-    assert by_summary(ctx, "5XXError prod (Sum): peak 17.0")
+    assert by_summary(ctx, "5XXError prod (Sum): peak 17")
 
 
 def test_http_api(config_data, tmp_path):

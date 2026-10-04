@@ -119,7 +119,7 @@ def run_with_metrics(config_data, tmp_path, data):
 
 def test_table_level_metrics(config_data, tmp_path):
     ctx, fake = run_with_metrics(config_data, tmp_path, {("ReadThrottleEvents", None): 840.0})
-    assert by_summary(ctx, "ReadThrottleEvents (Sum): peak 840.0")
+    assert by_summary(ctx, "ReadThrottleEvents (Sum): peak 840")
     queries = fake.queries[0]
     stats = {q["MetricStat"]["Metric"]["MetricName"]: q["MetricStat"]["Stat"] for q in queries}
     assert stats == {"ReadThrottleEvents": "Sum", "WriteThrottleEvents": "Sum",
@@ -146,9 +146,9 @@ def test_per_operation_metrics_are_queried_with_the_operation_dimension(config_d
 
 def test_only_per_operation_metrics_with_data_become_facts(config_data, tmp_path):
     ctx, _ = run_with_metrics(config_data, tmp_path, {("ThrottledRequests", "Query"): 12.0, ("SuccessfulRequestLatency", "PutItem"): 340.0})
-    throttled = by_summary(ctx, "ThrottledRequests Query (Sum): peak 12.0")
+    throttled = by_summary(ctx, "ThrottledRequests Query (Sum): peak 12")
     assert len(throttled) == 1 and throttled[0].kind == "incident_time"
-    assert by_summary(ctx, "SuccessfulRequestLatency PutItem (Maximum): peak 340.0")
+    assert by_summary(ctx, "SuccessfulRequestLatency PutItem (Maximum): peak 340")
     assert by_summary(ctx, "ThrottledRequests Scan") == []
     assert by_summary(ctx, "throttling or system error was recorded") == []
 

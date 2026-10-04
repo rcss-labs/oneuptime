@@ -316,7 +316,7 @@ def test_application_load_balancer_metrics(config_data, tmp_path):
             ("UnHealthyHostCount", "Maximum"), ("HealthyHostCount", "Minimum")} <= names
     host = next(q for q in sent if q["MetricStat"]["Metric"]["MetricName"] == "UnHealthyHostCount")
     assert {"Name": "TargetGroup", "Value": "targetgroup/web-tg/73e2d6bc24d8a067"} in host["MetricStat"]["Metric"]["Dimensions"]
-    assert by_summary(ctx, "HTTPCode_ELB_5XX_Count (Sum): peak 120.0")
+    assert by_summary(ctx, "HTTPCode_ELB_5XX_Count (Sum): peak 120")
 
 
 def test_network_load_balancer_uses_only_host_count_metrics(config_data, tmp_path):

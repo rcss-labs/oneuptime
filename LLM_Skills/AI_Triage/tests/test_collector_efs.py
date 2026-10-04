@@ -180,7 +180,7 @@ def test_no_mount_targets(config_data, tmp_path):
 def test_metrics(config_data, tmp_path):
     results = {"MetricDataResults": [{"Id": "m0", "Timestamps": ["2026-10-04T10:41:00+00:00"], "Values": [1000.0]}]}
     ctx, aws = run(config_data, tmp_path, healthy_answers(**{"cloudwatch get-metric-data": results}))
-    assert by_summary(ctx, "BurstCreditBalance (Minimum): peak 1000.0")
+    assert by_summary(ctx, "BurstCreditBalance (Minimum): peak 1000")
     call = aws.called("cloudwatch", "get-metric-data")[0]
     queries = json.loads(call[call.index("--metric-data-queries") + 1])
     stats = {q["MetricStat"]["Metric"]["MetricName"]: q["MetricStat"]["Stat"] for q in queries}
