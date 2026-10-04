@@ -314,3 +314,11 @@ def test_state_subcommand_help_says_there_is_no_time_range(capsys):
     with pytest.raises(SystemExit):
         opensearch_query.main(["health", "--help"])
     assert "no time range" in capsys.readouterr().out
+
+
+def test_an_out_of_range_bucket_time_exits_6_without_a_traceback(skill_dir, capsys):
+    answers = {**ANSWERS, "app-logs-*/_search": {"aggregations": {"by_time": {"buckets": [
+        {"key": 10**20, "doc_count": 4}]}}}}
+    code, _ = run(skill_dir, "histogram", *WINDOWED, transport=FakeTransport(answers))
+    assert code == 6
+    assert "unexpected response" in capsys.readouterr().err

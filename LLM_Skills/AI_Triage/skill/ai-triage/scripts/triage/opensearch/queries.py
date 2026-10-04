@@ -90,7 +90,10 @@ def _hit_moment(value: Any) -> datetime | None:
         return None
     if isinstance(value, (int, float)):
         seconds = value / 1000 if value > 100_000_000_000 else value
-        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        try:
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
     if isinstance(value, str):
         try:
             return parse_time(value)
@@ -374,11 +377,12 @@ def top_messages(
             raise
         _top_messages_from_hits(ctx, index, query, filters, field)
         return
-    _flag_partial(ctx, answer, index, command)
     found = answer.get("aggregations", {}).get(TOP_MESSAGES_NAME, {}).get("buckets", [])
     if not found and _total_hits(answer) > 0:
+        # The fallback flags its own answer; flagging here too would add a second identical fact.
         _top_messages_from_hits(ctx, index, query, filters, field)
         return
+    _flag_partial(ctx, answer, index, command)
     if not found:
         _add_empty_fact(ctx, index, command)
         return

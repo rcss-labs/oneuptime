@@ -600,3 +600,18 @@ def test_allocation_explain_only_treats_the_no_unassigned_400_as_nothing_to_expl
     ctx, _ = make_context(cluster, {"_cluster/allocation/explain": (400, {"error": "parse failure"})})
     with pytest.raises(OpenSearchError):
         queries.allocation_explain(ctx)
+
+
+def test_a_numeric_hit_time_out_of_range_is_ignored_not_a_crash(cluster):
+    answer = {"hits": {"total": {"value": 1}, "hits": [hit("boom", time=10**20)]}}
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": answer})
+    queries.search(ctx, INDEX)
+    assert len(ctx.evidence.facts) == 1 and ctx.evidence.facts[0].time is None
+
+
+def test_top_messages_flags_a_partial_answer_once_when_it_falls_back_to_hits(cluster):
+    first = {"timed_out": True, "hits": {"total": {"value": 1}}, "aggregations": {"top_messages": {"buckets": []}}}
+    second = {"timed_out": True, "hits": {"total": {"value": 1}, "hits": [hit("m")]}}
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": Sequence([first, second])})
+    queries.top_messages(ctx, INDEX)
+    assert len([f for f in ctx.evidence.facts if "partial" in f.summary]) == 1

@@ -176,7 +176,7 @@ def main(argv: list[str] | None = None, transport: Transport | None = None) -> i
         return _fail(f"refused by the read policy: {refusal}", 5)
     except OpenSearchError as error:
         return _fail(f"OpenSearch error: {Redactor().text(str(error))}", 6)
-    except (KeyError, TypeError, AttributeError, ValueError, IndexError) as error:
+    except (KeyError, TypeError, AttributeError, ValueError, IndexError, OverflowError, OSError) as error:
         return _fail(f"unexpected response from the cluster ({type(error).__name__})", 6)
     if args.case_dir:
         path = evidence.write(args.case_dir, args.suffix)
