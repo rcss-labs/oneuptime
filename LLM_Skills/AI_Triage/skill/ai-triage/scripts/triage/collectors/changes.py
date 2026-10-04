@@ -40,7 +40,8 @@ def _lookup_end(ctx: CollectContext, incident_start: str | None) -> datetime:
     incident = parse_iso(incident_start)
     if incident is None:
         return ctx.window.end
-    return max(ctx.window.start, min(ctx.window.end, incident + timedelta(minutes=LOOKUP_GRACE_MINUTES)))
+    end = min(ctx.window.end, incident + timedelta(minutes=LOOKUP_GRACE_MINUTES))
+    return end if end > ctx.window.start else ctx.window.end
 
 
 def _add_cloudtrail(ctx: CollectContext, lookup: str, name: str, incident_start: str | None) -> None:
@@ -64,18 +65,20 @@ def _add_cloudtrail(ctx: CollectContext, lookup: str, name: str, incident_start:
                 f"on {resource}{_gap(incident_start, item.get('EventTime'))}"
             ),
         )
-    if not shown:
-        ctx.evidence.add(
-            kind=DERIVED, resource=name, command=ctx.last_command,
-            summary=f"No change was recorded for {name} between {format_time(start)} and {format_time(end)}",
-        )
+    returned = len(reply.get("Events", []))
     if reply.get("NextToken"):
         ctx.evidence.add(
             kind=DERIVED, resource=name, command=ctx.last_command,
             summary=(
-                f"More change events exist for {name} than the {LOOKUP_ITEMS} shown; "
-                "these are the newest in the period"
+                f"More change events exist for {name} than the {len(shown)} shown; these are the newest in the period"
+                if shown else
+                f"No change was found among the {returned} newest events; older events were not read"
             ),
+        )
+    elif not shown:
+        ctx.evidence.add(
+            kind=DERIVED, resource=name, command=ctx.last_command,
+            summary=f"No change was recorded for {name} between {format_time(start)} and {format_time(end)}",
         )
 
 

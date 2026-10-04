@@ -273,8 +273,29 @@ def test_cut_list_is_reported(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, answers, {"resource_names": "checkout-api"})
     cut = [f for f in ctx.evidence.facts if "More change events exist" in f.summary]
     assert len(cut) == 1 and cut[0].kind == "derived"
-    assert cut[0].summary == ("More change events exist for checkout-api than the 50 shown; "
+    assert cut[0].summary == ("More change events exist for checkout-api than the 1 shown; "
                               "these are the newest in the period")
+
+
+def test_cut_list_with_no_write_found_does_not_claim_nothing_changed(config_data, tmp_path):
+    events = [event(f"Describe{n}", read_only="true") for n in range(50)]
+    ctx, _, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": events, "NextToken": "abc"}},
+                    {"resource_names": "x"})
+    assert fact_summaries(ctx) == ["No change was found among the 50 newest events; older events were not read"]
+    assert ctx.evidence.facts[0].kind == "derived"
+
+
+def test_cut_list_count_is_the_number_returned(config_data, tmp_path):
+    answers = {"cloudtrail lookup-events": {"Events": [event("UpdateService")], "NextToken": "abc"}}
+    ctx, _, _ = run(config_data, tmp_path, answers, {"resource_names": "x"})
+    assert any("than the 1 shown" in s for s in fact_summaries(ctx))
+
+
+def test_incident_before_the_window_looks_at_the_whole_window(config_data, tmp_path):
+    ctx, aws, _ = run(config_data, tmp_path, {}, {"resource_names": "x", "incident_start": "2026-10-04T09:00:00Z"})
+    call = aws.called("cloudtrail", "lookup-events")[0]
+    assert call[call.index("--start-time") + 1] == "2026-10-04T10:00:00Z"
+    assert call[call.index("--end-time") + 1] == "2026-10-04T12:00:00Z"
 
 
 def test_complete_list_is_not_reported_as_cut(config_data, tmp_path):
