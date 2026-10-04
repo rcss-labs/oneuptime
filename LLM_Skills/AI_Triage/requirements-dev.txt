@@ -1,0 +1,2 @@
+-r skill/ai-triage/requirements.txt
+pytest==9.1.1

@@ -1,0 +1,8 @@
+.venv-dev/
+.pytest_cache/
+__pycache__/
+*.pyc
+skill/ai-triage/.venv/
+skill/ai-triage/config/triage-config.yaml
+skill/ai-triage/config/service-map.yaml
+skill/ai-triage/config/kubeconfig
