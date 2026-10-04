@@ -1,0 +1,310 @@
+import json
+from datetime import datetime, timezone
+
+import pytest
+
+from triage.case import (
+    CaseError,
+    create_case,
+    incident_keys,
+    load_case,
+    parse_incident,
+    save_case,
+    set_target_from_discovery,
+    set_target_from_map,
+    skill_version,
+)
+from triage.config import parse_config
+from triage.service_map import MatchKeys, ServiceMap, parse_map
+
+NOW = datetime(2026, 10, 4, 11, 0, 0, tzinfo=timezone.utc)
+
+FULL_INCIDENT = {
+    "number": "INC-123",
+    "title": "Checkout API is down",
+    "url": "https://oneuptime.example.com/dashboard/incidents/123",
+    "description": "",
+    "severity": "Critical",
+    "state": "Acknowledged",
+    "declared_at": "2026-10-04T10:45:00Z",
+    "impact_started_at": "2026-10-04T10:42:00Z",
+    "resolved_at": None,
+    "monitors": [{"name": "Checkout API", "type": "API", "target": "https://checkout.example.com/health"}],
+    "labels": ["checkout"],
+    "hostnames": [],
+    "timeline": [{"time": "2026-10-04T10:45:00Z", "text": "Incident created by monitor"}],
+    "notes": [{"time": "2026-10-04T10:50:00Z", "text": "Restarting did not help"}],
+}
+MINIMAL = {"number": "INC-1", "title": "T", "declared_at": "2026-10-04T10:45:00Z"}
+
+
+@pytest.fixture
+def config(config_data):
+    return parse_config(config_data)
+
+
+@pytest.fixture
+def service_map(map_data, config):
+    return parse_map(map_data, config)
+
+
+@pytest.fixture
+def skill_dir(tmp_path):
+    root = tmp_path / "skill"
+    root.mkdir()
+    (root / "VERSION").write_text("9.8.7\n")
+    return root
+
+
+@pytest.fixture
+def cases_config(config_data, tmp_path):
+    config_data["cases_dir"] = str(tmp_path / "cases")
+    return parse_config(config_data)
+
+
+def make_case(incident, cases_config, service_map, skill_dir, now=NOW):
+    return create_case(parse_incident(incident), cases_config, service_map, now, skill_dir)
+
+
+# parse_incident
+
+def test_minimal_incident_gets_empty_defaults():
+    parsed = parse_incident(MINIMAL)
+    assert parsed["declared_at"] == "2026-10-04T10:45:00Z"
+    assert parsed["monitors"] == [] and parsed["labels"] == [] and parsed["hostnames"] == []
+    assert parsed["timeline"] == [] and parsed["notes"] == []
+    assert parsed["impact_started_at"] is None and parsed["resolved_at"] is None
+    assert parsed["url"] == "" and parsed["description"] == ""
+
+
+def test_full_incident_is_normalised_into_a_new_dict():
+    data = dict(FULL_INCIDENT, declared_at="2026-10-04T12:45:00+02:00")
+    parsed = parse_incident(data)
+    assert parsed["declared_at"] == "2026-10-04T10:45:00Z"
+    assert parsed["impact_started_at"] == "2026-10-04T10:42:00Z"
+    assert parsed["monitors"] == FULL_INCIDENT["monitors"]
+    assert parsed is not data
+    assert data["declared_at"] == "2026-10-04T12:45:00+02:00"
+
+
+@pytest.mark.parametrize(
+    "change, fragment",
+    [
+        ({"number": None}, "number"),
+        ({"title": None}, "title"),
+        ({"declared_at": None}, "declared_at"),
+        ({"declared_at": "yesterday"}, "declared_at"),
+        ({"resolved_at": "never"}, "resolved_at"),
+        ({"monitors": "Checkout"}, "monitors"),
+        ({"monitors": ["Checkout"]}, "monitors"),
+        ({"labels": "checkout"}, "labels"),
+        ({"labels": [1]}, "labels"),
+        ({"hostnames": "a.example.com"}, "hostnames"),
+    ],
+)
+def test_each_validation_problem_is_reported(change, fragment):
+    data = {**MINIMAL, **change}
+    data = {k: v for k, v in data.items() if v is not None}
+    with pytest.raises(CaseError) as caught:
+        parse_incident(data)
+    assert any(fragment in error for error in caught.value.errors)
+
+
+def test_all_problems_are_reported_together():
+    with pytest.raises(CaseError) as caught:
+        parse_incident({"monitors": "x", "labels": [1], "impact_started_at": "soon"})
+    text = " ".join(caught.value.errors)
+    for word in ("number", "title", "declared_at", "monitors", "labels", "impact_started_at"):
+        assert word in text
+
+
+def test_incident_must_be_an_object():
+    with pytest.raises(CaseError):
+        parse_incident(["not", "an", "object"])
+
+
+# incident_keys
+
+def test_keys_use_monitor_names_labels_and_hostnames():
+    incident = parse_incident({**FULL_INCIDENT, "hostnames": ["Shop.example.com"]})
+    keys = incident_keys(incident)
+    assert keys.monitors == ("checkout api",)
+    assert keys.labels == ("checkout",)
+    assert "checkout.example.com" in keys.hostnames and "shop.example.com" in keys.hostnames
+
+
+def test_bare_hostname_targets_count_and_other_targets_do_not():
+    monitors = [
+        {"name": "a", "target": "db.example.com"},
+        {"name": "b", "target": "ping the thing"},
+        {"name": "c", "target": "/var/run/x.sock"},
+        {"name": "d", "target": "10"},
+        {"name": "e", "target": ""},
+        {"name": "f"},
+    ]
+    keys = incident_keys(parse_incident({**MINIMAL, "monitors": monitors}))
+    assert keys.hostnames == ("db.example.com",)
+
+
+def test_duplicate_hostnames_are_removed():
+    incident = parse_incident({
+        **MINIMAL,
+        "hostnames": ["checkout.example.com"],
+        "monitors": [{"name": "a", "target": "https://checkout.example.com:8443/x"}],
+    })
+    assert incident_keys(incident).hostnames == ("checkout.example.com",)
+
+
+def test_keys_are_match_keys():
+    assert isinstance(incident_keys(parse_incident(MINIMAL)), MatchKeys)
+
+
+# create_case
+
+def test_case_folder_layout(cases_config, service_map, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    assert case_dir == cases_config.cases_dir / "INC-123" / "20261004-110000"
+    for sub in ("evidence", "findings", "judgments"):
+        assert (case_dir / sub).is_dir()
+    for name in ("incident.json", "case.json", "case.md"):
+        assert (case_dir / name).is_file()
+
+
+def test_case_json_records_version_window_and_match(cases_config, service_map, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    case = load_case(case_dir)
+    assert case["skill_version"] == "9.8.7"
+    assert case["created_at"] == "2026-10-04T11:00:00Z"
+    assert case["case_dir"] == str(case_dir)
+    assert case["incident_start"] == "2026-10-04T10:42:00Z"
+    assert case["window"] == {"start": "2026-10-04T09:42:00Z", "end": "2026-10-04T11:00:00Z"}
+    assert case["target"] is None
+    assert case["match"]["status"] == "one"
+    assert case["match"]["candidates"][0]["service"] == "checkout-api"
+    assert case["match"]["candidates"][0]["environment"] == "prod"
+    assert case["incident"]["number"] == "INC-123"
+    assert case["incident"]["hostnames"] == ["checkout.example.com"]
+
+
+def test_incident_start_falls_back_to_declared_at(cases_config, service_map, skill_dir):
+    case = load_case(make_case(MINIMAL, cases_config, service_map, skill_dir))
+    assert case["incident_start"] == "2026-10-04T10:45:00Z"
+    assert case["match"]["status"] == "none"
+
+
+def test_window_for_a_resolved_incident_ends_after_resolution(cases_config, service_map, skill_dir):
+    incident = {**FULL_INCIDENT, "resolved_at": "2026-10-04T10:50:00Z"}
+    case = load_case(make_case(incident, cases_config, service_map, skill_dir))
+    assert case["window"]["end"] == "2026-10-04T11:00:00Z"
+    incident = {**FULL_INCIDENT, "resolved_at": "2026-10-04T10:46:00Z"}
+    case = load_case(make_case(incident, cases_config, service_map, skill_dir, now=datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)))
+    assert case["window"]["end"] == "2026-10-04T11:01:00Z"
+
+
+def test_secret_looking_text_is_redacted_in_files(cases_config, service_map, skill_dir):
+    secret = "AKIA" + "IOSFODNN7" + "EXAMPLE"
+    incident = {**FULL_INCIDENT, "description": f"leaked key {secret} in the log"}
+    case_dir = make_case(incident, cases_config, service_map, skill_dir)
+    for name in ("incident.json", "case.json", "case.md"):
+        assert secret not in (case_dir / name).read_text()
+    assert "leaked key" in json.loads((case_dir / "incident.json").read_text())["description"]
+
+
+def test_existing_run_folder_is_refused(cases_config, service_map, skill_dir):
+    make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    with pytest.raises(CaseError):
+        make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+
+
+def test_unsafe_characters_in_the_number_become_dashes(cases_config, service_map, skill_dir):
+    incident = {**MINIMAL, "number": "INC/12 3..x"}
+    case_dir = make_case(incident, cases_config, service_map, skill_dir)
+    assert case_dir.parent.name == "INC-12-3--x"
+    assert case_dir.parent.parent == cases_config.cases_dir
+
+
+def test_a_number_with_nothing_usable_is_refused(cases_config, service_map, skill_dir):
+    assert make_case({**MINIMAL, "number": "ok"}, cases_config, service_map, skill_dir)
+    with pytest.raises(CaseError):
+        create_case({**parse_incident(MINIMAL), "number": ""}, cases_config, service_map, NOW, skill_dir)
+
+
+def test_skill_version_reads_the_version_file(skill_dir, tmp_path):
+    assert skill_version(skill_dir) == "9.8.7"
+    assert skill_version(tmp_path) == "unknown"
+
+
+# targets
+
+def test_target_from_map(cases_config, service_map, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    target = set_target_from_map(case_dir, service_map, cases_config, "checkout-api", "prod")
+    assert target["source"] == "map"
+    assert target["service"] == "checkout-api" and target["environment"] == "prod"
+    assert target["account"] == "prod-main" and target["region"] == "eu-west-1"
+    assert target["resources"]["ecs_service"] == "checkout/checkout-api"
+    assert target["depends_on"] == ["payments-api"]
+    assert load_case(case_dir)["target"] == target
+
+
+def test_unknown_service_or_environment_is_an_error(cases_config, service_map, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    with pytest.raises(CaseError):
+        set_target_from_map(case_dir, service_map, cases_config, "nope", "prod")
+    with pytest.raises(CaseError):
+        set_target_from_map(case_dir, service_map, cases_config, "checkout-api", "qa")
+    assert load_case(case_dir)["target"] is None
+
+
+def test_target_from_discovery(cases_config, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, ServiceMap({}), skill_dir)
+    discovery = {"hostname": "checkout.example.com", "steps": [], "account": "prod-main", "region": "eu-west-1",
+                 "resources": {"load_balancer": "checkout-prod"}, "notes": []}
+    target = set_target_from_discovery(case_dir, cases_config, discovery)
+    assert target == {"source": "discovered", "service": None, "environment": None, "account": "prod-main",
+                      "region": "eu-west-1", "resources": {"load_balancer": "checkout-prod"}, "depends_on": []}
+    assert load_case(case_dir)["target"] == target
+
+
+@pytest.mark.parametrize("change", [{"account": None}, {"region": None}, {"account": "nope"}, {"region": "ap-south-9"}])
+def test_discovery_needs_a_known_account_and_region(cases_config, skill_dir, change):
+    case_dir = make_case(FULL_INCIDENT, cases_config, ServiceMap({}), skill_dir)
+    discovery = {"account": "prod-main", "region": "eu-west-1", "resources": {}, **change}
+    with pytest.raises(CaseError):
+        set_target_from_discovery(case_dir, cases_config, discovery)
+
+
+# case.md
+
+SECTIONS = ["# Case: INC-123", "## Incident", "## Time window", "## Service match", "## Target",
+            "## Rules for every reader of these files"]
+
+
+def test_case_md_has_every_section_in_order(cases_config, service_map, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    text = (case_dir / "case.md").read_text()
+    positions = [text.index(section) for section in SECTIONS]
+    assert positions == sorted(positions)
+    assert str(case_dir) in text
+    assert "{{" not in text
+    assert "checkout-api" in text and "Checkout API is down" in text
+    lowered = text.lower()
+    assert "not instructions" in lowered and "fact id" in lowered and "current" in lowered
+    assert "changes anything" in lowered
+
+
+def test_case_md_is_rewritten_when_the_target_is_set(cases_config, service_map, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    assert "ecs_service" not in (case_dir / "case.md").read_text()
+    set_target_from_map(case_dir, service_map, cases_config, "checkout-api", "prod")
+    text = (case_dir / "case.md").read_text()
+    assert "ecs_service" in text and "checkout/checkout-api" in text
+
+
+def test_save_case_round_trips(cases_config, service_map, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    case = load_case(case_dir)
+    case["incident"]["state"] = "Resolved"
+    save_case(case_dir, case)
+    assert load_case(case_dir)["incident"]["state"] == "Resolved"
+    assert "Resolved" in (case_dir / "case.md").read_text()
