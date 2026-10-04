@@ -47,7 +47,7 @@ def _add_scaling_activities(ctx: CollectContext, name: str, resource: str) -> No
         )
 
 
-def _add_operation_metrics(ctx: CollectContext, name: str, resource: str) -> None:
+def _add_operation_metrics(ctx: CollectContext, name: str, resource: str, table_throttled: bool) -> None:
     specs = [
         MetricSpec(f"{metric} {operation}", "AWS/DynamoDB", metric, {"TableName": name, "Operation": operation}, stat)
         for metric, stat in OPERATION_METRICS for operation in OPERATIONS
@@ -72,10 +72,13 @@ def _add_operation_metrics(ctx: CollectContext, name: str, resource: str) -> Non
             summary="The one-week baseline for the per-operation metrics could not be read (see errors); the window values are reported without a comparison",
         )
     problems = [s for s in summaries if s.datapoints and s.label.split()[0] in ("ThrottledRequests", "SystemErrors")]
-    if not problems:
+    if not problems and not table_throttled:
         ctx.evidence.add(
             kind=DERIVED, resource=resource, command=window_command,
-            summary="No throttling or system error was recorded for any operation in the window (no data for ThrottledRequests or SystemErrors)",
+            summary=(
+                f"No throttling or system error was recorded in the window for any of the {len(OPERATIONS)} operations queried ({', '.join(OPERATIONS)}); "
+                "other operations exist and were not queried"
+            ),
         )
 
 
@@ -91,8 +94,14 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=_table_summary(name, table))
     _add_scaling_activities(ctx, name, resource)
     dimensions = {"TableName": name}
-    add_metric_facts(ctx, resource, [MetricSpec(metric, "AWS/DynamoDB", metric, dimensions, stat) for metric, stat in TABLE_METRICS])
-    _add_operation_metrics(ctx, name, resource)
+    table_summaries = add_metric_facts(
+        ctx, resource, [MetricSpec(metric, "AWS/DynamoDB", metric, dimensions, stat) for metric, stat in TABLE_METRICS]
+    )
+    table_throttled = any(
+        s.label in ("ReadThrottleEvents", "WriteThrottleEvents") and s.datapoints and (s.window_max or 0) > 0
+        for s in table_summaries
+    )
+    _add_operation_metrics(ctx, name, resource, table_throttled)
 
 
 COLLECTOR = Collector(

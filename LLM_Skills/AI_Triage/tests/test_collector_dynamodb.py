@@ -156,7 +156,7 @@ def test_only_per_operation_metrics_with_data_become_facts(config_data, tmp_path
 def test_no_per_operation_data_is_stated_once(config_data, tmp_path):
     ctx, _ = run_with_metrics(config_data, tmp_path, {})
     fact = by_summary(ctx, "throttling or system error was recorded")[0]
-    assert fact.kind == "derived" and "any operation" in fact.summary
+    assert fact.kind == "derived" and "any of the 9 operations queried" in fact.summary and "GetItem" in fact.summary
     assert len(by_summary(ctx, "throttling or system error was recorded")) == 1
     assert by_summary(ctx, "ThrottledRequests GetItem") == []
 
@@ -253,3 +253,15 @@ def test_a_failed_baseline_is_named_and_the_window_is_still_reported(config_data
     fact = by_summary(ctx, "one-week baseline")[0]
     assert fact.kind == "derived" and "could not be read" in fact.summary and "window" in fact.summary
     assert by_summary(ctx, "per-operation throttling and system error metrics could not be read") == []
+
+
+def test_no_throttling_is_not_stated_when_table_level_throttle_metrics_show_throttling(config_data, tmp_path):
+    for metric in ("ReadThrottleEvents", "WriteThrottleEvents"):
+        ctx, _ = run_with_metrics(config_data, tmp_path, {(metric, None): 40.0})
+        assert by_summary(ctx, f"{metric} (Sum): peak 40")
+        assert by_summary(ctx, "throttling or system error was recorded") == []
+
+
+def test_zero_table_level_throttle_events_do_not_suppress_the_statement(config_data, tmp_path):
+    ctx, _ = run_with_metrics(config_data, tmp_path, {("WriteThrottleEvents", None): 0.0})
+    assert len(by_summary(ctx, "throttling or system error was recorded")) == 1
