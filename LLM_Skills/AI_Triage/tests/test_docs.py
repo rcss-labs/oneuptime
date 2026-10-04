@@ -50,3 +50,14 @@ def test_documents_say_that_api_keys_are_not_readable():
     assert "**API Gateway** usage plans and API keys are not readable, because they expose key values." in text
     api_row = next(line for line in text.splitlines() if line.startswith("| API Gateway"))
     assert "usage plan" not in api_row.lower()
+
+
+def test_codebuild_and_cloudfront_are_rated_medium_with_a_reason():
+    rows = {line.split("|")[1].strip(): line for line in DOC.read_text().splitlines() if line.startswith("| ")}
+    assert rows["CloudFront"].rstrip().endswith("| Medium: custom origin headers |")
+    codebuild = next(line for name, line in rows.items() if name.startswith("CodePipeline"))
+    assert codebuild.rstrip().endswith("| Medium: build environment variables |")
+
+
+def test_sensitive_decisions_say_collectors_do_not_store_build_and_origin_values():
+    assert "- **CodeBuild and CloudFront** build environment variables and custom origin headers are readable; collectors do not store those values." in DOC.read_text()

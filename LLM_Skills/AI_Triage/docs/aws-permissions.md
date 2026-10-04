@@ -77,11 +77,11 @@ the common resource paths.
 | SNS | `sns:GetTopicAttributes` | Delivery policy and failures | Low |
 | Load balancing | `elasticloadbalancing:DescribeRules`, `DescribeTargetGroupAttributes`, `DescribeListenerCertificates`, `DescribeTags` | Routing and health check settings | Low |
 | ACM | `acm:DescribeCertificate` | Certificate expiry | Low |
-| CloudFront | `cloudfront:GetDistribution`, `GetDistributionConfig` | Origins and behaviors | Low |
+| CloudFront | `cloudfront:GetDistribution`, `GetDistributionConfig` | Origins and behaviors | Medium: custom origin headers |
 | WAF | `wafv2:GetWebACL`, `GetWebACLForResource`, `GetRuleGroup`, `GetSampledRequests` | Which rule blocked traffic | High: sampled requests |
 | API Gateway | `apigateway:GET` on REST and HTTP APIs, account settings, domain names | Stages, integrations, throttling | Low |
 | CloudFormation | `cloudformation:DescribeStackEvents`, `DescribeStackResources` | What a stack update changed | Low |
-| CodePipeline, CodeBuild | `codepipeline:GetPipelineState`, `GetPipelineExecution`, `ListPipelineExecutions`, `ListActionExecutions`, `codebuild:BatchGetBuilds` | Correlate releases with the incident | Low |
+| CodePipeline, CodeBuild | `codepipeline:GetPipelineState`, `GetPipelineExecution`, `ListPipelineExecutions`, `ListActionExecutions`, `codebuild:BatchGetBuilds` | Correlate releases with the incident | Medium: build environment variables |
 | AWS Config | `config:GetResourceConfigHistory`, `BatchGetResourceConfig` | What changed on one resource, and when | Medium: configuration values |
 | Parameter Store | `ssm:DescribeParameters`, `GetParameter`, `GetParameters`, `GetParametersByPath` | Configuration the application points at | Medium: plain values |
 | IAM | `iam:GetRole`, `GetRolePolicy`, `GetPolicy`, `GetPolicyVersion`, `SimulatePrincipalPolicy` | Diagnose access-denied incidents; power the verify script | Low |
@@ -91,6 +91,7 @@ the common resource paths.
 ### Sensitive data decisions
 
 - **API Gateway** usage plans and API keys are not readable, because they expose key values.
+- **CodeBuild and CloudFront** build environment variables and custom origin headers are readable; collectors do not store those values.
 - **Log content** is readable for every log group. Triage is not possible without it.
 - **Parameter Store** plain values are readable. Encrypted values are not, because
   decryption is not granted.
