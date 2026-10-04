@@ -36,3 +36,10 @@ def test_private_config_files_are_listed_in_gitignore():
 def test_no_private_config_file_exists_in_the_source_tree():
     for name in PRIVATE_FILES:
         assert not (SKILL_SRC / "config" / name).exists(), f"{name} must not be created in the repository"
+
+
+def test_example_files_use_the_reserved_example_domain():
+    for name in ("triage-config.example.yaml", "service-map.example.yaml"):
+        text = (SKILL_SRC / "config" / name).read_text()
+        hosts = re.findall(r"[a-z0-9.-]+\.(?:com|net|org|io)\b", text)
+        assert hosts and all(host.endswith("example.com") for host in hosts)

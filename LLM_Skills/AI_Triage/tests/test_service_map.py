@@ -1,0 +1,88 @@
+import pytest
+
+from triage.config import parse_config
+from triage.service_map import MapError, MatchKeys, load_map, match_incident, parse_map
+
+
+@pytest.fixture
+def config(config_data):
+    return parse_config(config_data)
+
+
+def test_example_map_is_valid(map_data, config):
+    smap = parse_map(map_data, config)
+    assert set(smap.services) == {"checkout-api", "payments-api"}
+    prod = smap.services["checkout-api"].environments["prod"]
+    assert prod.account == "prod-main" and prod.depends_on == ("payments-api",)
+    assert smap.services["checkout-api"].last_verified == "2026-10-04"
+
+
+@pytest.mark.parametrize(
+    "mutate, expected",
+    [
+        (lambda d: d["services"]["checkout-api"]["environments"]["prod"].update(account="nope"), "unknown account 'nope'"),
+        (lambda d: d["services"]["checkout-api"]["environments"]["prod"].update(region="us-west-2"), "is not listed for account"),
+        (lambda d: d["services"]["checkout-api"]["environments"]["prod"]["resources"].update(mainframe="x"), "unknown resource key"),
+        (lambda d: d["services"]["checkout-api"]["environments"]["prod"]["resources"]["opensearch"].update(cluster="nope"), "unknown cluster 'nope'"),
+        (lambda d: d["services"]["checkout-api"]["environments"]["prod"]["resources"]["opensearch"].update(index_pattern="other-*"), "outside the allowed patterns"),
+        (lambda d: d["services"]["payments-api"]["environments"]["prod"]["resources"]["eks"].update(cluster="nope"), "unknown cluster 'nope'"),
+        (lambda d: d["services"]["payments-api"]["environments"]["prod"]["resources"]["eks"].pop("namespace"), "eks.namespace: must be set"),
+        (lambda d: d["services"]["checkout-api"]["environments"]["prod"].update(depends_on=["ghost"]), "unknown service 'ghost'"),
+        (lambda d: d["services"]["checkout-api"].update(source="guessed"), "source: must be one of"),
+        (lambda d: d["services"]["checkout-api"].update(last_verified="yesterday"), "last_verified: must be a date"),
+        (lambda d: d["services"]["payments-api"].pop("match"), "needs a match block"),
+        (lambda d: d["services"]["payments-api"].update(environments={}), "at least one environment is required"),
+        (lambda d: d["services"]["payments-api"]["match"].update(urls=["x"]), "match.urls: unknown key"),
+    ],
+)
+def test_invalid_map_is_rejected(map_data, config, mutate, expected):
+    mutate(map_data)
+    with pytest.raises(MapError) as excinfo:
+        parse_map(map_data, config)
+    assert expected in "\n".join(excinfo.value.errors)
+
+
+def test_environment_match_selects_one_environment(map_data, config):
+    smap = parse_map(map_data, config)
+    result = match_incident(smap, MatchKeys.build(monitors=["checkout api"], labels=["Checkout"]))
+    assert result.status == "one"
+    candidate = result.candidates[0]
+    assert (candidate.service, candidate.environment) == ("checkout-api", "prod")
+    assert "label:checkout" in candidate.reasons and "monitor:checkout api" in candidate.reasons
+
+
+def test_service_level_match_alone_is_ambiguous_when_every_environment_has_its_own(map_data, config):
+    smap = parse_map(map_data, config)
+    assert match_incident(smap, MatchKeys.build(labels=["checkout"])).status == "none"
+
+
+def test_service_level_match_covers_environments_without_their_own(map_data, config):
+    smap = parse_map(map_data, config)
+    result = match_incident(smap, MatchKeys.build(hostnames=["Payments.Example.com."]))
+    assert result.status == "one"
+    assert (result.candidates[0].service, result.candidates[0].environment) == ("payments-api", "prod")
+
+
+def test_several_services_matching_is_reported_as_many(map_data, config):
+    smap = parse_map(map_data, config)
+    result = match_incident(smap, MatchKeys.build(monitors=["Checkout API", "Payments API"]))
+    assert result.status == "many"
+    assert {c.service for c in result.candidates} == {"checkout-api", "payments-api"}
+
+
+def test_no_match(map_data, config):
+    smap = parse_map(map_data, config)
+    result = match_incident(smap, MatchKeys.build(monitors=["Unknown"]))
+    assert result.status == "none" and result.candidates == ()
+
+
+def test_empty_map_file_is_an_empty_map(tmp_path, config):
+    path = tmp_path / "service-map.yaml"
+    path.write_text("")
+    assert load_map(path, config).services == {}
+
+
+def test_missing_map_file_is_reported(tmp_path, config):
+    with pytest.raises(MapError) as excinfo:
+        load_map(tmp_path / "absent.yaml", config)
+    assert "file not found" in excinfo.value.errors[0]
