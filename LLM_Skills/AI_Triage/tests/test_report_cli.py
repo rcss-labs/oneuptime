@@ -100,3 +100,101 @@ def test_invalid_report_is_not_rendered(skill_dir, case_dir):
     result = run(skill_dir, "render", "--case-dir", str(case_dir), "--now", NOW)
     assert result.returncode == 1 and "causes[0].supporting[0]" in result.stderr
     assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
+
+
+# stale and atomic outputs
+
+import importlib.util
+
+
+def load_command():
+    spec = importlib.util.spec_from_file_location("report_command", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(SCRIPT.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
+    return module
+
+
+def render_ok(skill_dir, case_dir):
+    result = run(skill_dir, "render", "--case-dir", str(case_dir), "--now", NOW)
+    assert result.returncode == 0, result.stderr
+
+
+def test_a_failed_render_renames_the_previous_outputs_to_stale(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    old_report, old_order = (case_dir / "report.md").read_text(), (case_dir / "work-order.json").read_text()
+    broken = copy.deepcopy(VALID_REPORT)
+    broken["summary"]["impact"] = ""
+    write_report(case_dir, broken)
+    result = run(skill_dir, "render", "--case-dir", str(case_dir), "--now", NOW)
+    assert result.returncode == 1
+    assert "report.md.stale" in result.stderr and "work-order.json.stale" in result.stderr
+    assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
+    assert (case_dir / "report.md.stale").read_text() == old_report
+    assert (case_dir / "work-order.json.stale").read_text() == old_order
+
+
+def test_a_newer_failure_replaces_an_older_stale_copy(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    (case_dir / "report.md.stale").write_text("older")
+    render_ok(skill_dir, case_dir)
+    (case_dir / "report.json").write_text("{nope")
+    assert run(skill_dir, "render", "--case-dir", str(case_dir), "--now", NOW).returncode == 1
+    assert (case_dir / "report.md.stale").read_text().startswith("# Triage report")
+
+
+def test_a_missing_report_json_also_marks_the_outputs_stale(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    (case_dir / "report.json").unlink()
+    result = run(skill_dir, "render", "--case-dir", str(case_dir), "--now", NOW)
+    assert result.returncode == 2 and "stale" in result.stderr
+    assert (case_dir / "report.md.stale").is_file() and not (case_dir / "report.md").exists()
+
+
+def test_validate_does_not_touch_the_outputs(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    broken = copy.deepcopy(VALID_REPORT)
+    broken["summary"]["impact"] = ""
+    write_report(case_dir, broken)
+    assert run(skill_dir, "validate", "--case-dir", str(case_dir)).returncode == 1
+    assert (case_dir / "report.md").is_file() and not (case_dir / "report.md.stale").exists()
+
+
+def test_a_successful_render_leaves_no_temporary_files(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    assert sorted(path.name for path in case_dir.glob("*.tmp")) == []
+
+
+def test_a_failure_while_moving_the_second_file_leaves_neither_output(skill_dir, case_dir, monkeypatch, capsys):
+    command = load_command()
+    write_report(case_dir, VALID_REPORT)
+    real_replace, calls = command.os.replace, []
+
+    def flaky(source, target):
+        calls.append(target)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(command.os, "replace", flaky)
+    code = command.main(["render", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir), "--now", NOW])
+    assert code == 2
+    assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
+    assert sorted(path.name for path in case_dir.glob("*.tmp")) == []
+    assert "disk full" in capsys.readouterr().err
+
+
+def test_an_invalid_work_order_writes_neither_output(skill_dir, case_dir, monkeypatch, capsys):
+    command = load_command()
+    write_report(case_dir, VALID_REPORT)
+    monkeypatch.setattr(command, "validate_work_order", lambda order: ["cause.label: broken"])
+    assert command.main(["render", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir), "--now", NOW]) == 1
+    assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
+    assert "cause.label: broken" in capsys.readouterr().err

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,6 +68,30 @@ def _validated(case_dir: Path, config) -> tuple[dict, dict, dict]:
     return report, case, findings
 
 
+OUTPUT_NAMES = ("report.md", "work-order.json")
+
+
+def _mark_stale(case_dir: Path) -> list[str]:
+    """Rename outputs of an earlier render to <name>.stale, so nothing that no longer matches report.json is left."""
+    renamed = []
+    for name in OUTPUT_NAMES:
+        (case_dir / f"{name}.tmp").unlink(missing_ok=True)
+        path = case_dir / name
+        if path.exists():
+            os.replace(path, case_dir / f"{name}.stale")
+            renamed.append(f"{name}.stale")
+    return renamed
+
+
+def _write_both(case_dir: Path, text: str, work_order: dict) -> None:
+    """Write both files to temporary names, then move both into place."""
+    contents = {"report.md": text, "work-order.json": json.dumps(work_order, indent=2) + "\n"}
+    for name, content in contents.items():
+        (case_dir / f"{name}.tmp").write_text(content)
+    for name in OUTPUT_NAMES:
+        os.replace(case_dir / f"{name}.tmp", case_dir / name)
+
+
 def _render(case_dir: Path, config, now: datetime) -> int:
     report, case, findings = _validated(case_dir, config)
     gaps = coverage_from_evidence(case_dir)
@@ -78,16 +103,25 @@ def _render(case_dir: Path, config, now: datetime) -> int:
     problems = validate_work_order(work_order)
     if problems:
         raise InvalidReport([f"work order: {problem}" for problem in problems])
-    report_path, order_path = case_dir / "report.md", case_dir / "work-order.json"
-    report_path.write_text(text)
-    order_path.write_text(json.dumps(work_order, indent=2) + "\n")
-    print(report_path)
-    print(order_path)
+    _write_both(case_dir, text, work_order)
+    print(case_dir / "report.md")
+    print(case_dir / "work-order.json")
     return 0
+
+
+def _fail_render(case_dir: Path) -> str:
+    try:
+        renamed = _mark_stale(case_dir)
+    except OSError as error:
+        return f"the earlier report.md and work-order.json could not be renamed ({error.strerror or error})"
+    if not renamed:
+        return ""
+    return f"the earlier outputs no longer match report.json and were renamed: {', '.join(renamed)}"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    rendering = False
     try:
         if not args.case_dir.is_dir():
             raise CaseError([f"case folder not found: {args.case_dir}"])
@@ -97,16 +131,20 @@ def main(argv: list[str] | None = None) -> int:
             print("report is valid")
             return 0
         now = parse_time(args.now) if getattr(args, "now", None) else datetime.now(timezone.utc)
+        rendering = True
         return _render(args.case_dir, config, now)
     except InvalidReport as error:
-        print("\n".join(f"- {problem}" for problem in error.problems), file=sys.stderr)
-        return 1
+        message, code = "\n".join(f"- {problem}" for problem in error.problems), 1
     except (ConfigError, CaseError) as error:
-        print("\n".join(error.errors), file=sys.stderr)
-        return 2
+        message, code = "\n".join(error.errors), 2
     except WindowError as error:
-        print(str(error), file=sys.stderr)
-        return 2
+        message, code = str(error), 2
+    except OSError as error:
+        message, code = f"{error.filename or 'output'}: {error.strerror or error}", 2
+    if rendering:
+        message = "\n".join(part for part in (message, _fail_render(args.case_dir)) if part)
+    print(message, file=sys.stderr)
+    return code
 
 
 if __name__ == "__main__":
