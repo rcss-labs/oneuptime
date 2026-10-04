@@ -165,3 +165,46 @@ def test_facts_are_bounded_to_thirty_activities(config_data, tmp_path):
     many = {"Activities": [activity(start=f"2026-10-04T10:{n % 60:02d}:00+00:00", description=f"Activity {n}") for n in range(45)]}
     ctx, _, _ = run(config_data, tmp_path, answers(**{"autoscaling describe-scaling-activities": many}))
     assert len(with_text(ctx, "Activity ")) <= 30
+
+
+def refresh_facts(config_data, tmp_path, *refreshes):
+    ctx, _, _ = run(config_data, tmp_path, answers(**{"autoscaling describe-instance-refreshes": {"InstanceRefreshes": list(refreshes)}}))
+    return with_text(ctx, "Instance refresh")
+
+
+def test_refresh_that_started_in_the_window_and_ended_after_it_is_reported(config_data, tmp_path):
+    found = refresh_facts(config_data, tmp_path, refresh(
+        status="Successful", start="2026-10-04T11:30:00+00:00", end="2026-10-04T12:40:00+00:00", percent=100))
+    assert len(found) == 1 and found[0].time == "2026-10-04T11:30:00Z"
+
+
+def test_refresh_that_started_before_the_window_and_ended_inside_it_is_reported(config_data, tmp_path):
+    assert len(refresh_facts(config_data, tmp_path, refresh(
+        status="Successful", start="2026-10-04T09:00:00+00:00", end="2026-10-04T10:30:00+00:00"))) == 1
+
+
+def test_refresh_that_spans_the_whole_window_is_reported(config_data, tmp_path):
+    assert len(refresh_facts(config_data, tmp_path, refresh(
+        status="Successful", start="2026-10-04T08:00:00+00:00", end="2026-10-04T14:00:00+00:00"))) == 1
+
+
+def test_refresh_that_ended_before_the_window_is_dropped(config_data, tmp_path):
+    assert refresh_facts(config_data, tmp_path, refresh(
+        status="Successful", start="2026-10-04T08:00:00+00:00", end="2026-10-04T09:59:00+00:00")) == []
+
+
+def test_refresh_that_started_after_the_window_is_dropped(config_data, tmp_path):
+    assert refresh_facts(config_data, tmp_path, refresh(
+        status="Successful", start="2026-10-04T12:05:00+00:00", end="2026-10-04T12:30:00+00:00")) == []
+    assert refresh_facts(config_data, tmp_path, refresh(status="InProgress", start="2026-10-04T12:05:00+00:00")) == []
+
+
+def test_active_refresh_that_started_before_the_window_end_says_its_status_is_current(config_data, tmp_path):
+    found = refresh_facts(config_data, tmp_path, refresh(status="InProgress", start="2026-10-04T09:00:00+00:00"))
+    assert len(found) == 1 and "status now" in found[0].summary
+
+
+def test_absent_status_message_is_left_out(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, answers(**{"autoscaling describe-scaling-activities": {"Activities": [
+        activity(code="Failed")]}}))
+    assert "None" not in with_text(ctx, "FAILED")[0].summary

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from triage.collectors import Collector
-from triage.collectors.common import in_window, newest_in_window
+from triage.collectors.common import in_window, newest_in_window, parse_iso
 from triage.context import CollectContext
 from triage.evidence import CURRENT, INCIDENT_TIME
 
@@ -35,7 +35,8 @@ def _add_activities(ctx: CollectContext, resource: str, name: str) -> None:
     for activity in activities:
         code = activity.get("StatusCode")
         if code == "Failed":
-            summary = f"FAILED scaling activity: {activity.get('Description')}; status message: {activity.get('StatusMessage')}"
+            message = f"; status message: {activity['StatusMessage']}" if activity.get("StatusMessage") else ""
+            summary = f"FAILED scaling activity: {activity.get('Description')}{message}"
         else:
             summary = f"Scaling activity {code}: {activity.get('Description')}"
         ctx.evidence.add(
@@ -48,13 +49,17 @@ def _add_refreshes(ctx: CollectContext, resource: str, name: str) -> None:
     # describe-instance-refreshes is not paginated by the CLI, so the limit is --max-records.
     reply = ctx.aws("autoscaling", "describe-instance-refreshes", ["--auto-scaling-group-name", name, "--max-records", MAX_REFRESHES])
     for refresh in (reply or {}).get("InstanceRefreshes", []):
+        started = parse_iso(refresh.get("StartTime"))
+        ended = parse_iso(refresh.get("EndTime"))
         active = refresh.get("Status") in ACTIVE_REFRESH_STATES
-        if not active and not in_window(ctx.window, refresh.get("EndTime")):
+        # Report a refresh whose period [start, end or still running] overlaps the window.
+        if started is None or started > ctx.window.end or (not active and ended is not None and ended < ctx.window.start):
             continue
+        status_note = " (status now)" if active else ""
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=resource, time=refresh.get("StartTime"), command=ctx.last_command,
             summary=(
-                f"Instance refresh {refresh.get('InstanceRefreshId')} {refresh.get('Status')}, "
+                f"Instance refresh {refresh.get('InstanceRefreshId')} {refresh.get('Status')}{status_note}, "
                 f"{refresh.get('PercentageComplete')}% complete, {refresh.get('InstancesToUpdate')} instances to update"
             ),
             excerpt=refresh.get("StatusReason") or "",
