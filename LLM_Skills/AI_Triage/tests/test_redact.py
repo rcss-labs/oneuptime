@@ -1327,3 +1327,221 @@ def test_path_value_is_kept_in_value_but_a_random_path_part_is_not():
 )
 def test_key_value_rule_never_eats_brackets_or_closing_quotes(source, expected):
     assert Redactor().text(source) == expected
+
+
+# Ruling 5: normalise before matching
+
+ESC = "\x1b"
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (f"{ESC}[36mpassword{ESC}[0m={ESC}[35m{PW}{ESC}[0m", "password=<SECRET-1>"),
+        (f"{ESC}[1;33mDB_PASSWORD:{ESC}[0m {PW}", "DB_PASSWORD: <SECRET-1>"),
+        (f"{ESC}[33mAuthorization: {ESC}[0mBearer short1", "Authorization: Bearer <SECRET-1>"),
+        (f"pass​word={PW}", "password=<SECRET-1>"),
+        (f"pass­word={PW}", "password=<SECRET-1>"),
+        (f"﻿api_key={PW}", "api_key=<SECRET-1>"),
+        ("ｐａｓｓｗｏｒｄ=" + PW, "password=<SECRET-1>"),
+        (f"{ESC}]0;title\x07token={PW}", "token=<SECRET-1>"),
+    ],
+)
+def test_ansi_invisible_and_compatibility_characters_are_normalised(source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    assert audit_text(source) != []
+
+
+def test_plain_coloured_text_loses_only_its_escape_codes():
+    assert Redactor().text(f"{ESC}[32mINFO{ESC}[0m request ok") == "INFO request ok"
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("GET /signup?email=bob%40corp.example.com&step=2", "GET /signup?email=<EMAIL-1>&step=2"),
+        ("GET /x?u=bob%2540corp.example.com", "GET /x?u=<EMAIL-1>"),
+        ("GET /cb?next=%2Fhome%3Ftoken%3D" + PW + " 200", "GET /cb?next=<SECRET-1> 200"),
+        ("data=password%3D" + PW + "%26user%3Dbob", "data=<SECRET-1>"),
+    ],
+)
+def test_percent_encoded_tokens_are_checked_in_decoded_form(source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    assert Redactor().text(out) == out
+
+
+@pytest.mark.parametrize("source", ["CPU at 95% now", "progress=50%25 done", "GET /files/a%20b.txt 200", "%d items"])
+def test_harmless_percent_text_is_kept(source):
+    assert Redactor().text(source) == source
+
+
+# Ruling 6: more rules
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (f"LOG:  statement: ALTER USER app WITH PASSWORD '{PW}';", "LOG:  statement: ALTER USER app WITH PASSWORD '<SECRET-1>';"),
+        (f"CREATE USER 'a'@'%' IDENTIFIED BY '{PW}';", "CREATE USER 'a'@'%' IDENTIFIED BY '<SECRET-1>';"),
+        (f"create role r with login encrypted password '{PW}'", "create role r with login encrypted password '<SECRET-1>'"),
+        (
+            f"ALTER USER 'a'@'%' IDENTIFIED WITH mysql_native_password BY '{PW}'",
+            "ALTER USER 'a'@'%' IDENTIFIED WITH mysql_native_password BY '<SECRET-1>'",
+        ),
+        (f"SET PASSWORD FOR 'a'@'%' = '{PW}'", "SET PASSWORD FOR 'a'@'%' = '<SECRET-1>'"),
+        (f"SET PASSWORD = PASSWORD('{PW}')", "SET PASSWORD = PASSWORD('<SECRET-1>')"),
+        (f"ALTER ROLE app PASSWORD 'it''s{PW}'", "ALTER ROLE app PASSWORD '<SECRET-1>'"),
+    ],
+)
+def test_sql_password_statements(source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    assert audit_text(source) != [] and audit_text(out) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "FATAL:  password authentication failed for user \"app\"",
+        "Access denied for user 'root'@'10.0.1.5' (using password: YES)",
+        "ALTER USER app VALID UNTIL 'infinity'",
+    ],
+)
+def test_sql_lines_without_a_password_are_kept(source):
+    assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (
+            f"aws cloudformation deploy --parameters ParameterKey=DBPassword,ParameterValue={PW} ParameterKey=Env,ParameterValue=prod",
+            "aws cloudformation deploy --parameters ParameterKey=DBPassword,ParameterValue=<SECRET-1> ParameterKey=Env,ParameterValue=prod",
+        ),
+        (f"aws ec2 create-tags --tags Key=api_token,Value={PW} Key=team,Value=core", "aws ec2 create-tags --tags Key=api_token,Value=<SECRET-1> Key=team,Value=core"),
+        (
+            f"aws ecs run-task --overrides containerOverrides=[{{name=api,environment=[{{name=DB_PASSWORD,value={PW}}}]}}]",
+            "aws ecs run-task --overrides containerOverrides=[{name=api,environment=[{name=DB_PASSWORD,value=<SECRET-1>}]}]",
+        ),
+        (
+            f"aws ssm put-parameter --name /prod/db/password --type SecureString --value {PW} --overwrite",
+            "aws ssm put-parameter --name /prod/db/password --type SecureString --value <SECRET-1> --overwrite",
+        ),
+        (f"aws ssm put-parameter --name /prod/app/x --value '{PW}'", "aws ssm put-parameter --name /prod/app/x --value '<SECRET-1>'"),
+        (f"aws secretsmanager put-secret-value --secret-id db --secret-string '{PW}'", "aws secretsmanager put-secret-value --secret-id db --secret-string '<SECRET-1>'"),
+        (f"aws rds modify-db-instance --db-instance-identifier db1 --master-user-password {PW}", "aws rds modify-db-instance --db-instance-identifier db1 --master-user-password <SECRET-1>"),
+    ],
+)
+def test_aws_cli_shorthand(source, expected):
+    out = Redactor().text(source)
+    assert out == expected
+    assert audit_text(source) != [] and audit_text(out) == []
+
+
+VENDOR_TOKENS = {
+    "google-api-key": "AI" + "za" + "Sy" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q",
+    "google-oauth": "ya" + "29." + "a0AfH6SM" + "Bx1y2z3_abcDEF",
+    "google-client-secret": "GOC" + "SPX-" + "a1B2c3D4e5F6g7H8i9J0k1L2",
+    "github-user": "gh" + "u_" + "a1B2c3D4e5F6g7H8i9J0",
+    "github-refresh": "gh" + "r_" + "a1B2c3D4e5F6g7H8i9J0",
+    "gitlab": "gl" + "pat-" + "a1B2c3D4e5F6g7H8i9J0",
+    "npm": "np" + "m_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8",
+    "sendgrid": "SG" + "." + "a1B2c3D4e5F6g7H8i9J0" + "." + "k1L2m3N4o5P6q7R8s9T0",
+    "vault": "hv" + "s." + "CAESIa1B2c3D4e5F6g7H8i9J0",
+    "slack-app": "xa" + "pp-" + "1-A0123-456789-abcdef",
+    "slack-refresh": "xo" + "xe." + "xoxp-1-a1B2c3D4e5F6g7",
+    "stripe-restricted-test": "rk" + "_test_" + "a1B2c3D4e5F6g7H8",
+}
+
+
+@pytest.mark.parametrize("name", sorted(VENDOR_TOKENS))
+def test_more_vendor_token_prefixes(name):
+    token = VENDOR_TOKENS[name]
+    out = Redactor().text(f"using {token} now")
+    assert out == "using <SECRET-1> now"
+    assert audit_text(f"using {token} now") != []
+
+
+@pytest.mark.parametrize("kind", ["workflows", "triggers"])
+def test_slack_workflow_and_trigger_hooks(kind):
+    hook = f"https://hooks.slack.com/{kind}/" + "T0" + "ABC/A0" + "DEF/" + "x" * 6 + "Yz12"
+    assert Redactor().text(f"post {hook} ok") == "post https://hooks.slack.com/<SECRET-1> ok"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "scope: {'type': 'http', 'headers': [(b'host', b'api.example.com'), (b'cookie', b'sid=" + PW + "')]}",
+        '{"headers": [["Host", "api.example.com"], ["Cookie", "sid=' + PW + '"]]}',
+        "headers=[('X-Api-Key', '" + PW + "'), ('Accept', '*/*')]",
+    ],
+)
+def test_cookie_and_key_values_in_header_pair_lists(source):
+    out = Redactor().text(source)
+    assert PW not in out
+    assert "api.example.com" in out or "Accept" in out
+
+
+def test_authorization_in_header_pairs_keeps_its_scheme():
+    out = Redactor().value({"headers": [("authorization", "Basic " + B64), ("host", "api.example.com")]})
+    assert out == {"headers": [["authorization", "Basic <SECRET-1>"], ["host", "api.example.com"]]}
+
+
+BODY_LINE = ("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC" + "7Vb3x" + "Qm9pLk2Jh8Gf4Dd1Ss0Aa")[:64]
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (BODY_LINE, "<SECRET-1>"),
+        (f"  {BODY_LINE}", "  <SECRET-1>"),
+        (f"{BODY_LINE}\n-----END " + "PRIVATE KEY-----", "<SECRET-1>"),
+        (f"tail of key {BODY_LINE[:20]}==\n-----END " + "RSA PRIVATE KEY-----\nnext line", "<SECRET-1>\nnext line"),
+        # Private-Lines and Private-MAC hold the "private" stem (ruling 11), so their values are hidden too.
+        (f"Private-Lines: 2\n{BODY_LINE}\n{BODY_LINE[:30]}\nPrivate-MAC: x", "Private-Lines: <SECRET-2>\n<SECRET-1>\nPrivate-MAC: <SECRET-3>"),
+    ],
+)
+def test_pem_body_lines_arriving_separately(source, expected):
+    assert Redactor().text(source) == expected
+    assert audit_text(source) != []
+
+
+# Ruling 8: phone numbers
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("call +1 (555) 010-9999 now", "call <PHONE-1> now"),
+        ("tel=+44 20 7946 0958", "tel=<PHONE-1>"),
+        ("sms to +972-54-123-4567 sent", "sms to <PHONE-1> sent"),
+        ("+4915112345678", "<PHONE-1>"),
+        ('{"phone": "+33.1.23.45.67.89"}', '{"phone":"<PHONE-1>"}'),  # a changed JSON span is re-serialised
+    ],
+)
+def test_phone_numbers_with_a_leading_plus_are_masked(source, expected):
+    redactor = Redactor()
+    assert redactor.text(source) == expected
+    assert redactor.counts()["phone"] == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "2026-10-04T10:00:00+00:00 ok",
+        "[04/Oct/2026:10:00:00 +0000] \"GET / HTTP/1.1\" 200 1234",
+        "2026-10-04 10:00:00 +0000 12345 handled",
+        "x+1234567890 build",
+        "retry in +1234567 ms",
+        "a +5 offset and 1+12345678",
+        "client 10.0.0.1 and 8.8.8.8",
+    ],
+)
+def test_things_that_are_not_phone_numbers_are_kept(source):
+    out = Redactor().text(source)
+    assert "<PHONE-" not in out
+
+
+def test_text_without_findings_keeps_its_own_characters():
+    source = "x" * 10 + "\u2026 [summary cut] \uff21 caf\u00e9"
+    assert Redactor().text(source) == source

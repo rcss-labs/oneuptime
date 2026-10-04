@@ -11,6 +11,8 @@ import ipaddress
 import json
 import re
 import threading
+import unicodedata
+import urllib.parse
 import warnings
 
 import yaml
@@ -235,14 +237,19 @@ AUTHORIZATION_SENTENCE_RE = re.compile(
     re.IGNORECASE,
 )
 WEBHOOK_RE = re.compile(
-    r"""(?<![\w.-])(?:hooks\.slack\.com/(?P<slack>services/[^\s"'<>]+)"""
+    r"""(?<![\w.-])(?:hooks\.slack\.com/(?P<slack>(?:services|workflows|triggers)/[^\s"'<>]+)"""
     r"""|discord(?:app)?\.com/(?P<discord>api/webhooks/[^\s"'<>]+)"""
     r"""|[\w-]+(?:\.[\w-]+)*\.webhook\.office\.com/(?P<office>[^\s"'<>]+))"""
 )
 BEARER_RE = re.compile(r"\bBearer[ \t]+(?P<token>[A-Za-z0-9._~+/-]{16,}=*)", re.IGNORECASE)
 AWS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
 VENDOR_TOKEN_RE = re.compile(
-    r"(?<![\w-])(?:(?:ghp_|gho_|ghs_|github_pat_|xoxb-|xoxp-|xoxa-|sk_live_|sk_test_|rk_live_|whsec_)[A-Za-z0-9_-]{10,}"
+    r"(?<![\w-])(?:(?:ghp_|gho_|ghs_|ghu_|ghr_|github_pat_|xoxb-|xoxp-|xoxa-|xoxs-|xoxr-|xapp-|xoxe\.xox[a-z]-|xoxe-"
+    r"|sk_live_|sk_test_|rk_live_|rk_test_|whsec_|glpat-|glptt-|gldt-|GR1348941|npm_|GOCSPX-|hvs\.|hvb\.|hvr\."
+    r"|dckr_pat_|shpat_|shpss_|dop_v1_|pypi-|xkeysib-)[A-Za-z0-9_-]{10,}"
+    r"|AIza[0-9A-Za-z_-]{30,}"
+    r"|ya29\.[0-9A-Za-z_-]{10,}"
+    r"|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}"
     r"|sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,})"
 )
 AWS_SECRET_KEY_RE = re.compile(r"(?<![\w/+=-])[A-Za-z0-9/+]{40}(?![\w/+=-])")
@@ -259,8 +266,63 @@ _BLOCK_SCALAR_RE = re.compile(r"[|>][+-]?\d?")
 _BARE_VALUE_RE = re.compile(r"""[^\s&,;"'}\]\[{]+""")
 
 
+_SQL_QUOTED = r"""(?:'(?P<sq>(?:[^'\\\n]|\\.|'')*)'|"(?P<dq>(?:[^"\\\n]|\\.)*)")"""
+SQL_PASSWORD_RE = re.compile(
+    r"(?i)(?:\b(?:(?:UN)?ENCRYPTED[ \t]+)?PASSWORD[ \t]+(?:FOR[ \t]+\S+[ \t]*)?(?:=[ \t]*)?(?:PASSWORD[ \t]*\([ \t]*)?"
+    r"|\bIDENTIFIED[ \t]+(?:WITH[ \t]+\S+[ \t]+)?BY[ \t]+(?:PASSWORD[ \t]+)?"
+    r"|\bPASSWORD[ \t]*=[ \t]*PASSWORD[ \t]*\([ \t]*)" + _SQL_QUOTED
+)
+# AWS CLI shorthand: ParameterKey=N,ParameterValue=V, Key=N,Value=V, name=N,value=V.
+SHORTHAND_PAIR_RE = re.compile(
+    r"""(?<![\w-])(?:Parameter)?(?:Key|key|Name|name)=(?P<name>[^,\s{}\[\]=]+),[ \t]*"""
+    r"""(?:(?:UsePreviousValue|ResolvedValue|Type|type)=[^,\s}\]]*,[ \t]*)?(?:Parameter)?(?:Value|value)="""
+    r"""(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)'|(?P<bare>[^,\s}\]]+))"""
+)
+PEM_END_RE = re.compile(r"-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----")
+PEM_BODY_LINE_RE = re.compile(r"^[ \t]*(?P<body>[A-Za-z0-9+/]{40,}={0,2})[ \t]*\r?$", re.MULTILINE)
+PUTTY_PRIVATE_RE = re.compile(r"^Private-Lines:[ \t]*\d+[ \t]*\r?\n(?P<body>(?:[A-Za-z0-9+/=]+\r?(?:\n|$))+)", re.MULTILINE)
+
+
+_SQL_CALL_RE = re.compile(r"[A-Za-z_]\w*\(")
+
+
+def _sql_spans(text: str) -> list[Span]:
+    if "assword" not in text and "ASSWORD" not in text and "dentified" not in text.lower():
+        return []
+    return _group_rule(SQL_PASSWORD_RE, "sq", "dq")(text)
+
+
+def _shorthand_spans(text: str) -> list[Span]:
+    spans = []
+    for match in SHORTHAND_PAIR_RE.finditer(text):
+        if looks_secret_key(match.group("name")):
+            group = next(g for g in ("dq", "sq", "bare") if match.group(g) is not None)
+            if _usable(text, match.span(group)):
+                spans.append(match.span(group))
+    return spans
+
+
+def _three_classes(text: str) -> bool:
+    classes = (any(c.islower() for c in text), any(c.isupper() for c in text), any(c.isdigit() for c in text))
+    return sum(classes) == 3
+
+
 def _pem_spans(text: str) -> list[Span]:
-    return [m.span() for m in PEM_RE.finditer(text)]
+    spans = [m.span() for m in PEM_RE.finditer(text)]
+    if "PRIVATE KEY" in text:
+        # An END line with no BEGIN before it: the body arrived in this text without its header.
+        first_end = PEM_END_RE.search(text)
+        if first_end and not (spans and spans[0][0] < first_end.start()):
+            spans.append((0, first_end.end()))
+    for match in PEM_BODY_LINE_RE.finditer(text):
+        if _three_classes(match.group("body")):
+            spans.append(match.span("body"))
+    for match in PUTTY_PRIVATE_RE.finditer(text):
+        start, end = match.span("body")
+        while end > start and text[end - 1] in "\r\n":
+            end -= 1
+        spans.append((start, end))
+    return _merge(spans)
 
 
 def _auth_spans(text: str) -> list[Span]:
@@ -400,8 +462,8 @@ def _key_value_spans(text: str) -> list[Span]:
         if not span or not _usable(text, span):
             continue
         value = text[span[0]:span[1]]
-        if _SCHEME_AND_PLACEHOLDER_RE.fullmatch(value) or _harmless_secret_value(value):
-            continue
+        if _SCHEME_AND_PLACEHOLDER_RE.fullmatch(value) or _harmless_secret_value(value) or _SQL_CALL_RE.fullmatch(value):
+            continue  # a SQL PASSWORD(...) call: the SQL rule masks its argument
         spans.append(span)
     for match in XML_PAIR_RE.finditer(text):
         if looks_secret_key(match.group("key")) and _usable(text, match.span("value")):
@@ -477,7 +539,7 @@ def _flag_spans(text: str) -> list[Span]:
 # Commands whose credentials sit in short flags. Regions run to the end of the command: the line, a
 # ; | or && separator, the next command word, or 2000 characters.
 _COMMAND_RE = re.compile(
-    r"(?<![\w.-])(?P<command>curl|wget|mysqldump|mysqladmin|mysql|docker[ \t]+login|sshpass|redis-cli)(?![\w-])"
+    r"(?<![\w.-])(?P<command>curl|wget|mysqldump|mysqladmin|mysql|docker[ \t]+login|sshpass|redis-cli|put-parameter)(?![\w-])"
 )
 _COMMAND_END_RE = re.compile(r";|\||&&")
 _TOKEN = r"""(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)"""
@@ -487,6 +549,7 @@ _USER_FLAG_RE = re.compile(
 _ATTACHED_P_RE = re.compile(r"(?<!\S)-p(?P<value>[^\s-]\S*)")
 _SPACED_P_RE = re.compile(r"(?<!\S)-p[ \t]*(?P<value>" + _TOKEN + r")")
 _REDIS_A_RE = re.compile(r"(?<!\S)-a[ \t]+(?P<value>" + _TOKEN + r")")
+_PARAMETER_VALUE_RE = re.compile(r"(?<!\S)--value(?:=|[ \t]+)(?P<value>" + _TOKEN + r")")
 _COMMANDS_WITH_USER_FLAG = ("curl", "wget")
 _COMMANDS_WITH_ATTACHED_P = ("mysql", "mysqladmin", "mysqldump")
 
@@ -533,6 +596,9 @@ def _command_spans(text: str) -> list[Span]:
                 spans.append(_token_inner(text, found.start("value"), found.end("value")))
         elif command == "redis-cli":
             for found in _REDIS_A_RE.finditer(text, match.end(), limit):
+                spans.append(_token_inner(text, found.start("value"), found.end("value")))
+        elif command == "put-parameter":  # fail closed: any parameter value may be a secret
+            for found in _PARAMETER_VALUE_RE.finditer(text, match.end(), limit):
                 spans.append(_token_inner(text, found.start("value"), found.end("value")))
     return _merge([span for span in spans if _usable(text, span)])
 
@@ -656,11 +722,14 @@ def _yaml_argument_spans(text: str) -> list[Span]:
 
 # (audit category, rule), in redaction order.
 SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
+    ("percent_encoded", lambda text: _percent_spans(text, emails=False)),
     ("private_key", _pem_spans),
+    ("sql_password", _sql_spans),
     ("url_credential", _group_rule(URL_CREDENTIAL_RE, "secret")),
     ("auth_header", _auth_spans),
     ("secret_key_value", _key_value_spans),
     ("secret_name_value", _name_value_spans),
+    ("cli_shorthand", _shorthand_spans),
     ("secret_flag", _flag_spans),
     ("secret_command", _command_spans),
     ("secret_argument_list", lambda text: _merge(_yaml_argument_spans(text) + _json_array_argument_spans(text))),
@@ -671,12 +740,86 @@ SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("jwt", lambda text: [m.span() for m in JWT_RE.finditer(text)]),
 )
 
-# --- emails and addresses ----------------------------------------------------------------
+# --- normalisation and percent-encoding -------------------------------------------------
+
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\x9b[0-?]*[ -/]*[@-~]"
+)
+_INVISIBLE_RE = re.compile("[\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+
+
+def strip_invisible(text: str) -> str:
+    """Text without ANSI escape sequences and zero-width or bidi control characters."""
+    if "\x1b" in text or "\x9b" in text:
+        text = _ANSI_RE.sub("", text)
+    if not text.isascii():
+        text = _INVISIBLE_RE.sub("", text)
+    return text
+
+
+def normalise(text: str) -> str:
+    """Text as the rules see it: stripped of invisible characters, in NFKC form."""
+    text = strip_invisible(text)
+    return text if text.isascii() else unicodedata.normalize("NFKC", text)
+
+
+_PERCENT_TOKEN_RE = re.compile(r"""[^\s"'<>&?;,]*%[0-9A-Fa-f]{2}[^\s"'<>&?;,]*""")
+_PERCENT_KEY_RE = re.compile(r"[\w.\-\[\]]+")
+
+
+def _decoded(token: str) -> str:
+    for _ in range(3):  # double and triple encoding
+        decoded = urllib.parse.unquote(token, errors="surrogateescape")
+        if decoded == token:
+            break
+        token = decoded
+    return token
+
+
+def _percent_spans(text: str, emails: bool) -> list[Span]:
+    """Tokens with percent-escapes whose decoded form holds a secret (or, with emails, an email address).
+
+    All decoded tokens are checked in one pass over one joined text, so the cost stays linear.
+    The value after a plain key= is masked; otherwise the whole token is.
+    """
+    if "%" not in text:
+        return []
+    tokens = [m for m in _PERCENT_TOKEN_RE.finditer(text)]
+    decoded = [_decoded(m.group()) for m in tokens]
+    candidates = [(m, d) for m, d in zip(tokens, decoded) if d != m.group()]
+    if not candidates:
+        return []
+    joined, starts, position = [], [], 0
+    for _, value in candidates:
+        starts.append(position)
+        joined.append(value)
+        position += len(value) + 1
+    combined = "\n".join(joined)
+    if emails:
+        hits = [m.start() for m in EMAIL_RE.finditer(combined)]
+    else:
+        hits = [start for category, rule in SECRET_RULES if category != "percent_encoded" for start, _ in rule(combined)]
+    flagged = {bisect.bisect_right(starts, hit) - 1 for hit in hits}
+    spans = []
+    for index in sorted(flagged):
+        match = candidates[index][0]
+        token = match.group()
+        equals = token.find("=")
+        if equals > 0 and _PERCENT_KEY_RE.fullmatch(token[:equals]) and equals + 1 < len(token):
+            spans.append((match.start() + equals + 1, match.end()))
+        else:
+            spans.append(match.span())
+    return [span for span in spans if _usable(text, span)]
+
+
+# --- emails, phone numbers and addresses ---------------------------------------------------
 
 EMAIL_RE = re.compile(
     r"(?<![\w.%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])"
 )
 _SCP_PATH_AFTER_RE = re.compile(r":[A-Za-z~./_]")
+PHONE_RE = re.compile(r"(?<![\w+:./-])\+\d(?:[ .\-()]{0,2}\d){7,14}(?![\d])")
+_TIME_BEFORE_RE = re.compile(r"\d:\d\d(?::\d\d(?:[.,]\d+)?)?[ \t]$")
 IPV4_RE = re.compile(r"(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?![\w]|\.\d)")
 
 
@@ -711,6 +854,14 @@ MAX_EMBEDDED_NESTING = 4         # text() -> structure -> string -> text() level
 DEEP_STRUCTURE_PLACEHOLDER = "<DEEP-STRUCTURE-OMITTED>"
 _BRACKET_RE = re.compile(r"[{}\[\]]")
 _CLOSERS = {"{": "}", "[": "]"}
+
+
+def _secret_header_pair(items: list) -> bool:
+    """A two-item [name, value] list whose name is a secret header (cookie, authorization, x-api-key)."""
+    if len(items) != 2 or not all(isinstance(item, (str, bytes)) for item in items):
+        return False
+    name = items[0].decode("utf-8", errors="replace") if isinstance(items[0], bytes) else items[0]
+    return not name.startswith("-") and len(name) <= 64 and looks_secret_key(name)
 
 
 class _TooDeep(Exception):
@@ -784,6 +935,15 @@ class Redactor:
             numbers[digest] = self._highest[category]
         return f"<{category}-{numbers[digest]}>"
 
+    def _spans_as(self, text: str, spans: list[Span], category: str) -> list[str]:
+        pieces, position = [], 0
+        for start, end in spans:
+            pieces.append(text[position:start])
+            pieces.append(self._placeholder(category, text[start:end]))
+            position = end
+        pieces.append(text[position:])
+        return pieces
+
     def _replace_spans(self, text: str, spans: list[Span]) -> str:
         pieces, position = [], 0
         for start, end in spans:
@@ -794,6 +954,9 @@ class Redactor:
         return "".join(pieces)
 
     def _replace_emails(self, text: str) -> str:
+        encoded = _percent_spans(text, emails=True)
+        if encoded:
+            text = "".join(self._spans_as(text, encoded, "EMAIL"))
         pieces, position = [], 0
         userinfo = _url_userinfo_spans(text)
         starts = [start for start, _ in userinfo]
@@ -893,12 +1056,34 @@ class Redactor:
         except Exception:
             return self._unreadable(value)
 
+    def _replace_phones(self, text: str) -> str:
+        if "+" not in text:
+            return text
+        pieces, position = [], 0
+        for match in PHONE_RE.finditer(text):
+            if _TIME_BEFORE_RE.search(text, max(0, match.start() - 16), match.start()):
+                continue  # a time zone offset after a clock time, then a number
+            pieces.append(text[position:match.start()])
+            pieces.append(self._placeholder("PHONE", match.group()))
+            position = match.end()
+        pieces.append(text[position:])
+        return "".join(pieces)
+
     def _text(self, value: str) -> str:
+        stripped = strip_invisible(value)
+        normalised = stripped if stripped.isascii() else unicodedata.normalize("NFKC", stripped)
+        redacted = self._redact_normalised(normalised)
+        # Matching runs on NFKC text; text in which nothing was found keeps its own characters
+        # (an ellipsis stays an ellipsis). Text that changed is returned in NFKC form.
+        return stripped if redacted == normalised else redacted
+
+    def _redact_normalised(self, value: str) -> str:
         self._reserve_existing_placeholders(value)
         value = self._redact_embedded(value)
         for _, rule in SECRET_RULES:
             value = self._replace_spans(value, rule(value))
         value = self._replace_emails(value)
+        value = self._replace_phones(value)
         return IPV4_RE.sub(
             lambda m: self._placeholder("IP", m.group()) if _is_public_ip(m.group()) else m.group(),
             value,
@@ -1005,6 +1190,9 @@ class Redactor:
         self, items: list, secret: bool, immediate: bool, authorization: bool, keep: bool = False,
         argv: dict[int, list[Span]] | None = None,
     ) -> list:
+        if not secret and not keep and _secret_header_pair(items):
+            name = items[0].decode("utf-8", errors="replace") if isinstance(items[0], bytes) else items[0]
+            return [name, self._walk(items[1], True, True, is_authorization_key(name))]
         if argv is None:
             argv = {} if secret or keep else _argv_spans(items)
         result, previous = [], None
@@ -1089,6 +1277,7 @@ def audit_text(text: str) -> list[AuditHit]:
     """Locate anything the secret rules would still change, for secrets only: emails and IP
     addresses are not reported. Reports positions, never values."""
     try:
+        text = normalise(text)  # positions refer to the normalised text
         line_starts = [0] + [match.end() for match in re.finditer("\n", text)]
         hits = []
         for category, rule in SECRET_RULES:
