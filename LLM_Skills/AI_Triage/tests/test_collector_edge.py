@@ -9,7 +9,7 @@ LB_SUFFIX = "app/web-alb/50dc6c495c0c9188"
 LB_ARN = f"arn:aws:elasticloadbalancing:eu-west-1:{ACCOUNT}:loadbalancer/{LB_SUFFIX}"
 LISTENER_ARN = f"arn:aws:elasticloadbalancing:eu-west-1:{ACCOUNT}:listener/{LB_SUFFIX}/f2f7dc8efc522ab2"
 TG_ARN = f"arn:aws:elasticloadbalancing:eu-west-1:{ACCOUNT}:targetgroup/web-tg/73e2d6bc24d8a067"
-CERT_ARN = f"arn:aws:acm:eu-west-1:{ACCOUNT}:certificate/11111111-2222-3333-4444-555555555555"
+CERT_ARN = f"arn:aws:acm:eu-west-1:{ACCOUNT}:certificate/11111111-2222-3333-4444-5555aaaa5555"
 DNS_NAME = "web-alb-123456.eu-west-1.elb.amazonaws.com"
 TARGETS = {"load_balancer": "web-alb"}
 
@@ -90,7 +90,7 @@ def test_healthy_load_balancer(config_data, tmp_path):
     for word in ("active", "internet-facing", "application", "eu-west-1a", DNS_NAME):
         assert word in state.summary
     listener_fact = by_summary(ctx, "Listener HTTPS 443")[0]
-    assert listener_fact.kind == "current" and "11111111-2222-3333-4444-555555555555" in listener_fact.summary
+    assert listener_fact.kind == "current" and "11111111-2222-3333-4444-5555aaaa5555" in listener_fact.summary
     rules = by_summary(ctx, "rules forwarding to")[0]
     assert "1 rules" in rules.summary and "web-tg" in rules.summary
     group = by_summary(ctx, "Target group web-tg")[0]
