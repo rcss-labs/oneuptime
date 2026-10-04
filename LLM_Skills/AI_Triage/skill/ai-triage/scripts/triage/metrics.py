@@ -58,14 +58,19 @@ def _queries(specs: Sequence[MetricSpec], period: int) -> str:
     )
 
 
-def _points(ctx: CollectContext, queries: str, window: Window) -> dict[str, list[tuple[str, float]]]:
-    """Return (time, value) pairs by query id; empty when the call failed."""
+def _points(
+    ctx: CollectContext, queries: str, window: Window, region: str | None
+) -> dict[str, list[tuple[str, float]]] | None:
+    """Return (time, value) pairs by query id, or None when the call failed."""
     data = ctx.aws(
         "cloudwatch", "get-metric-data",
         ["--metric-data-queries", queries, "--start-time", format_time(window.start), "--end-time", format_time(window.end)],
+        region=region,
     )
+    if data is None:
+        return None
     points: dict[str, list[tuple[str, float]]] = {}
-    for result in (data or {}).get("MetricDataResults", []):
+    for result in data.get("MetricDataResults", []):
         pairs = zip(result.get("Timestamps", []), result.get("Values", []))
         points[result["Id"]] = [(format_time(parse_time(stamp)), float(value)) for stamp, value in pairs]
     return points
@@ -87,48 +92,66 @@ def _summarise(spec: MetricSpec, window_points: list[tuple[str, float]], baselin
     )
 
 
-def fetch(ctx: CollectContext, specs: Sequence[MetricSpec], period: int = 300) -> list[MetricSummary]:
+def _fetch(
+    ctx: CollectContext, specs: Sequence[MetricSpec], period: int, region: str | None
+) -> tuple[list[MetricSummary], str, bool]:
+    """Summaries, the command of the window call, and whether the window call succeeded."""
     queries = _queries(specs, period)
-    now_points = _points(ctx, queries, ctx.window)
-    before_points = _points(ctx, queries, ctx.window.shifted(BASELINE_SHIFT))
-    return [
-        _summarise(spec, now_points.get(f"m{index}", []), before_points.get(f"m{index}", []))
+    now_points = _points(ctx, queries, ctx.window, region)
+    window_command = ctx.last_command
+    before_points = _points(ctx, queries, ctx.window.shifted(BASELINE_SHIFT), region)
+    summaries = [
+        _summarise(spec, (now_points or {}).get(f"m{index}", []), (before_points or {}).get(f"m{index}", []))
         for index, spec in enumerate(specs)
     ]
+    return summaries, window_command, now_points is not None
 
 
-def _ratio_words(ratio: float | None) -> str:
+def fetch(
+    ctx: CollectContext, specs: Sequence[MetricSpec], period: int = 300, region: str | None = None
+) -> list[MetricSummary]:
+    return _fetch(ctx, specs, period, region)[0]
+
+
+def _ratio_words(summary: MetricSummary) -> str:
+    ratio = summary.change_ratio
     if ratio is None:
-        return "no baseline data"
+        return "zero in both periods" if summary.baseline_avg == 0 and summary.window_avg == 0 else "no comparable baseline"
     if SAME_RANGE[0] <= ratio <= SAME_RANGE[1]:
         return "about the same"
     if ratio > SAME_RANGE[1]:
         return f"{ratio:.1f} times higher"
+    if summary.window_avg == 0:
+        return "down to zero"
     return f"{1 / ratio:.1f} times lower"
 
 
 def _summary_text(summary: MetricSummary) -> str:
     head = f"{summary.label} ({summary.stat}): peak {summary.window_max:.1f} at {summary.peak_time}; "
     if summary.baseline_avg is None:
-        return head + f"window average {summary.window_avg:.1f}; no baseline data"
+        return head + f"window average {summary.window_avg:.1f}; no comparable baseline"
+    earlier = "zero" if summary.baseline_avg == 0 else f"{summary.baseline_avg:.1f}"
     return (
         head
-        + f"window average {summary.window_avg:.1f} against {summary.baseline_avg:.1f} one week earlier "
-        + f"({_ratio_words(summary.change_ratio)})"
+        + f"window average {summary.window_avg:.1f} against {earlier} one week earlier "
+        + f"({_ratio_words(summary)})"
     )
 
 
-def add_metric_facts(ctx: CollectContext, resource: str, specs: Sequence[MetricSpec], period: int = 300) -> list[MetricSummary]:
-    summaries = fetch(ctx, specs, period)
+def add_metric_facts(
+    ctx: CollectContext, resource: str, specs: Sequence[MetricSpec], period: int = 300, region: str | None = None
+) -> list[MetricSummary]:
+    summaries, command, read_ok = _fetch(ctx, specs, period, region)
     for summary in summaries:
         if summary.datapoints == 0:
+            outcome = "no data was returned for the window" if read_ok else "the metric could not be read (see errors)"
             ctx.evidence.add(
-                kind=DERIVED, resource=resource, command=ctx.last_command, data=asdict(summary),
-                summary=f"{summary.label} ({summary.stat}): no data was returned for the window",
+                kind=DERIVED, resource=resource, command=command, data=asdict(summary),
+                summary=f"{summary.label} ({summary.stat}): {outcome}",
             )
             continue
         ctx.evidence.add(
-            kind=INCIDENT_TIME, resource=resource, time=summary.peak_time, command=ctx.last_command,
+            kind=INCIDENT_TIME, resource=resource, time=summary.peak_time, command=command,
             summary=_summary_text(summary), data=asdict(summary),
         )
     return summaries

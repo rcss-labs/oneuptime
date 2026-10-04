@@ -150,8 +150,9 @@ def test_summary_wording_lower(tmp_path, config_data):
 
 def test_summary_wording_no_baseline(tmp_path, config_data):
     facts, _ = facts_for(tmp_path, config_data, [10.0], [])
-    assert "no baseline data" in facts[0].summary
+    assert "no comparable baseline" in facts[0].summary
     assert "one week earlier" not in facts[0].summary
+    assert "no baseline" not in facts[0].summary.replace("no comparable baseline", "")
 
 
 def test_no_data_adds_a_derived_fact(tmp_path, config_data):
@@ -170,3 +171,51 @@ def test_one_fact_per_metric(tmp_path, config_data):
     summaries = add_metric_facts(ctx, "service/checkout", [CPU, MEM])
     assert len(summaries) == 2
     assert len(ctx.evidence.facts) == 2
+
+
+def test_window_average_zero_with_baseline_does_not_crash(tmp_path, config_data):
+    facts, summaries = facts_for(tmp_path, config_data, [0.0, 0.0], [5.0])
+    assert summaries[0].change_ratio == 0.0
+    assert "down to zero" in facts[0].summary
+    assert "against 5.0 one week earlier" in facts[0].summary
+
+
+def test_zero_baseline_with_activity(tmp_path, config_data):
+    facts, summaries = facts_for(tmp_path, config_data, [7.0], [0.0])
+    assert summaries[0].change_ratio is None
+    assert "no comparable baseline" in facts[0].summary
+    assert "no baseline data" not in facts[0].summary
+    assert "from zero" in facts[0].summary or "zero one week earlier" in facts[0].summary
+
+
+def test_zero_in_both_periods(tmp_path, config_data):
+    facts, _ = facts_for(tmp_path, config_data, [0.0], [0.0])
+    assert "zero in both periods" in facts[0].summary
+
+
+def test_fact_command_is_the_window_call(tmp_path, config_data):
+    facts, _ = facts_for(tmp_path, config_data, [1.0], [1.0])
+    assert "2026-10-04T10:00:00Z" in facts[0].command
+    assert "2026-09-27" not in facts[0].command
+
+
+def test_region_is_passed_through(tmp_path, config_data):
+    ctx = ctx_with(tmp_path, config_data, reply(), reply())
+    add_metric_facts(ctx, "distribution/x", [CPU], region="us-east-1")
+    calls = ctx.runner.called("cloudwatch", "get-metric-data")
+    assert len(calls) == 2
+    for call in calls:
+        assert call[call.index("--region") + 1] == "us-east-1"
+
+
+def test_fetch_region_is_passed_through(tmp_path, config_data):
+    ctx = ctx_with(tmp_path, config_data, reply(), reply())
+    fetch(ctx, [CPU], region="us-east-1")
+    for call in ctx.runner.called("cloudwatch", "get-metric-data"):
+        assert call[call.index("--region") + 1] == "us-east-1"
+
+
+def test_failed_read_says_so(tmp_path, config_data):
+    ctx, _ = make_ctx(tmp_path, config_data, {"cloudwatch get-metric-data": (254, "An error occurred (AccessDeniedException) x")})
+    add_metric_facts(ctx, "service/x", [CPU])
+    assert "could not be read" in ctx.evidence.facts[0].summary
