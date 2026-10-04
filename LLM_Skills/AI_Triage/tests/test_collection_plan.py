@@ -351,3 +351,83 @@ def test_an_ecs_service_with_an_empty_part_is_refused(config, value):
 def test_ecs_service_parts_are_stripped(config):
     command = one(plan({"ecs_service": " c / s "}, config), "ecs")
     assert targets_of(command) == {"cluster": "c", "service": "s"}
+
+
+# fix round 2
+
+def evidence_stem(command):
+    suffix = option(command, "--suffix")
+    cleaned = "".join(ch for ch in suffix if ch.isalnum() and ch.isascii() or ch == "-")
+    return (command.name, command.argv[command.argv.index("--account") + 1] if "--account" in command.argv else "os",
+            cleaned)
+
+
+@pytest.mark.parametrize("key, names", [
+    ("dynamodb_tables", ["orders.v1", "orders_v1"]),
+    ("lambda_functions", ["a_b", "ab"]),
+    ("lambda_functions", ["a_b", "a.b", "a-b"]),
+])
+def test_names_that_clean_to_the_same_text_get_distinct_files(config, key, names):
+    commands = [c for c in plan({key: names}, config) if c.tool == "collect.py" and c.name not in ("changes", "platform")]
+    assert len(commands) == len(names)
+    assert len({evidence_stem(c) for c in commands}) == len(names)
+
+
+def test_a_cleaned_name_gets_a_dash_and_six_hex_characters_of_its_hash(config):
+    import hashlib
+    commands = named(plan({"dynamodb_tables": ["orders.v1", "plain-name"]}, config), "dynamodb")
+    digest = hashlib.sha256(b"orders.v1").hexdigest()[:6]
+    assert option(commands[0], "--suffix") == f"ordersv1-{digest}"
+    assert option(commands[1], "--suffix") == "plain-name"
+
+
+def test_a_name_with_nothing_left_after_cleaning_still_gets_a_suffix(config):
+    command = one(plan({"dynamodb_tables": ["___"]}, config), "dynamodb")
+    assert len(option(command, "--suffix").lstrip("-")) >= 6
+
+
+def test_a_repeated_name_is_planned_once(config):
+    assert len(named(plan({"lambda_functions": ["f", "f"]}, config), "lambda")) == 1
+
+
+def test_a_duplicate_evidence_file_name_is_an_error(config, monkeypatch):
+    import triage.collection_plan as module
+    monkeypatch.setattr(module, "_suffix_for", lambda name: "same")
+    with pytest.raises(CaseError) as caught:
+        plan({"lambda_functions": ["a", "b"]}, config)
+    assert "same evidence file" in str(caught.value)
+
+
+@pytest.mark.parametrize("key", ["-dash", "", "k=x", "1abc", "a b", "a$b", "é"])
+def test_a_bad_opensearch_filter_key_is_refused(config, key):
+    resources = {"opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-checkout-*", "filter": {key: "v"}}}
+    with pytest.raises(CaseError) as caught:
+        plan(resources, config)
+    assert "filter" in str(caught.value)
+
+
+@pytest.mark.parametrize("key", ["service", "_x", "@timestamp", "kubernetes.labels.app-name", "a1_b.c@d-e"])
+def test_good_opensearch_filter_keys_are_planned(config, key):
+    resources = {"opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-checkout-*", "filter": {key: "v"}}}
+    assert f"{key}=v" in named(plan(resources, config), "opensearch")[0].argv
+
+
+def test_every_planned_command_is_accepted_by_the_guard_and_the_parsers(config):
+    import collect
+    import opensearch_query
+    from triage.guard import context_from_config, decide
+    from triage.verdict import ALLOW
+    resources = {
+        **FULL_RESOURCES,
+        "lambda_functions": ["a_b", "ab", "-lead", "x.y"],
+        "dynamodb_tables": ["orders.v1", "orders_v1", "--help"],
+        "opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-checkout-*",
+                       "filter": {"service": "it's $(id)", "n": 5}},
+    }
+    context = context_from_config(config, SKILL_DIR)
+    for command in plan(resources, config):
+        assert decide(command.shell(), context).kind == ALLOW, command.shell()
+        if command.tool == "collect.py":
+            collect._build_parser().parse_args(command.argv[2:])
+        else:
+            opensearch_query._build_parser().parse_args(command.argv[2:])

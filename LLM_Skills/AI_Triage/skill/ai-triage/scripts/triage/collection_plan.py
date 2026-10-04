@@ -1,7 +1,9 @@
 """Turn a case's target into the exact collector commands, so a run never relies on remembered option names."""
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +30,19 @@ RESOURCE_COLLECTOR = {
 MAX_RESOURCE_NAMES = 10
 OPENSEARCH_QUERIES = ("histogram", "top-messages", "search")
 SKIPPED = "skipped"
+# The evidence writer drops every other character from a file name suffix.
+_SUFFIX_CLEANER = re.compile(r"[^A-Za-z0-9-]")
+FILTER_KEY_RE = re.compile(r"[A-Za-z_@][A-Za-z0-9_.@-]*")
+
+
+def _suffix_for(name: str) -> str:
+    """A file name suffix for a resource. A name that cleaning would change gets a short hash of the raw name,
+    so that two names that clean to the same text still write different evidence files."""
+    cleaned = _SUFFIX_CLEANER.sub("", name)
+    if cleaned == name:
+        return name
+    digest = hashlib.sha256(name.encode()).hexdigest()[:6]
+    return f"{cleaned}-{digest}" if cleaned else digest
 
 
 @dataclass(frozen=True)
@@ -52,6 +67,13 @@ class _Planner:
         self.opensearch_script = str(skill_dir / "scripts" / "opensearch_query.py")
         self.hostnames = list(case["incident"].get("hostnames", []))
         self.commands: list[PlannedCommand] = []
+        self.evidence_files: set[tuple[str, str, str]] = set()
+
+    def _claim_file(self, name: str, scope: str, suffix: str) -> None:
+        identity = (name, scope, _SUFFIX_CLEANER.sub("", suffix))
+        if identity in self.evidence_files:
+            raise CaseError([f"{name} with suffix '{suffix}' would write the same evidence file as another planned command"])
+        self.evidence_files.add(identity)
 
     def collect(self, name: str, targets: dict[str, str], reason: str, suffix: str = "") -> None:
         argv = [self.python, self.collect_script, name, "--account", self.account, "--region", self.region,
@@ -59,6 +81,7 @@ class _Planner:
                 "--case-dir", self.case["case_dir"]]
         for key, value in targets.items():
             argv += ["--target", f"{key}={value}"]
+        self._claim_file(name, "", suffix)
         if suffix:
             argv.append(f"--suffix={suffix}")
         self.commands.append(PlannedCommand(COLLECTOR_DOMAIN[name], "collect.py", name, argv, reason))
@@ -70,6 +93,7 @@ class _Planner:
         for key, value in (spec.get("filter") or {}).items():
             text = value if isinstance(value, str) else json.dumps(value)
             argv += ["--filter", f"{key}={text}"]
+        self._claim_file("opensearch", f"{spec['cluster']}", subcommand)
         argv.append(f"--suffix={subcommand}")
         self.commands.append(PlannedCommand(COLLECTOR_DOMAIN["opensearch"], "opensearch_query.py", "opensearch", argv, reason))
 
@@ -129,8 +153,8 @@ def _plan_each(p: _Planner, key: str, collector: str, target_key: str, reason: s
     if items is None:
         p.skip(key, "must be a list of names")
         return
-    for item in items:
-        p.collect(collector, {target_key: item}, reason, suffix=item)
+    for item in dict.fromkeys(items):
+        p.collect(collector, {target_key: item}, reason, suffix=_suffix_for(item))
 
 
 def _plan_eks(p: _Planner, value: Any) -> None:
@@ -182,6 +206,9 @@ def _plan_opensearch(p: _Planner, value: Any) -> None:
             or not isinstance(value.get("filter") or {}, dict)):
         p.skip("opensearch", "must be a mapping with cluster, index_pattern, and an optional filter mapping")
         return
+    for key in value.get("filter") or {}:
+        if not FILTER_KEY_RE.fullmatch(key):
+            raise CaseError([f"resources.opensearch.filter: key {key!r} must start with a letter, '_' or '@' and use only letters, digits, '_', '.', '@' and '-'"])
     if value["cluster"] not in p.config.opensearch_clusters:
         p.skip("opensearch", f"cluster '{value['cluster']}' is not in the config")
         return
