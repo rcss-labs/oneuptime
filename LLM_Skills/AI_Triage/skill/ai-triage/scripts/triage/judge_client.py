@@ -1,6 +1,7 @@
 """A thin client around the official TypeSafe package that answers plain-data questions."""
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -81,8 +82,37 @@ class TypeSafeJudge:
             source = {"noul": result.nouls, "choice": result.choices, "score": result.scores}[question["type"]]
             if question_id not in source:
                 raise JudgeUnavailable(f"MissingAnswer for {question_id}")
+            if not _is_well_formed(source[question_id], question):
+                raise JudgeUnavailable(f"MalformedAnswer: {question_id}")
             answers[question_id] = to_plain(source[question_id], question)
         return JudgeReply(answers, result.model, _request_id(result), _usage(result.usage))
+
+
+def _is_probability(value: Any) -> bool:
+    return _is_number_between(value, 0.0, 1.0)
+
+
+def _is_number_between(value: Any, low: float, high: float) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and low <= value <= high
+
+
+def _is_well_formed(answer: Any, question: dict) -> bool:
+    """Check an answer against the question that was sent, so odd numbers never reach the rules."""
+    kind = question["type"]
+    if kind == "noul":
+        return _is_probability(answer.noul)
+    if not _is_probability(answer.confidence):
+        return False
+    probabilities = answer.probabilities
+    if not all(_is_probability(value) for value in probabilities.values()):
+        return False
+    if kind == "choice":
+        options = set(question["criteria"])
+        return answer.choice in options and set(probabilities) == options
+    levels = len(question["criteria"])
+    return _is_number_between(answer.score, 0, levels - 1) and set(probabilities) == set(range(levels))
 
 
 def _build_question(sdk: Any, question: dict) -> Any:
