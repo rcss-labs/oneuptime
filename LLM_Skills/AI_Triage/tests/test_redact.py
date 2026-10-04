@@ -1545,3 +1545,91 @@ def test_things_that_are_not_phone_numbers_are_kept(source):
 def test_text_without_findings_keeps_its_own_characters():
     source = "x" * 10 + "\u2026 [summary cut] \uff21 caf\u00e9"
     assert Redactor().text(source) == source
+
+
+# Ruling 7: fail closed on key material in free text
+
+import random as _random
+import string as _string
+
+
+def random_token(seed: int, length: int, alphabet: str) -> str:
+    rng = _random.Random(seed)
+    while True:
+        token = "".join(rng.choice(alphabet) for _ in range(length))
+        if sum([any(c.islower() for c in token), any(c.isupper() for c in token), any(c.isdigit() for c in token)]) >= 2:
+            return token
+
+
+ALNUM = _string.ascii_letters + _string.digits
+KEY_MATERIAL = {
+    "alnum-24": random_token(1, 24, ALNUM),
+    "alnum-48": random_token(2, 48, ALNUM),
+    "base64-40": random_token(3, 38, ALNUM + "+/") + "==",
+    "base64url-43": random_token(4, 43, ALNUM + "-_"),
+    "lower-digits-32": random_token(5, 32, _string.ascii_lowercase + _string.digits),
+    "hex-40": random_token(6, 40, "0123456789abcdef"),
+    "hex-64": random_token(7, 64, "0123456789abcdef"),
+    "sts-like": "IQoJb3JpZ2lu" + random_token(8, 60, ALNUM + "+/"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(KEY_MATERIAL))
+def test_key_like_tokens_in_free_text_are_masked(name):
+    token = KEY_MATERIAL[name]
+    out = Redactor().text(f"2026-10-04T10:00:00Z INFO retry with {token} done")
+    assert out == "2026-10-04T10:00:00Z INFO retry with <TOKEN-1> done"
+
+
+def test_the_same_token_gets_the_same_placeholder():
+    first, second = KEY_MATERIAL["alnum-48"], KEY_MATERIAL["base64url-43"]
+    redactor = Redactor()
+    assert redactor.text(f"a {first} b {second} c {first}") == "a <TOKEN-1> b <TOKEN-2> c <TOKEN-1>"
+    assert redactor.text(f"again {second}") == "again <TOKEN-2>"
+
+
+@pytest.mark.parametrize(
+    "template, expected",
+    [
+        ("https://example.com/reset/{t}", "https://example.com/reset/<TOKEN-1>"),
+        ("GET /v1/files?after={t}&page=2", "GET /v1/files?after=<TOKEN-1>&page=2"),
+        ('{{"cursor": "{t}"}}', '{{"cursor":"<TOKEN-1>"}}'),  # a changed JSON span is re-serialised
+        ("/var/tmp/{t}", "/var/tmp/<TOKEN-1>"),
+    ],
+)
+def test_key_like_tokens_inside_urls_and_paths(template, expected):
+    token = KEY_MATERIAL["alnum-48"]
+    assert Redactor().text(template.format(t=token)) == expected.format()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "request 123e4567-e89b-12d3-a456-4266141740ab and req-123e4567-e89b-12d3-a456-4266141740ab",
+        "arn:aws:iam::111111111111:role/service-role/AmazonEC2ContainerServiceforEC2Role",
+        "arn:aws:lambda:eu-west-1:111111111111:function:checkout-api-ProcessOrderFunction-1A2B3C4D5E6F",
+        "image sha256:" + "0123456789abcdef" * 4,
+        "sha " + "ab12" * 10 + " image digest",
+        "task 0123456789abcdef0123456789abcdef stopped",
+        "i-0123456789abcdef0 subnet-0123456789abcdef0 sg-0123456789abcdef0 vpc-0123456789abcdef0",
+        "eni-0123456789abcdef0 vol-0123456789abcdef0 ami-0123456789abcdef0 snap-0123456789abcdef0",
+        "https://checkout-api.internal.example.com/api/v1/orders/create-order-request?page=2",
+        "/usr/local/lib/python3.11/site-packages/botocore/endpoint.py",
+        "/var/log/containers/checkout-api-7d9f8b6c5-x2x4z_default_api-0123456789abcdef.log",
+        "2026-10-04T10:00:00.123456789Z and 1759572000123",
+        "<SECRET-1> <TOKEN-2> <EMAIL-3>",
+        "pod checkout-api-7d9f8b6c5-x2x4z restarted",
+        "com.example.checkout.PaymentServiceImplementation threw",
+        "AmazonEC2ContainerServiceforEC2Role ProcessOrderFunctionHandler2024",
+        "CHECKOUT_SERVICE_DATABASE_PRIMARY_HOST=db.example.com",
+        "2026/10/04/[$LATEST]0123456789abcdef0123456789abcdef",
+        "trace 1-5759e988-bd862e3fe1be46a994272793",
+        "stack checkout-api-TargetGroup-1A2B3C4D5E6F7 and checkout-prod-WebServerSecurityGroup-ABCD1234EFGH",
+        "internationalization_configuration_settings_v2",
+        "https://wiki.example.com/" + "a" * 300,
+        "id " + "1234567890" * 5,
+        "checkout-service-production-eu-west-1-blue-green",
+    ],
+)
+def test_identifiers_that_are_not_key_material_are_kept(source):
+    assert Redactor().text(source) == source

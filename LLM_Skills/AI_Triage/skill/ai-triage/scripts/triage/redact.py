@@ -8,6 +8,7 @@ import copy
 import functools
 import hashlib
 import ipaddress
+import math
 import json
 import re
 import threading
@@ -180,6 +181,14 @@ def _is_plain_path(value: str) -> bool:
     return bool(_PLAIN_PATH_RE.fullmatch(value)) and _plain_words(value)
 
 
+def _looks_like_path(text: str) -> bool:
+    """Slash-separated text with at least two plain word segments: a file or URL path."""
+    if "/" not in text:
+        return False
+    words = [part for part in text.split("/") if len(part) >= 3 and _plain_words(part)]
+    return len(words) >= 2 or (text.startswith("/") and len(words) >= 1)
+
+
 def _harmless_secret_value(value: str) -> bool:
     """Values that are not secrets even under a secret name: literals and plain absolute paths."""
     return value.lower() in LITERAL_VALUES or _is_plain_path(value)
@@ -279,7 +288,10 @@ SHORTHAND_PAIR_RE = re.compile(
     r"""(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)'|(?P<bare>[^,\s}\]]+))"""
 )
 PEM_END_RE = re.compile(r"-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----")
-PEM_BODY_LINE_RE = re.compile(r"^[ \t]*(?P<body>[A-Za-z0-9+/]{40,}={0,2})[ \t]*\r?$", re.MULTILINE)
+# A PEM body line on its own: 64 (or 76) base64 characters, or a shorter last line with padding.
+PEM_BODY_LINE_RE = re.compile(
+    r"^[ \t]*(?P<body>[A-Za-z0-9+/]{64}|[A-Za-z0-9+/]{76}|[A-Za-z0-9+/]{20,75}={1,2})[ \t]*\r?$", re.MULTILINE
+)
 PUTTY_PRIVATE_RE = re.compile(r"^Private-Lines:[ \t]*\d+[ \t]*\r?\n(?P<body>(?:[A-Za-z0-9+/=]+\r?(?:\n|$))+)", re.MULTILINE)
 
 
@@ -315,7 +327,7 @@ def _pem_spans(text: str) -> list[Span]:
         if first_end and not (spans and spans[0][0] < first_end.start()):
             spans.append((0, first_end.end()))
     for match in PEM_BODY_LINE_RE.finditer(text):
-        if _three_classes(match.group("body")):
+        if _three_classes(match.group("body")) and not _looks_like_path(match.group("body")):
             spans.append(match.span("body"))
     for match in PUTTY_PRIVATE_RE.finditer(text):
         start, end = match.span("body")
@@ -820,6 +832,79 @@ EMAIL_RE = re.compile(
 _SCP_PATH_AFTER_RE = re.compile(r":[A-Za-z~./_]")
 PHONE_RE = re.compile(r"(?<![\w+:./-])\+\d(?:[ .\-()]{0,2}\d){7,14}(?![\d])")
 _TIME_BEFORE_RE = re.compile(r"\d:\d\d(?::\d\d(?:[.,]\d+)?)?[ \t]$")
+# --- fail closed: key material that no name explains -----------------------------------------
+
+_TOKEN_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{24,}")
+_INTERIOR_EQUALS_RE = re.compile(r"=+(?=[^=])")
+_ARN_RE = re.compile(r"\barn:aws[\w-]*:[^\s\"'<>,]+")
+_DIGEST_LABEL_RE = re.compile(r"(?i)\b(?:sha(?:1|224|256|384|512)?|md5)[:= ]$")
+MIN_TOKEN_LENGTH = 24
+MIN_HEX_TOKEN_LENGTH = 40
+TOKEN_ENTROPY = 4.0  # bits per character
+HEX_TOKEN_ENTROPY = 3.0
+
+
+def _entropy(text: str) -> float:
+    counts = collections.Counter(text)
+    return -sum(n / len(text) * math.log2(n / len(text)) for n in counts.values())
+
+
+def _classes(text: str) -> int:
+    return sum((
+        any(c.islower() for c in text), any(c.isupper() for c in text),
+        any(c.isdigit() for c in text), any(c in "+/=_-" for c in text),
+    ))
+
+
+def _key_like(token: str) -> bool:
+    """Random-looking key material: long, mixed or high-entropy, and not made of words and short ids."""
+    body = token.rstrip("=")
+    if len(body) < MIN_TOKEN_LENGTH:
+        return False
+    if _HEX_RE.fullmatch(body):
+        # Hex key material mixes digits and letters; a run of one character or a long number is not a key.
+        mixed = any(c.isdigit() for c in body) and any(c.isalpha() for c in body)
+        return len(body) >= MIN_HEX_TOKEN_LENGTH and mixed and _entropy(body) >= HEX_TOKEN_ENTROPY
+    if _plain_words(body):
+        return False
+    return _classes(body) >= 3 or _entropy(body) >= TOKEN_ENTROPY
+
+
+def _token_spans(text: str) -> list[Span]:
+    """Spans of key-like tokens in free text (ruling: fail closed), whatever their name says."""
+    arns = [m.span() for m in _ARN_RE.finditer(text)] if "arn:" in text else []
+    arn_starts = [start for start, _ in arns]
+    spans: list[Span] = []
+    for match in _TOKEN_CANDIDATE_RE.finditer(text):
+        index = bisect.bisect_right(arn_starts, match.start()) - 1
+        if index >= 0 and match.start() < arns[index][1]:
+            continue
+        pieces, position = [], match.start()
+        for equals in _INTERIOR_EQUALS_RE.finditer(text, match.start(), match.end()):
+            pieces.append((position, equals.start()))
+            position = equals.end()
+        pieces.append((position, match.end()))
+        for start, end in pieces:
+            spans.extend(_token_piece_spans(text, start, end))
+    return spans
+
+
+def _token_piece_spans(text: str, start: int, end: int) -> list[Span]:
+    token = text[start:end]
+    if len(token) < MIN_TOKEN_LENGTH:
+        return []
+    if _HEX_RE.fullmatch(token) and _DIGEST_LABEL_RE.search(text, max(0, start - 8), start):
+        return []  # a labelled digest such as sha256:...
+    if _looks_like_path(token):
+        spans, position = [], start
+        for segment in token.split("/"):
+            if _key_like(segment):
+                spans.append((position, position + len(segment)))
+            position += len(segment) + 1
+        return spans
+    return [(start, end)] if _key_like(token) else []
+
+
 IPV4_RE = re.compile(r"(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?![\w]|\.\d)")
 
 
@@ -1084,10 +1169,11 @@ class Redactor:
             value = self._replace_spans(value, rule(value))
         value = self._replace_emails(value)
         value = self._replace_phones(value)
-        return IPV4_RE.sub(
+        value = IPV4_RE.sub(
             lambda m: self._placeholder("IP", m.group()) if _is_public_ip(m.group()) else m.group(),
             value,
         )
+        return "".join(self._spans_as(value, _token_spans(value), "TOKEN"))
 
     def value(self, obj: Any, key: str | None = None) -> Any:
         try:
