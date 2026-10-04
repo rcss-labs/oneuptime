@@ -1,0 +1,208 @@
+"""ECS collector: service state, deployments, events, stopped tasks, task definition, scaling, metrics."""
+from __future__ import annotations
+
+from typing import Any
+
+from triage.collectors import Collector
+from triage.collectors.common import in_window, newest_in_window
+from triage.context import CollectContext
+from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
+from triage.metrics import MetricSpec, add_metric_facts
+
+MAX_EVENTS = 30
+MAX_ITEMS = "20"
+
+
+def _short_name(arn: str) -> str:
+    """checkout-api:42 from a task definition ARN; other ARNs keep their last segment."""
+    return arn.rsplit("/", 1)[-1]
+
+
+def _describe_service(ctx: CollectContext, cluster: str, name: str) -> dict | None:
+    reply = ctx.aws("ecs", "describe-services", ["--cluster", cluster, "--services", name])
+    if reply is None:
+        return None
+    services = reply.get("services", [])
+    if not services:
+        ctx.evidence.add(
+            kind=CURRENT, resource=f"service/{cluster}/{name}", command=ctx.last_command,
+            summary=f"Service {name} was not found in cluster {cluster}",
+        )
+        return None
+    return services[0]
+
+
+def _add_service_state(ctx: CollectContext, resource: str, service: dict) -> None:
+    ctx.evidence.add(
+        kind=CURRENT, resource=resource, command=ctx.last_command,
+        summary=(
+            f"Service {service.get('serviceName')} is {service.get('status')}: desired {service.get('desiredCount')}, "
+            f"running {service.get('runningCount')}, pending {service.get('pendingCount')}, "
+            f"task definition {_short_name(service.get('taskDefinition', ''))}"
+        ),
+        data={key: service.get(key) for key in ("status", "desiredCount", "runningCount", "pendingCount")},
+    )
+
+
+def _add_deployments(ctx: CollectContext, resource: str, service: dict) -> None:
+    for deployment in service.get("deployments", []):
+        ctx.evidence.add(
+            kind=INCIDENT_TIME, resource=resource, time=deployment.get("createdAt"), command=ctx.last_command,
+            summary=(
+                f"Deployment {deployment.get('id')} ({deployment.get('status')}) rollout {deployment.get('rolloutState')}, "
+                f"task definition {_short_name(deployment.get('taskDefinition', ''))}, "
+                f"running {deployment.get('runningCount')} of desired {deployment.get('desiredCount')}"
+            ),
+            excerpt=deployment.get("rolloutStateReason") or "",
+        )
+
+
+def _add_events(ctx: CollectContext, resource: str, service: dict) -> None:
+    for event in newest_in_window(ctx.window, service.get("events", []), lambda e: e.get("createdAt"), MAX_EVENTS):
+        message = event.get("message", "")
+        ctx.evidence.add(
+            kind=INCIDENT_TIME, resource=resource, time=event.get("createdAt"), command=ctx.last_command,
+            summary="Service event", excerpt=message,
+        )
+
+
+def _container_text(container: dict) -> str:
+    code = container.get("exitCode")
+    exit_text = f" exit code {code}" if code is not None else ""
+    reason = f" ({container['reason']})" if container.get("reason") else ""
+    return f"{container.get('name')}{exit_text}{reason}"
+
+
+def _add_stopped_tasks(ctx: CollectContext, cluster: str, name: str, resource: str) -> None:
+    listed = ctx.aws(
+        "ecs", "list-tasks",
+        ["--cluster", cluster, "--service-name", name, "--desired-status", "STOPPED", "--max-items", MAX_ITEMS],
+    )
+    arns = (listed or {}).get("taskArns", [])
+    if not arns:
+        return
+    described = ctx.aws("ecs", "describe-tasks", ["--cluster", cluster, "--tasks", *arns])
+    if described is None:
+        return
+    for task in newest_in_window(ctx.window, described.get("tasks", []), lambda t: t.get("stoppedAt"), int(MAX_ITEMS)):
+        containers = "; ".join(_container_text(c) for c in task.get("containers", []))
+        ctx.evidence.add(
+            kind=INCIDENT_TIME, resource=resource, time=task.get("stoppedAt"), command=ctx.last_command,
+            summary=(
+                f"Task {task.get('taskArn', '').rsplit('/', 1)[-1]} stopped ({task.get('stopCode')}): "
+                f"{task.get('stoppedReason')}; containers: {containers}"
+            ),
+        )
+
+
+def _describe_task_definition(ctx: CollectContext, reference: str) -> dict | None:
+    reply = ctx.aws("ecs", "describe-task-definition", ["--task-definition", reference])
+    return reply.get("taskDefinition") if reply else None
+
+
+def _add_task_definition(ctx: CollectContext, resource: str, reference: str, definition: dict) -> None:
+    for container in definition.get("containerDefinitions", []):
+        environment = container.get("environment", [])
+        names = ", ".join(entry.get("name", "") for entry in environment) or "none"
+        ctx.evidence.add(
+            kind=CURRENT, resource=resource, command=ctx.last_command,
+            summary=(
+                f"Task definition {reference} container {container.get('name')}: image {container.get('image')}, "
+                f"cpu {container.get('cpu')}, memory {container.get('memory')}, environment variables {names}"
+            ),
+            data={"environment": environment},
+        )
+
+
+def _containers_by_name(definition: dict) -> dict[str, dict]:
+    return {c.get("name", ""): c for c in definition.get("containerDefinitions", [])}
+
+
+def _environment(container: dict) -> dict[str, Any]:
+    return {entry.get("name", ""): entry.get("value") for entry in container.get("environment", [])}
+
+
+def _container_changes(name: str, old: dict, new: dict) -> list[str]:
+    changes = []
+    for field in ("image", "cpu", "memory"):
+        if old.get(field) != new.get(field):
+            changes.append(f"container {name} {field} {old.get(field)} -> {new.get(field)}")
+    old_env, new_env = _environment(old), _environment(new)
+    for label, names in (
+        ("added", sorted(new_env.keys() - old_env.keys())),
+        ("removed", sorted(old_env.keys() - new_env.keys())),
+        ("value changed", sorted(k for k in old_env.keys() & new_env.keys() if old_env[k] != new_env[k])),
+    ):
+        if names:
+            changes.append(f"container {name} environment variables {label}: {', '.join(names)}")
+    return changes
+
+
+def _add_definition_diff(ctx: CollectContext, resource: str, reference: str, current: dict) -> None:
+    family, _, revision = reference.rpartition(":")
+    if not revision.isdigit() or int(revision) <= 1:
+        return
+    previous_reference = f"{family}:{int(revision) - 1}"
+    previous = _describe_task_definition(ctx, previous_reference)
+    if previous is None:
+        return
+    old, new = _containers_by_name(previous), _containers_by_name(current)
+    changes = []
+    for name in sorted(old.keys() | new.keys()):
+        if name not in old or name not in new:
+            changes.append(f"container {name} {'added' if name in new else 'removed'}")
+        else:
+            changes += _container_changes(name, old[name], new[name])
+    detail = "; ".join(changes) or "no difference in image, cpu, memory, or environment variables"
+    ctx.evidence.add(
+        kind=DERIVED, resource=resource, command=ctx.last_command,
+        summary=f"Task definition {reference} compared with {previous_reference}: {detail}",
+    )
+
+
+def _add_scaling_activities(ctx: CollectContext, cluster: str, name: str, resource: str) -> None:
+    reply = ctx.aws(
+        "application-autoscaling", "describe-scaling-activities",
+        ["--service-namespace", "ecs", "--resource-id", f"service/{cluster}/{name}", "--max-items", MAX_ITEMS],
+    )
+    for activity in (reply or {}).get("ScalingActivities", []):
+        if in_window(ctx.window, activity.get("StartTime")):
+            ctx.evidence.add(
+                kind=INCIDENT_TIME, resource=resource, time=activity.get("StartTime"), command=ctx.last_command,
+                summary=f"Scaling activity {activity.get('StatusCode')}: {activity.get('Description')}",
+                excerpt=activity.get("Cause") or "",
+            )
+
+
+def _add_metrics(ctx: CollectContext, cluster: str, name: str, resource: str) -> None:
+    dimensions = {"ClusterName": cluster, "ServiceName": name}
+    specs = [MetricSpec(metric, "AWS/ECS", metric, dimensions) for metric in ("CPUUtilization", "MemoryUtilization")]
+    add_metric_facts(ctx, resource, specs)
+
+
+def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
+    cluster, name = targets["cluster"], targets["service"]
+    resource = f"service/{cluster}/{name}"
+    service = _describe_service(ctx, cluster, name)
+    if service is None:
+        return
+    _add_service_state(ctx, resource, service)
+    _add_deployments(ctx, resource, service)
+    _add_events(ctx, resource, service)
+    _add_stopped_tasks(ctx, cluster, name, resource)
+    reference = _short_name(service.get("taskDefinition", ""))
+    definition = _describe_task_definition(ctx, reference)
+    if definition is not None:
+        _add_task_definition(ctx, resource, reference, definition)
+        _add_definition_diff(ctx, resource, reference, definition)
+    _add_scaling_activities(ctx, cluster, name, resource)
+    _add_metrics(ctx, cluster, name, resource)
+
+
+COLLECTOR = Collector(
+    name="ecs",
+    description="ECS service state, deployments, events, stopped tasks, task definition changes, scaling, CPU and memory",
+    required=("cluster", "service"),
+    optional=(),
+    run=collect,
+)
