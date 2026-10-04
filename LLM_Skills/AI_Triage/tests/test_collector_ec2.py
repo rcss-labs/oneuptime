@@ -1,6 +1,4 @@
-import base64
-
-from fakes import access_denied
+from fakes import FakeAws, access_denied
 from helpers import assert_read_only, make_context
 from triage.collectors.ec2 import COLLECTOR
 
@@ -35,7 +33,8 @@ def status(instance_id="i-0aaa", system="ok", instance_status="ok", events=()):
 
 
 def console(text):
-    return {"InstanceId": "i-0aaa", "Output": base64.b64encode(text.encode()).decode()}
+    # The AWS CLI has already decoded Output; it is plain text.
+    return {"InstanceId": "i-0aaa", "Output": text}
 
 
 def answers(**extra):
@@ -110,10 +109,61 @@ def test_healthy_status_adds_no_status_fact(config_data, tmp_path):
 
 
 def test_missing_instance(config_data, tmp_path):
+    # With a filter, AWS answers an unknown id with an empty list, not an error.
     ctx, aws, _ = run(config_data, tmp_path, answers(**{"ec2 describe-instances": {"Reservations": []}}))
     assert len(ctx.evidence.facts) == 1
-    assert ctx.evidence.facts[0].kind == "current" and "not found" in ctx.evidence.facts[0].summary
+    assert ctx.evidence.facts[0].kind == "current"
+    assert ctx.evidence.facts[0].summary == "Instance i-0aaa was not found in eu-west-1"
     assert aws.called("ec2", "describe-instance-status") == []
+    assert ctx.evidence.errors == []
+
+
+def test_instances_are_looked_up_by_filter_not_by_id(config_data, tmp_path):
+    _, aws, _ = run(config_data, tmp_path, answers(), ids="i-0aaa,i-0bbb")
+    call = aws.called("ec2", "describe-instances")[0]
+    assert "--instance-ids" not in call
+    assert call[call.index("--filters") + 1] == "Name=instance-id,Values=i-0aaa,i-0bbb"
+
+
+def test_one_unknown_id_does_not_blank_out_the_others(config_data, tmp_path):
+    ctx, aws, kube = run(config_data, tmp_path, answers(), ids="i-0aaa,i-0bad")
+    assert with_text(ctx, "Instance i-0aaa is running")
+    missing = with_text(ctx, "Instance i-0bad was not found in eu-west-1")
+    assert len(missing) == 1 and missing[0].kind == "current"
+    status_call = aws.called("ec2", "describe-instance-status")[0]
+    assert "i-0bad" not in status_call and "i-0aaa" in status_call
+    assert ctx.evidence.errors == []
+    assert_read_only(ctx, aws, kube)
+
+
+class ConsoleAws(FakeAws):
+    """get-console-output fails with --latest and works without it, as on non-Nitro types."""
+
+    def __call__(self, argv, timeout):
+        if argv[1:3] == ["ec2", "get-console-output"] and "--latest" in argv:
+            self.calls.append(argv)
+            return 254, "", "An error occurred (UnsupportedOperation) when calling the GetConsoleOutput operation: not supported"
+        return super().__call__(argv, timeout)
+
+
+def test_console_output_falls_back_to_a_call_without_latest(config_data, tmp_path):
+    replies = answers(**{"ec2 describe-instance-status": {"InstanceStatuses": [status(system="impaired")]},
+                         "ec2 get-console-output": console("old kernel log tail")})
+    ctx, _, kube = make_context(config_data, tmp_path, replies, collector="ec2")
+    ctx.runner = fake = ConsoleAws(replies)
+    COLLECTOR.run(ctx, {"instance_ids": "i-0aaa"})
+    calls = fake.called("ec2", "get-console-output")
+    assert len(calls) == 2 and "--latest" in calls[0] and "--latest" not in calls[1]
+    assert any(f.excerpt == "old kernel log tail" for f in ctx.evidence.facts)
+    assert_read_only(ctx, fake, kube)
+
+
+def test_console_output_that_looks_like_base64_is_not_decoded_again(config_data, tmp_path):
+    text = "QUJDREVGR0g="  # valid base64 characters, but the CLI already decoded the real output
+    ctx, _, _ = run(config_data, tmp_path, answers(**{
+        "ec2 describe-instance-status": {"InstanceStatuses": [status(system="impaired")]},
+        "ec2 get-console-output": console(text)}))
+    assert any(f.excerpt == text for f in ctx.evidence.facts)
 
 
 def test_access_denied_on_status_keeps_the_rest(config_data, tmp_path):
@@ -141,8 +191,8 @@ def test_more_than_ten_instances_are_capped(config_data, tmp_path):
     ctx, aws, _ = run(config_data, tmp_path, answers(**{
         "ec2 describe-instances": described(*[instance(i) for i in ids[:10]])}), ids=",".join(ids))
     call = aws.called("ec2", "describe-instances")[0]
-    assert call[call.index("--instance-ids") + 1:call.index("--instance-ids") + 11] == ids[:10]
-    assert "i-0010" not in call
+    assert call[call.index("--filters") + 1] == "Name=instance-id,Values=" + ",".join(ids[:10])
+    assert "i-0010" not in " ".join(call)
     derived = with_text(ctx, "instances were given")
     assert len(derived) == 1 and "10" in derived[0].summary and "12" in derived[0].summary
 

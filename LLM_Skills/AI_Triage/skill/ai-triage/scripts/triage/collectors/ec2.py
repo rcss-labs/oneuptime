@@ -1,21 +1,14 @@
 """EC2 collector: instance state, status checks, scheduled events, console output tail, CPU and status-check metrics."""
 from __future__ import annotations
 
-import base64
-import binascii
-
 from triage.collectors import Collector
-from triage.collectors.common import parse_iso
+from triage.collectors.common import parse_iso, split_csv
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME, MAX_EXCERPT
 from triage.metrics import MetricSpec, add_metric_facts
 from triage.window import format_time
 
 MAX_INSTANCES = 10
-
-
-def _split_ids(text: str) -> list[str]:
-    return [part.strip() for part in text.split(",") if part.strip()]
 
 
 def _time_text(value: object) -> str:
@@ -73,20 +66,18 @@ def _add_status(ctx: CollectContext, entry: dict) -> bool:
     return unhealthy
 
 
-def _decode(output: str) -> str:
-    try:
-        return base64.b64decode(output, validate=True).decode("utf-8", errors="replace")
-    except (binascii.Error, ValueError):
-        return output
-
-
 def _add_console_tail(ctx: CollectContext, instance_id: str) -> None:
-    reply = ctx.aws("ec2", "get-console-output", ["--instance-id", instance_id, "--latest"])
+    arguments = ["--instance-id", instance_id]
+    reply = ctx.aws("ec2", "get-console-output", [*arguments, "--latest"])
+    if reply is None:
+        # Not every instance type supports --latest; the failure stays recorded and one plain call follows.
+        reply = ctx.aws("ec2", "get-console-output", arguments)
     output = (reply or {}).get("Output")
     if not output:
         return
-    # Redact the whole text first so a secret cut by the tail boundary cannot leave a fragment.
-    text = ctx.evidence.redactor.text(_decode(output))
+    # The CLI has already decoded Output. Redact the whole text first so a secret cut by the tail
+    # boundary cannot leave a fragment.
+    text = ctx.evidence.redactor.text(output)
     ctx.evidence.add(
         kind=CURRENT, resource=f"instance/{instance_id}", command=ctx.last_command,
         summary=f"Last console output of unhealthy instance {instance_id}",
@@ -104,27 +95,32 @@ def _add_metrics(ctx: CollectContext, instance_id: str) -> None:
 
 
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
-    requested = _split_ids(targets["instance_ids"])
+    requested = split_csv(targets["instance_ids"])
     ids = requested[:MAX_INSTANCES]
     if len(requested) > MAX_INSTANCES:
         ctx.evidence.add(
             kind=DERIVED, resource="instances",
             summary=f"{len(requested)} instances were given; only the first {MAX_INSTANCES} were examined",
         )
-    reply = ctx.aws("ec2", "describe-instances", ["--instance-ids", *ids])
+    # A filter answers unknown ids with fewer results; --instance-ids would fail the whole call.
+    reply = ctx.aws("ec2", "describe-instances", ["--filters", f"Name=instance-id,Values={','.join(ids)}"])
     if reply is None:
         return
     found = _instances(reply)
+    found_ids = {instance.get("InstanceId") for instance in found}
+    for instance_id in ids:
+        if instance_id not in found_ids:
+            ctx.evidence.add(
+                kind=CURRENT, resource=f"instance/{instance_id}", command=ctx.last_command,
+                summary=f"Instance {instance_id} was not found in {ctx.region}",
+            )
     if not found:
-        ctx.evidence.add(
-            kind=CURRENT, resource="instances", command=ctx.last_command,
-            summary=f"Instances {', '.join(ids)} were not found",
-        )
         return
     for instance in found:
         _add_instance(ctx, instance)
+    existing = [instance_id for instance_id in ids if instance_id in found_ids]
     unhealthy = {i["InstanceId"] for i in found if (i.get("State") or {}).get("Name") != "running"}
-    status = ctx.aws("ec2", "describe-instance-status", ["--instance-ids", *ids, "--include-all-instances"])
+    status = ctx.aws("ec2", "describe-instance-status", ["--instance-ids", *existing, "--include-all-instances"])
     for entry in (status or {}).get("InstanceStatuses", []):
         if _add_status(ctx, entry):
             unhealthy.add(entry.get("InstanceId"))
