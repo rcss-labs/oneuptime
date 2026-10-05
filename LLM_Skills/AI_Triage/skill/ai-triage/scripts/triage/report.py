@@ -13,7 +13,7 @@ from typing import Any
 
 from triage.compose import LABEL_ORDER, cap_label, number
 from triage.config import TriageConfig
-from triage.digest import action_digest, cause_digest
+from triage.digest import action_digest, case_identity, cause_digest, draft_digest
 from triage.findings import evidence_documents, load_facts
 from triage.redact import Redactor, audit_text
 from triage.window import WindowError, format_time, parse_time
@@ -472,14 +472,34 @@ def _edited_entries(summary: dict, parts: dict, findings: dict[str, dict], probl
     return causes, actions
 
 
-def _check_causes_against_summary(summary: dict, parts: dict, edited: set[int], problems: list[str]) -> None:
+COMPLETE_STATUS, UNAVAILABLE_STATUS = "complete", "unavailable"
+
+
+def _blanket_cap_reason(summary: dict, report: dict, case: dict, findings: dict[str, dict], problems: list[str]) -> str | None:
+    """Why every cause and action counts as candidate: a changed draft or case, or a run that did not complete.
+
+    A changed draft is a problem. A status other than complete or unavailable only caps labels.
+    """
+    stored = summary.get("draft_digest")
+    if not isinstance(stored, str) or stored != draft_digest(report, findings, case_identity(case)):
+        problems.append("draft: the draft or the case changed after judging (or the stored draft digest is missing); "
+                        "every cause and action counts as candidate, so run the judgments again")
+        return "the draft changed after judging"
+    if summary.get("status") not in (COMPLETE_STATUS, UNAVAILABLE_STATUS):
+        return "judging did not complete"
+    return None
+
+
+def _check_causes_against_summary(summary: dict, parts: dict, edited: set[int], blanket: str | None,
+                                  problems: list[str]) -> None:
     for index, cause in parts["causes"]:
         label, where = cause.get("label"), f"causes[{index}]"
         if label not in LABEL_ORDER:
             continue
         if index in edited:
             if cap_label(label, "candidate") != label:
-                problems.append(f"{where}: labelled {label}, stronger than candidate, which an edited cause counts as")
+                problems.append(f"{where}: labelled {label}, stronger than candidate, which this cause counts as because "
+                                f"{blanket or 'it was edited after judging'}")
             continue
         entry = _summary_entry(summary["causes"], cause.get("id"))
         if entry is None:
@@ -495,15 +515,19 @@ def _check_causes_against_summary(summary: dict, parts: dict, edited: set[int], 
 
 
 def _check_actions_against_summary(summary: dict, parts: dict, edited_causes: set[int], edited_actions: set[int],
-                                   problems: list[str]) -> None:
-    edited_cause_ids = {cause.get("id") for index, cause in parts["causes"] if index in edited_causes}
+                                   blanket: str | None, problems: list[str]) -> None:
+    edited_cause_ids = {cause["id"] for index, cause in parts["causes"] if index in edited_causes and isinstance(cause.get("id"), str)}
     for index, action in parts["actions"]:
         where = f"actions[{index}]"
         if action.get("label") == "recommended":
-            if index in edited_actions:
+            own_edit = index in edited_actions
+            cause_edit = isinstance(action.get("cause"), str) and action["cause"] in edited_cause_ids
+            if own_edit:
                 problems.append(f"{where}: recommended, but the action was edited after judging")
-            if isinstance(action.get("cause"), str) and action["cause"] in edited_cause_ids:
+            if cause_edit:
                 problems.append(f"{where}: recommended, but its cause was edited after judging")
+            if blanket and not own_edit and not cause_edit:
+                problems.append(f"{where}: recommended, but {blanket}")
         entry = _summary_entry(summary.get("actions"), action.get("id"))
         if entry is not None and entry.get("label") not in ACTION_LABELS and action.get("label") == "recommended":
             problems.append(f"{where}: its entry in judgments/{SUMMARY_NAME} has a missing or invalid label")
@@ -565,8 +589,10 @@ def _check_judgments(report: dict, case: dict, parts: dict, findings: dict[str, 
                 problems.append(f"causes[{index}]: no judging run is stored, so no cause may be labelled above candidate")
     if summary is not None:
         edited_causes, edited_actions = _edited_entries(summary, parts, findings, problems)
-        _check_causes_against_summary(summary, parts, edited_causes, problems)
-        _check_actions_against_summary(summary, parts, edited_causes, edited_actions, problems)
+        blanket = _blanket_cap_reason(summary, report, case, findings, problems)
+        capped = {index for index, _ in parts["causes"]} if blanket else edited_causes
+        _check_causes_against_summary(summary, parts, capped, blanket, problems)
+        _check_actions_against_summary(summary, parts, edited_causes, edited_actions, blanket, problems)
         _check_findings_against_summary(summary, parts, problems)
 
 

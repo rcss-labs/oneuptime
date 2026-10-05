@@ -13,7 +13,7 @@ from triage.config import parse_config
 from triage.evidence import CURRENT, INCIDENT_TIME, Evidence
 from triage.findings import check_findings, load_facts, valid_findings
 from triage.compose import LABEL_ORDER
-from triage.digest import action_digest, cause_digest
+from triage.digest import action_digest, case_identity, cause_digest, draft_digest
 from triage.report import (
     REQUIRED_HEADINGS,
     build_work_order,
@@ -145,6 +145,8 @@ def store_summary(case_dir, summary, report=None, digests=True):
     """
     summary = copy.deepcopy(summary)
     if digests:
+        summary.setdefault("status", "complete")
+        summary.setdefault("draft_digest", draft_digest(report or VALID_REPORT, valid_findings(case_dir), case_identity(load_case(case_dir))))
         findings = valid_findings(case_dir)
         report = report or VALID_REPORT
         for cause in report["causes"]:
@@ -162,6 +164,7 @@ def rejudge(case_dir, report):
     summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
     for entry in [*summary["causes"].values(), *summary["actions"].values()]:
         entry.pop("digest", None)
+    summary.pop("draft_digest", None)
     store_summary(case_dir, summary, report)
 
 
@@ -1042,9 +1045,10 @@ def test_ids_must_match_the_pattern(case, findings, config, bad, where):
 
 
 @pytest.mark.parametrize("good", ["a", "ecs-prod-main-eu-west-1:ecs-0001", "A_1.2", "0abc"])
-def test_valid_ids_are_accepted(case, findings, config, good):
+def test_valid_ids_are_accepted(case_dir, case, findings, config, good):
     report = mutated(VALID_REPORT, lambda r: r["causes"][1].update(id=good))
     report["hypotheses"][1]["cause"] = good
+    rejudge(case_dir, report)
     assert problems_for(report, case, findings, config) == []
 
 
@@ -1495,3 +1499,166 @@ def test_unreadable_finding_files_are_work_order_coverage_gaps(case_dir, case):
     write_checked(case_dir, unreadable=[{"file": "findings/network.json", "reason": "not valid JSON"}])
     gaps = build_work_order(VALID_REPORT, case, RENDERED_AT, checked=checked_findings(case_dir))["coverage_gaps"]
     assert "Finding file not read: findings/network.json (not valid JSON)" in gaps
+
+
+# round 2, N1: the report is bound to the whole judged draft (the summary comes from the real judging code)
+
+import random
+
+from fakes import FakeJudge
+from test_judge import QUESTIONS, make_responder
+from triage.judge import run_judgments
+
+
+@pytest.fixture
+def judged(case_dir, case, config):
+    """The case judged by run_judgments with a fake judge: C1 confirmed, C2 candidate, A1 recommended."""
+    write_findings(case_dir, [
+        {"id": "compute-1", "claim": "Containers exit with code 137", "fact_ids": ["ecs-0001"], "excerpt": "exit code 137",
+         "provenance": "incident_time", "confidence": "high", "time": "2026-10-04T10:41:10Z"},
+        {"id": "compute-2", "claim": "Service is down now", "fact_ids": ["ecs-0002"],
+         "excerpt": "desired 2, running 0", "provenance": "current", "confidence": "medium"},
+    ])
+    check_findings(case_dir)
+    (case_dir / "report.json").write_text(json.dumps(VALID_REPORT))
+    summary = run_judgments(case_dir, config, FakeJudge(make_responder()), QUESTIONS, random.Random(1))
+    assert summary["status"] == "complete" and summary["causes"]["C1"]["label"] == "confirmed", summary
+    assert summary["actions"]["A1"]["label"] == "recommended"
+    return case_dir
+
+
+def judged_problems(judged, config, report=VALID_REPORT):
+    findings, input_problems = check_case_inputs(judged)
+    return input_problems + validate_report(report, load_case(judged), findings, config)
+
+
+def stored_summary(case_dir):
+    return json.loads((case_dir / "judgments" / "summary.json").read_text())
+
+
+def test_the_judged_draft_validates(judged, config):
+    assert judged_problems(judged, config) == []
+
+
+def assert_draft_refused(problems):
+    assert_problem(problems, "draft", "changed after judging", "run the judgments again")
+    assert_problem(problems, "causes[0]", "stronger than candidate")
+
+
+@pytest.mark.parametrize("edit", [
+    lambda r: r.update(symptoms=["Payments API returns 500 for every request"]),
+    lambda r: r["summary"].update(scope="All services in all regions were affected"),
+    lambda r: r["causes"].append({"id": "C3", "statement": "A third cause", "label": "candidate",
+                                  "supporting": [], "contradicting": []}),
+    lambda r: r["causes"][1].update(statement="A different competing cause"),
+    lambda r: r["causes"][1].update(contradicting=["compute-2", "compute-1"]),
+    lambda r: r["causes"].reverse() or r["causes"].reverse() or r["causes"].pop(1),
+], ids=["symptoms", "scope", "added_cause", "competing_statement", "competing_findings", "removed_cause"])
+def test_a_changed_draft_caps_every_label_at_candidate(judged, config, edit):
+    report = mutated(VALID_REPORT, edit)
+    assert_draft_refused(judged_problems(judged, config, report))
+
+
+def test_a_changed_action_title_caps_every_action(judged, config):
+    report = mutated(VALID_REPORT, lambda r: r["actions"][0].update(title="Raise the memory limit of checkout-api now"))
+    problems = judged_problems(judged, config, report)
+    assert_problem(problems, "actions[0]", "recommended")
+    assert_problem(problems, "draft", "changed after judging")
+
+
+def test_a_changed_finding_time_in_checked_json_fails(judged, config):
+    path = judged / "findings" / "checked.json"
+    checked = json.loads(path.read_text())
+    for item in checked["valid"]:
+        if item["id"] == "compute-1":
+            item["time"] = "2026-10-04T11:30:00Z"
+    path.write_text(json.dumps(checked))
+    assert_problem(judged_problems(judged, config), "causes[0]", "edited after judging")
+
+
+def test_a_summary_copied_from_another_case_fails(judged, config):
+    summary = stored_summary(judged)
+    findings, _ = check_case_inputs(judged)
+    summary["draft_digest"] = draft_digest(VALID_REPORT, findings, "INC-999/20260101-000000")
+    store_summary(judged, summary, digests=False)
+    assert_draft_refused(judged_problems(judged, config))
+
+
+@pytest.mark.parametrize("digest", ["missing", None, 5, ["x"]])
+def test_a_missing_or_invalid_draft_digest_fails(judged, config, digest):
+    summary = stored_summary(judged)
+    if digest == "missing":
+        del summary["draft_digest"]
+    else:
+        summary["draft_digest"] = digest
+    store_summary(judged, summary, digests=False)
+    assert_draft_refused(judged_problems(judged, config))
+
+
+def test_a_label_only_edit_still_passes(judged, config):
+    report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(label="probable"))
+    report["actions"][0]["label"] = "candidate"
+    assert judged_problems(judged, config, report) == []
+
+
+def test_a_changed_hypothesis_or_open_question_does_not_change_the_draft(judged, config):
+    def edit(report):
+        report["hypotheses"][0]["test"] = "Read the stopped task reasons again"
+        report["open_questions"] = ["Another question"]
+    assert judged_problems(judged, config, mutated(VALID_REPORT, edit)) == []
+
+
+def test_the_draft_digest_is_recomputed_with_this_cases_identity(judged):
+    findings, _ = check_case_inputs(judged)
+    assert stored_summary(judged)["draft_digest"] == draft_digest(VALID_REPORT, findings, case_identity(load_case(judged)))
+
+
+# status
+
+def with_status(judged, status, **changes):
+    summary = stored_summary(judged)
+    summary.update(changes)
+    if status == "missing":
+        summary.pop("status", None)
+    else:
+        summary["status"] = status
+    store_summary(judged, summary, digests=False)
+
+
+@pytest.mark.parametrize("status", ["failed", "missing", "weird", None, 5])
+def test_any_status_but_complete_or_unavailable_caps_everything_at_candidate(judged, config, status):
+    with_status(judged, status)
+    problems = judged_problems(judged, config)
+    assert_problem(problems, "causes[0]", "stronger than candidate")
+    assert_problem(problems, "actions[0]", "recommended")
+
+
+def test_a_failed_run_with_a_failed_typesafe_value_is_accepted_when_the_report_agrees(judged, config):
+    with_status(judged, "failed", typesafe="failed: the connection dropped; judging failed")
+    def downgrade(report):
+        report["coverage"]["typesafe"] = "failed: the connection dropped; judging failed"
+        report["causes"][0]["label"] = "candidate"
+        report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
+    problems = judged_problems(judged, config, mutated(VALID_REPORT, downgrade))
+    assert not any("stronger than" in problem or "recommended" in problem for problem in problems)
+
+
+def test_an_unavailable_status_follows_the_unavailable_rules(judged, config):
+    summary = stored_summary(judged)
+    summary["causes"]["C1"]["label"] = "probable"
+    store_summary(judged, summary, digests=False)
+    with_status(judged, "unavailable", typesafe="unavailable: service down")
+    def probable(report):
+        report["coverage"]["typesafe"] = "unavailable: service down"
+        report["causes"][0]["label"] = "probable"
+        report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
+    assert judged_problems(judged, config, mutated(VALID_REPORT, probable)) == []
+    confirmed = mutated(VALID_REPORT, lambda r: r["coverage"].update(typesafe="unavailable: service down"))
+    problems = judged_problems(judged, config, confirmed)
+    assert_problem(problems, "causes[0]", "confirmed")
+
+
+def test_the_report_typesafe_must_agree_with_the_summary_for_every_status(judged, config):
+    with_status(judged, "complete")
+    report = mutated(VALID_REPORT, lambda r: r["coverage"].update(typesafe="unavailable: x"))
+    assert_problem(judged_problems(judged, config, report), "coverage.typesafe", "must equal")
