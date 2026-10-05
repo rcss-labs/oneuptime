@@ -9,6 +9,8 @@ from triage.findings import evidence_documents, qualified_id
 from triage.window import WindowError, describe_offset, format_time, parse_time
 
 MAX_ROWS = 300
+MAX_ROW_EXCERPT = 200
+BEFORE_WINDOW = "before the window"
 TIMELINE_NAME = "timeline.json"
 _INCIDENT_TEXTS = (
     ("impact_started_at", "Impact started"),
@@ -34,6 +36,38 @@ def _shows_no_change(fact: dict) -> bool:
     return isinstance(data, dict) and data.get("notable") is False
 
 
+def _cut(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _metric_placement(fact: dict) -> tuple[str, str]:
+    """The time and the opening words of a metric row (contract 6): placed where the series first left its
+    baseline, else at the extreme in the direction of change, never at the window start for a later fall.
+    A fact without the metric fields (old evidence, or not a metric) keeps its own time and adds no words."""
+    data = fact.get("data") if isinstance(fact.get("data"), dict) else {}
+    direction = data.get("direction")
+    extreme = {"rose": "maximum_time", "fell": "minimum_time"}.get(direction)
+    time = fact["time"]
+    for candidate in (data.get("first_departure_time"), data.get(extreme) if extreme else None):
+        if isinstance(candidate, str) and candidate:
+            try:
+                parse_time(candidate)
+            except WindowError:
+                continue
+            time = candidate
+            break
+    opening = f"Metric {direction}: " if direction in ("rose", "fell") else ""
+    return str(time), opening
+
+
+def _fact_text(fact: dict, opening: str) -> str:
+    text = opening + str(fact.get("summary", ""))
+    excerpt = fact.get("excerpt")
+    if isinstance(excerpt, str) and excerpt.strip():
+        text += f': "{_cut(excerpt, MAX_ROW_EXCERPT)}"'
+    return text
+
+
 def _raw_rows(case_dir: Path, case: dict, incident: dict, warnings: list[str], unchanged: list[str]) -> list[dict]:
     rows = []
     incident_times = case.get("incident") if isinstance(case.get("incident"), dict) else {}
@@ -52,7 +86,8 @@ def _raw_rows(case_dir: Path, case: dict, incident: dict, warnings: list[str], u
                     unchanged.append(file_name)
                     continue
                 fact_id = fact.get("id")
-                rows.append(_row(fact["time"], str(document.get("collector", "")), str(fact.get("summary", "")),
+                time, opening = _metric_placement(fact)
+                rows.append(_row(time, str(document.get("collector", "")), _fact_text(fact, opening),
                                  qualified_id(file_name, fact_id) if isinstance(fact_id, str) else _BAD_ID,
                                  str(fact.get("resource", ""))))
     return rows
@@ -62,10 +97,19 @@ def _sort_key(row: dict) -> tuple:
     return (row["_moment"], _SOURCE_RANK.get(row["source"], 2), row["source"], row["fact_id"] or "")
 
 
+def _window_start(case: dict):
+    window = case.get("window")
+    try:
+        return parse_time(window["start"]) if isinstance(window, dict) and window.get("start") else None
+    except WindowError:
+        return None
+
+
 def build_timeline(case_dir: Path) -> list[dict]:
     case = _read_json(case_dir / "case.json")
     incident = _read_json(case_dir / "incident.json")
     start = parse_time(case["incident_start"])
+    window_start = _window_start(case)
     rows = []
     skipped = 0
     unreadable_files: list[str] = []
@@ -81,6 +125,8 @@ def build_timeline(case_dir: Path) -> list[dict]:
             continue
         row["time"] = format_time(row["_moment"])
         row["offset"] = f"{describe_offset(row['_moment'], start)} the incident started"
+        if row["fact_id"] and window_start and row["_moment"] < window_start:
+            row["group"] = BEFORE_WINDOW
         rows.append(row)
     dropped = max(0, len(rows) - MAX_ROWS)
     if dropped:
@@ -111,7 +157,9 @@ def _cell(text: str) -> str:
 
 def render_rows(rows: list[dict]) -> str:
     """A Markdown table of the rows; notes about rows that were left out follow it as plain lines."""
-    lines = ["| Time | Relative to incident start | Event | Source |", "| --- | --- | --- | --- |"]
+    header = ["| Time | Relative to incident start | Event | Source |", "| --- | --- | --- | --- |"]
+    lines = list(header)
+    before: list[str] = []
     notes = []
     for row in rows:
         if row["source"] == "timeline":
@@ -119,7 +167,10 @@ def render_rows(rows: list[dict]) -> str:
             continue
         source = row["fact_id"] or row["source"]
         when = row["time"].replace("T", " ")
-        lines.append(f"| {_cell(when)} | {_cell(row['offset'])} | {_cell(row['text'])} | {_cell(source)} |")
+        line = f"| {_cell(when)} | {_cell(row['offset'])} | {_cell(row['text'])} | {_cell(source)} |"
+        (before if row.get("group") == BEFORE_WINDOW else lines).append(line)
+    if before:
+        lines += ["", "Before the window (events dated before the collection window started):", "", *header, *before]
     if notes:
         lines.append("")
         lines.extend(notes)
