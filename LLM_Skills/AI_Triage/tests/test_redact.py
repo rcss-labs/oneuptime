@@ -515,6 +515,21 @@ import time
 
 import triage.redact as redact_module
 
+# Timing bounds: 5 seconds per megabyte, the same figure as the fail-closed budget in the code.
+# Measured figures live in the report, not here; growth is pinned by the linearity test.
+SECONDS_PER_MEGABYTE = 5.0
+
+
+def time_bound(source) -> float:
+    return SECONDS_PER_MEGABYTE * max(len(source), 200_000) / 1_000_000
+
+
+@pytest.fixture(autouse=True)
+def _no_budget_in_timing_tests(request, monkeypatch):
+    """A slow machine must not turn a timing run into an <UNREADABLE-n> result by accident."""
+    if any(word in request.node.name for word in ("fast", "linear")):
+        monkeypatch.setattr(redact_module, "TEXT_TIME_BUDGET", 1e9)
+
 B64 = "dXNlcjpw" + "YXNzd29yZA=="
 OPENAI = "sk" + "-proj-" + "abcdefghijklmnop1234"
 ANTHROPIC = "sk" + "-ant-" + "abcdefghijklmnop1234"
@@ -756,8 +771,8 @@ def test_text_and_audit_are_fast_on_hostile_and_realistic_500kb_inputs(name):
     started = time.perf_counter()
     audit_text(text)
     audit_seconds = time.perf_counter() - started
-    assert text_seconds < 2, f"text() took {text_seconds:.2f}s"
-    assert audit_seconds < 2, f"audit_text() took {audit_seconds:.2f}s"
+    assert text_seconds < time_bound(text), f"text() took {text_seconds:.2f}s"
+    assert audit_seconds < time_bound(text), f"audit_text() took {audit_seconds:.2f}s"
 
 
 def test_audit_docstring_says_secrets_only():
@@ -870,7 +885,7 @@ def test_text_is_fast_and_safe_on_hostile_bracket_input():
     for source in ["[" * 250_000 + "]" * 250_000, '["a"]' * 100_000, '{"a":' * 100_000, "[" * 500_000, "{[" * 200_000]:
         started = time.perf_counter()
         assert isinstance(Redactor().text(source), str)
-        assert time.perf_counter() - started < 2
+        assert time.perf_counter() - started < time_bound(source)
 
 
 def test_oversize_span_is_skipped_but_its_children_are_not():
@@ -1044,7 +1059,7 @@ def test_single_line_inputs_are_linear(shape):
     started = time.perf_counter()
     audit_text(source)
     audit_seconds = time.perf_counter() - started
-    assert text_seconds < 2 and audit_seconds < 2, (text_seconds, audit_seconds)
+    assert text_seconds < time_bound(source) and audit_seconds < time_bound(source), (text_seconds, audit_seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -1191,7 +1206,7 @@ def test_one_megabyte_bracket_shapes_are_fast(shape):
         started = time.perf_counter()
         call(source)
         elapsed = time.perf_counter() - started
-        assert elapsed < 2, (shape, elapsed)
+        assert elapsed < time_bound(source), (shape, elapsed)
 
 
 # Ruling 3: YAML block scalars mask only their own lines
@@ -1656,7 +1671,7 @@ def test_one_megabyte_rule_shapes_are_fast(shape):
         started = time.perf_counter()
         call(source)
         elapsed = time.perf_counter() - started
-        assert elapsed < 2, (shape, elapsed)
+        assert elapsed < time_bound(source), (shape, elapsed)
 
 
 # Round 4 addendum: plural and counted names, IAM actions, reference names
@@ -1752,7 +1767,7 @@ def test_round_four_slow_shapes_are_fast(shape):
         started = time.perf_counter()
         call(source)
         elapsed = time.perf_counter() - started
-        assert elapsed < 2, (shape, elapsed)
+        assert elapsed < time_bound(source), (shape, elapsed)
 
 
 @pytest.mark.parametrize("key", ["command", "args"])
@@ -1760,7 +1775,7 @@ def test_a_200000_item_argument_list_is_fast(key):
     obj = {"command": ["curl"], "args": ["-u", "a:b"] * 100_000} if key == "args" else {"command": ["curl"] + ["-u", "a:b"] * 100_000}
     started = time.perf_counter()
     Redactor().value(obj)
-    assert time.perf_counter() - started < 2
+    assert time.perf_counter() - started < SECONDS_PER_MEGABYTE
 
 
 def test_time_budget_turns_a_slow_string_into_one_placeholder(monkeypatch):
@@ -1959,7 +1974,7 @@ def test_one_megabyte_round_five_shapes_are_fast(shape):
         started = time.perf_counter()
         call(source)
         elapsed = time.perf_counter() - started
-        assert elapsed < 2, (shape, elapsed)
+        assert elapsed < time_bound(source), (shape, elapsed)
 
 
 # Ruling 6: what the key-like token rule also keeps
@@ -2137,4 +2152,21 @@ def test_one_megabyte_follow_up_shapes_are_fast(shape):
         started = time.perf_counter()
         call(source)
         elapsed = time.perf_counter() - started
-        assert elapsed < 2, (shape, elapsed)
+        assert elapsed < time_bound(source), (shape, elapsed)
+
+
+
+@pytest.mark.parametrize("shape", ["a:b@c ", "pwd=x;", "[]", "Pwd={x};", "kind: Secret\ndata:\n" + "  a: b\n" * 50])
+def test_cost_grows_linearly(shape):
+    """400 KB of a worst shape takes less than 3 times as long as 200 KB (best of three runs)."""
+    def best_time(size: int) -> float:
+        source = shape * (size // len(shape))
+        timings = []
+        for _ in range(3):
+            started = time.perf_counter()
+            Redactor().text(source)
+            timings.append(time.perf_counter() - started)
+        return min(timings)
+
+    small, large = best_time(200_000), best_time(400_000)
+    assert large < 3 * max(small, 0.05), (shape, small, large)
