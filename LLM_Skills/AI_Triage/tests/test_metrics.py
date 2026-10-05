@@ -284,3 +284,53 @@ def test_a_single_point_peak_has_no_end(tmp_path, config_data):
     fact = _peak_fact(tmp_path, config_data, TIES_TIMES[::-1], [1.0, 2.0, 9.0, 3.0], "a")
     assert "peak 9 at 2026-10-04T10:05:00Z" in fact.summary
     assert fact.data["peak_end"] is None
+
+
+# notable: whether a metric fact is worth a line on a timeline
+
+BASE_TIMES = ["2026-09-27T10:00:00+00:00", "2026-09-27T10:05:00+00:00"]
+
+
+def _fact_for(tmp_path, config_data, name, window_values, baseline_values):
+    case = tmp_path / name
+    case.mkdir()
+    window = reply(series(0, TIES_TIMES[: len(window_values)], window_values)) if window_values else reply()
+    baseline = reply(series(0, BASE_TIMES[: len(baseline_values)], baseline_values)) if baseline_values else reply()
+    ctx = ctx_with(case, config_data, window, baseline)
+    add_metric_facts(ctx, "service/checkout", [CPU])
+    return ctx.evidence.facts[0]
+
+
+def test_notable_follows_the_wording_of_the_change(tmp_path, config_data):
+    cases = {
+        "higher": ([80.0, 90.0], [20.0, 20.0], "times higher", True),
+        "lower": ([5.0, 5.0], [40.0, 40.0], "times lower", True),
+        "to-zero": ([0.0, 0.0], [40.0, 40.0], "down to zero", True),
+        "same": ([20.0, 22.0], [20.0, 21.0], "about the same", False),
+        "zero": ([0.0, 0.0], [0.0, 0.0], "zero in both periods", False),
+    }
+    for name, (window_values, baseline_values, words, notable) in cases.items():
+        fact = _fact_for(tmp_path, config_data, name, window_values, baseline_values)
+        assert words in fact.summary, name
+        assert fact.data["notable"] is notable, name
+
+
+def test_without_a_baseline_only_a_moving_series_is_notable(tmp_path, config_data):
+    moving = _fact_for(tmp_path, config_data, "moving", [10.0, 70.0], [])
+    flat = _fact_for(tmp_path, config_data, "flat", [30.0, 30.0], [])
+    assert "no comparable baseline" in moving.summary and moving.data["notable"] is True
+    assert "no comparable baseline" in flat.summary and flat.data["notable"] is False
+
+
+def test_a_fact_with_no_data_is_not_notable(tmp_path, config_data):
+    fact = _fact_for(tmp_path, config_data, "empty", [], [20.0])
+    assert "no data was returned" in fact.summary
+    assert fact.data["notable"] is False
+
+
+def test_notable_does_not_change_the_summary(tmp_path, config_data):
+    fact = _fact_for(tmp_path, config_data, "text", [80.0, 90.0], [20.0, 20.0])
+    assert fact.summary == (
+        "CPUUtilization (Average): peak 90 at 2026-10-04T10:05:00Z; window average 85 against 20 one week earlier "
+        "(4.25 times higher)"
+    )

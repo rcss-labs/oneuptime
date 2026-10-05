@@ -152,6 +152,15 @@ def _ratio_words(summary: MetricSummary) -> str:
     return f"{_num(1 / ratio)} times lower"
 
 
+def _notable(summary: MetricSummary) -> bool:
+    """Worth a line on a timeline: the summary words a change, or there is no comparison and the series moved."""
+    if summary.datapoints == 0:
+        return False
+    if summary.baseline_avg is None or _ratio_words(summary) == "no comparable baseline":
+        return summary.window_max != summary.window_min
+    return _ratio_words(summary) not in ("about the same", "zero in both periods")
+
+
 def _summary_text(summary: MetricSummary) -> str:
     when = f"from {summary.peak_time} to {summary.peak_end}" if summary.peak_end else f"at {summary.peak_time}"
     head = f"{summary.label} ({summary.stat}): peak {_num(summary.window_max)} {when}; "
@@ -173,12 +182,12 @@ def add_metric_facts(
         if summary.datapoints == 0:
             outcome = "no data was returned for the window" if read_ok else "the metric could not be read (see errors)"
             ctx.evidence.add(
-                kind=DERIVED, resource=resource, command=command, data=asdict(summary),
+                kind=DERIVED, resource=resource, command=command, data={**asdict(summary), "notable": False},
                 summary=f"{summary.label} ({summary.stat}): {outcome}",
             )
             continue
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=resource, time=summary.peak_time, command=command,
-            summary=_summary_text(summary), data=asdict(summary),
+            summary=_summary_text(summary), data={**asdict(summary), "notable": _notable(summary)},
         )
     return summaries
