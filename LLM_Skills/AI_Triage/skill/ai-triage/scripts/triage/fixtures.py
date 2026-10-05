@@ -17,6 +17,9 @@ FIXTURE_ENV = "AI_TRIAGE_FIXTURES"
 LOG_ENV = "AI_TRIAGE_FIXTURE_LOG"
 KUBECTL_SKIPPED_WITH_VALUE = ("--kubeconfig", "--context", "-n", "--namespace")
 KUBECTL_SKIPPED_ALONE = ("-A",)
+AWS_HOUSEKEEPING_WITH_VALUE = ("--profile", "--region", "--output")
+AWS_HOUSEKEEPING_ALONE = ("--no-cli-pager",)
+MISS_EXIT_CODE = 255
 
 
 class FixtureError(Exception):
@@ -95,29 +98,52 @@ def _load_entries(directory: Path, name: str, kind: str) -> list[dict[str, Any]]
 
 
 def _log(record: dict[str, Any]) -> None:
+    """One line per call: what was asked and which entry answered. Nothing from the answer."""
     log_path = os.environ.get(LOG_ENV)
     if log_path:
         with open(log_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
 
 
-def _kubectl_words(argv: Sequence[str]) -> list[str]:
-    """The verb and first argument, once the scope options are skipped."""
-    words: list[str] = []
+def _kubectl_split(argv: Sequence[str]) -> tuple[list[str], list[str]]:
+    """The verb and first argument, and the remaining words, once the scope options are skipped."""
+    tokens: list[str] = []
     index = 1
-    while index < len(argv) and len(words) < 2:
+    while index < len(argv):
         token = argv[index]
         if token in KUBECTL_SKIPPED_WITH_VALUE:
             index += 2
             continue
         if token not in KUBECTL_SKIPPED_ALONE:
-            words.append(token)
+            tokens.append(token)
         index += 1
-    return words
+    return tokens[:2], tokens[2:]
+
+
+def _aws_rest(argv: Sequence[str]) -> list[str]:
+    """The arguments after the operation, without the profile, region, and output housekeeping."""
+    rest: list[str] = []
+    index = 3
+    while index < len(argv):
+        token = argv[index]
+        if token in AWS_HOUSEKEEPING_WITH_VALUE:
+            index += 2
+            continue
+        if token not in AWS_HOUSEKEEPING_ALONE:
+            rest.append(token)
+        index += 1
+    return rest
+
+
+def _miss(asked: Sequence[str]) -> tuple[int, str, str]:
+    return MISS_EXIT_CODE, "", f"replay: no recorded answer for {' '.join(asked)}"
 
 
 class FixtureRunner:
-    """A Runner that answers aws and kubectl argvs from aws.json and kubectl.json."""
+    """A Runner that answers aws and kubectl argvs from aws.json and kubectl.json.
+
+    A call with no recorded answer fails. A scenario that wants an empty answer records one.
+    """
 
     def __init__(self, directory: Path):
         self._aws = _load_entries(directory, "aws.json", "aws")
@@ -126,30 +152,35 @@ class FixtureRunner:
     def __call__(self, argv: list[str], timeout: int) -> tuple[int, str, str]:
         program = argv[0] if argv else ""
         if program == "aws":
-            _log({"tool": "aws", "argv": list(argv)})
-            entry = self._find(self._aws, list(argv[1:3]), argv)
-            if entry is None:
-                return 0, "{}", ""
+            words, rest = list(argv[1:3]), _aws_rest(argv)
+            index = self._find(self._aws, words, argv)
+            _log({"tool": "aws", "service": words[0] if words else "", "operation": words[1] if len(words) > 1 else "",
+                  "entry": index, "argv": list(argv)})
+            if index is None:
+                return _miss([*words, *rest])
+            entry = self._aws[index]
             if "error" in entry:
                 return int(entry["error"]["code"]), "", entry["error"]["stderr"]
             return 0, json.dumps(entry.get("result", {})), ""
         if program == "kubectl":
-            _log({"tool": "kubectl", "argv": list(argv)})
-            entry = self._find(self._kubectl, _kubectl_words(argv), argv)
-            if entry is None:
-                return 0, "", ""
+            words, rest = _kubectl_split(argv)
+            index = self._find(self._kubectl, words, argv)
+            _log({"tool": "kubectl", "service": "kubectl", "operation": " ".join(words), "entry": index, "argv": list(argv)})
+            if index is None:
+                return _miss(["kubectl", *words, *rest])
+            entry = self._kubectl[index]
             if "error" in entry:
                 return int(entry["error"]["code"]), "", entry["error"]["stderr"]
             return 0, entry.get("stdout", ""), ""
         raise FixtureError(f"replay mode answers only aws and kubectl calls, not {program or 'an empty command'}")
 
     @staticmethod
-    def _find(entries: list[dict[str, Any]], words: list[str], argv: Sequence[str]) -> dict[str, Any] | None:
-        for entry in entries:
+    def _find(entries: list[dict[str, Any]], words: list[str], argv: Sequence[str]) -> int | None:
+        for index, entry in enumerate(entries):
             if entry["match"] != words:
                 continue
             if all(any(needle in element for element in argv) for needle in entry.get("contains", [])):
-                return entry
+                return index
         return None
 
 
@@ -157,12 +188,13 @@ def fixture_transport(directory: Path) -> Transport:
     entries = _load_entries(directory, "opensearch.json", "opensearch")
 
     def transport(method: str, url: str, body: "bytes | None", timeout_seconds: int, verify_tls: bool, ca_bundle: "str | None") -> tuple[int, str]:
-        _log({"tool": "opensearch", "method": method, "url": url})
-        for entry in entries:
+        for index, entry in enumerate(entries):
             if entry.get("method", method).upper() == method.upper() and entry["path_contains"] in url:
+                _log({"tool": "opensearch", "service": "opensearch", "operation": method, "entry": index, "method": method, "url": url})
                 answer = entry.get("body", {})
                 return int(entry.get("status", 200)), answer if isinstance(answer, str) else json.dumps(answer)
-        return 404, json.dumps({"error": "no fixture"})
+        _log({"tool": "opensearch", "service": "opensearch", "operation": method, "entry": None, "method": method, "url": url})
+        return 404, f"replay: no recorded answer for {method} {url}"
 
     return transport
 

@@ -93,7 +93,7 @@ def test_aws_every_contains_string_must_match(tmp_path):
         {"match": ["ecs", "describe-services"], "contains": ["checkout-api", "prod-cluster"], "result": {"which": "both"}},
     ])
     runner = FixtureRunner(tmp_path)
-    assert aws(runner, "ecs", "describe-services", "--services", "checkout-api")[1] == "{}"
+    assert aws(runner, "ecs", "describe-services", "--services", "checkout-api")[0] != 0
     both = aws(runner, "ecs", "describe-services", "--cluster", "prod-cluster", "--services", "checkout-api")
     assert json.loads(both[1]) == {"which": "both"}
 
@@ -120,12 +120,22 @@ def test_aws_error_entry(tmp_path):
     assert aws(FixtureRunner(tmp_path), "ecs", "describe-services") == (254, "", stderr)
 
 
-def test_aws_no_match_gives_an_empty_object(tmp_path):
+def test_aws_no_match_is_an_error_naming_what_was_asked(tmp_path):
     write(tmp_path, "aws.json", [{"match": ["ecs", "list-clusters"], "result": {}}])
-    assert aws(FixtureRunner(tmp_path), "rds", "describe-db-instances") == (0, "{}", "")
+    code, out, err = aws(FixtureRunner(tmp_path), "rds", "describe-db-instances", "--db-instance-identifier", "shop-db")
+    assert code != 0 and out == ""
+    assert err.startswith("replay: no recorded answer for rds describe-db-instances")
+    assert "--db-instance-identifier shop-db" in err
+    assert "triage-demo" not in err and "--output" not in err
 
 
-def test_aws_missing_file_behaves_as_an_empty_list(tmp_path):
+def test_aws_missing_file_behaves_as_an_empty_list_so_every_call_misses(tmp_path):
+    code, _, err = aws(FixtureRunner(tmp_path), "ecs", "list-clusters")
+    assert code != 0 and "no recorded answer for ecs list-clusters" in err
+
+
+def test_aws_explicit_empty_result_is_still_an_empty_success(tmp_path):
+    write(tmp_path, "aws.json", [{"match": ["ecs", "list-clusters"], "result": {}}])
     assert aws(FixtureRunner(tmp_path), "ecs", "list-clusters") == (0, "{}", "")
 
 
@@ -184,12 +194,20 @@ def test_kubectl_error_entry(tmp_path):
     assert FixtureRunner(tmp_path)([*KUBE_PREFIX, "describe", "pod", "web-1"], 60) == (1, "", "Error from server (Forbidden)")
 
 
-def test_kubectl_no_match(tmp_path):
+def test_kubectl_no_match_is_an_error(tmp_path):
     write(tmp_path, "kubectl.json", [{"match": ["get", "pods"], "stdout": "x"}])
-    assert FixtureRunner(tmp_path)([*KUBE_PREFIX, "get", "nodes"], 60) == (0, "", "")
+    code, out, err = FixtureRunner(tmp_path)([*KUBE_PREFIX, "-n", "payments", "get", "nodes", "-o", "json"], 60)
+    assert code != 0 and out == ""
+    assert err.startswith("replay: no recorded answer for kubectl get nodes")
+    assert "-o json" in err and "payments" not in err and "/tmp/kubeconfig" not in err
 
 
-def test_kubectl_missing_file(tmp_path):
+def test_kubectl_missing_file_misses(tmp_path):
+    assert FixtureRunner(tmp_path)([*KUBE_PREFIX, "get", "pods"], 60)[0] != 0
+
+
+def test_kubectl_explicit_empty_stdout_is_an_empty_success(tmp_path):
+    write(tmp_path, "kubectl.json", [{"match": ["get", "pods"], "stdout": ""}])
     assert FixtureRunner(tmp_path)([*KUBE_PREFIX, "get", "pods"], 60) == (0, "", "")
 
 
@@ -218,9 +236,15 @@ def test_transport_error_status(tmp_path):
     assert send(fixture_transport(tmp_path), "GET", "https://logs.example.com/_cluster/health")[0] == 503
 
 
-def test_transport_no_match_is_404(tmp_path):
+def test_transport_no_match_is_an_error_status_naming_the_request(tmp_path):
     status, text = send(fixture_transport(tmp_path), "GET", "https://logs.example.com/_cluster/health")
-    assert (status, json.loads(text)) == (404, {"error": "no fixture"})
+    assert status == 404
+    assert text == "replay: no recorded answer for GET https://logs.example.com/_cluster/health"
+
+
+def test_transport_explicit_empty_body_is_an_empty_success(tmp_path):
+    write(tmp_path, "opensearch.json", [{"method": "GET", "path_contains": "_cat/shards", "status": 200, "body": []}])
+    assert send(fixture_transport(tmp_path), "GET", "https://logs.example.com/_cat/shards") == (200, "[]")
 
 
 # call log
@@ -237,7 +261,74 @@ def test_every_call_is_logged_in_order(tmp_path, monkeypatch):
     assert [line["tool"] for line in lines] == ["aws", "kubectl", "opensearch"]
     assert lines[0]["argv"][:3] == ["aws", "ecs", "list-clusters"]
     assert lines[1]["argv"] == [*KUBE_PREFIX, "get", "pods"]
-    assert lines[2] == {"tool": "opensearch", "method": "GET", "url": "https://logs.example.com/_cluster/health"}
+    assert lines[2]["method"] == "GET" and lines[2]["url"] == "https://logs.example.com/_cluster/health"
+
+
+def test_the_log_records_the_answering_entry_or_null_for_a_miss(tmp_path, monkeypatch):
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv(LOG_ENV, str(log))
+    write(tmp_path, "aws.json", [
+        {"match": ["ecs", "list-clusters"], "result": {"secret": "do-not-log"}},
+        {"match": ["ecs", "describe-services"], "result": {}},
+    ])
+    write(tmp_path, "kubectl.json", [{"match": ["get", "pods"], "stdout": "do-not-log"}])
+    write(tmp_path, "opensearch.json", [{"path_contains": "_cat", "body": "do-not-log"}])
+    runner = FixtureRunner(tmp_path)
+    aws(runner, "ecs", "describe-services")
+    aws(runner, "rds", "describe-db-instances")
+    runner([*KUBE_PREFIX, "get", "pods"], 60)
+    runner([*KUBE_PREFIX, "get", "nodes"], 60)
+    transport = fixture_transport(tmp_path)
+    send(transport, "GET", "https://logs.example.com/_cat/shards")
+    send(transport, "GET", "https://logs.example.com/_cluster/health")
+    text = log.read_text()
+    assert "do-not-log" not in text
+    lines = [json.loads(line) for line in text.splitlines()]
+    assert [(line["tool"], line.get("service"), line.get("operation"), line["entry"]) for line in lines] == [
+        ("aws", "ecs", "describe-services", 1),
+        ("aws", "rds", "describe-db-instances", None),
+        ("kubectl", "kubectl", "get pods", 0),
+        ("kubectl", "kubectl", "get nodes", None),
+        ("opensearch", "opensearch", "GET", 0),
+        ("opensearch", "opensearch", "GET", None),
+    ]
+
+
+def test_a_miss_lands_in_the_evidence_errors_for_aws_and_kubectl(tmp_path, config_data):
+    from helpers import make_context
+
+    ctx, _, _ = make_context(config_data, tmp_path, {})
+    replay = FixtureRunner(tmp_path)
+    ctx.runner = ctx.kube_runner = replay
+    assert ctx.aws("ecs", "list-clusters") is None
+    assert ctx.kubectl("platform-prod", ["get", "pods"], namespace="payments") is None
+    messages = [error["message"] for error in ctx.evidence.errors]
+    assert len(messages) == 2
+    assert all("replay: no recorded answer for" in message for message in messages)
+    assert "ecs list-clusters" in messages[0] and "kubectl get pods" in messages[1]
+
+
+def test_a_miss_is_an_opensearch_error_through_the_client(tmp_path, config_data):
+    from triage.config import parse_config
+    from triage.opensearch.client import OpenSearchClient, OpenSearchError
+    from triage.opensearch.policy import Request
+
+    config = parse_config(config_data)
+    client = OpenSearchClient(config.opensearch_clusters["logs-prod"], config.limits, transport=fixture_transport(tmp_path))
+    with pytest.raises(OpenSearchError, match="replay: no recorded answer for GET"):
+        client.request(Request("GET", "_cluster/health"))
+
+
+def test_replay_never_reaches_a_real_tool(tmp_path, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("a real call was made")
+
+    monkeypatch.setattr("subprocess.run", refuse)
+    monkeypatch.setattr("urllib.request.OpenerDirector.open", refuse)
+    runner = FixtureRunner(tmp_path)
+    assert aws(runner, "ecs", "list-clusters")[0] != 0
+    assert runner([*KUBE_PREFIX, "get", "pods"], 60)[0] != 0
+    assert send(fixture_transport(tmp_path), "GET", "https://logs.example.com/_cat")[0] == 404
 
 
 def test_nothing_is_logged_when_the_log_variable_is_unset(tmp_path, monkeypatch):
