@@ -2242,3 +2242,34 @@ def test_real_assignments_in_the_same_shapes_are_still_masked(source, secret):
 )
 def test_session_names(name, expected):
     assert looks_secret_key(name) is expected
+
+
+# Unambiguous secret words are assignments wherever they stand in a phrase
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "the db password: " + PUNCT_PW,
+        "new admin token: " + PUNCT_PW,
+        "WARNING_ONLY password: " + PUNCT_PW,
+        "rotated the api_key = " + PUNCT_PW,
+        "Event on password: Failover",
+    ],
+)
+def test_unambiguous_secret_words_after_ordinary_words_are_masked(source):
+    out = Redactor().text(source)
+    assert PUNCT_PW not in out and "<SECRET-1>" in out
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "the db password: not set",
+        "new admin token: expired",
+        "Secret prod-db: rotation enabled, last rotated 40 days ago",
+        "Event on password-reset: Failover from master node password-reset-001 to replica",
+        "Queue secrets: 1200 messages visible, oldest 340 seconds",
+    ],
+)
+def test_status_values_and_resource_names_stay_readable(source):
+    assert Redactor().text(source) == source

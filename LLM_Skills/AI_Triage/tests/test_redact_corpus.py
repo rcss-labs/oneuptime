@@ -318,6 +318,8 @@ LEAKS = [
     ("multipart-password", 'Content-Disposition: form-data; name="password"\r\n\r\n' + PWP + "\r\n--b", PWP),
     ("add-mask", "::add-mask::" + PWP, PWP),
     ("license-env", "NEW_RELIC_LICENSE=" + PWP, PWP),
+    ("prose-db-password", "the db password: " + PWP, PWP),
+    ("prose-admin-token", "new admin token: " + PWP, PWP),
     # follow-up after round 5
     ("go-mysql-dsn", "dial failed: app:" + PWP + "@tcp(db.internal:3306)/orders", PWP),
     ("oracle-bare-host", "sqlplus -s scott/" + PWP + "@//orcldb:1521/ORCL", PWP),

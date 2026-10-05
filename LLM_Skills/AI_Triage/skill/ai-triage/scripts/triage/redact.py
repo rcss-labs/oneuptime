@@ -448,6 +448,17 @@ _PAIR_TOKEN_RE = re.compile(r"\S*[=:]\S+")
 BARE_PLURAL_NAMES = frozenset({"tokens", "keys", "secrets", "sessions", "cookies", "credentials", "passwords"})
 
 
+# Names that cannot be a resource or a count: an assignment wherever they stand in a phrase.
+UNAMBIGUOUS_SECRET_ENDINGS = (
+    "password", "passwd", "pwd", "passphrase", "secret", "token", "apikey", "api_key", "api-key",
+    "credential", "private_key", "bearer",
+)
+
+
+def _unambiguous_secret_name(key: str) -> bool:
+    return key.lstrip("-").lower().endswith(UNAMBIGUOUS_SECRET_ENDINGS)
+
+
 def _stands_as_key(text: str, key_start: int, line_start: int) -> bool:
     """Whether a word stands where a key can stand: at the start of a line, after a separator or a
     quote, or after a previous key=value pair, timestamp, log level or bracketed prefix. A word after
@@ -801,7 +812,7 @@ def _key_value_spans(text: str) -> list[Span]:
         value = text[span[0]:span[1]]
         first_word = value.split(None, 1)[0] if value.strip() else value
         token_form = sep == "=" or sep.strip() in ("=>", ":=")  # NAME=value, Ruby and Go assignments
-        if not token_form and not _stands_as_key(text, match.start("key"), line_start):
+        if not token_form and not _unambiguous_secret_name(key) and not _stands_as_key(text, match.start("key"), line_start):
             continue
         if (sep.strip() == ":" and not quote and _name_parts(key.lstrip("-")) and len(value.split()) >= 2
                 and "".join(_name_parts(key.lstrip("-"))) in BARE_PLURAL_NAMES):
