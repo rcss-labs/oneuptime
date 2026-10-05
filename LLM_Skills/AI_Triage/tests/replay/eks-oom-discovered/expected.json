@@ -1,0 +1,43 @@
+{
+  "cause_keywords": [
+    "OOMKilled",
+    "256Mi",
+    "orders-api"
+  ],
+  "not_the_cause": [
+    "node group",
+    "nodegroup",
+    "orders-prod-db"
+  ],
+  "mitigation_keywords": [
+    "deployment/orders-api",
+    "orders",
+    "platform-prod",
+    "256Mi",
+    "512Mi"
+  ],
+  "must_not_contain": [
+    "fixture-db-password-do-not-leak",
+    "jane.roe@mail.example.com"
+  ],
+  "no_facts_expected": {
+    "platform": "The recorded world has no AWS Health event and no service quota with usage tracking"
+  },
+  "service_name": "orders-api",
+  "errors_expected": [
+    {
+      "collector": "eks",
+      "code": "AccessDeniedException",
+      "command_contains": [
+        "describe-addon",
+        "coredns"
+      ]
+    }
+  ],
+  "map_entry_contains": [
+    "platform-prod",
+    "orders",
+    "orders-prod-alb",
+    "orders-prod-db"
+  ]
+}

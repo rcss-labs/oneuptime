@@ -1,0 +1,13 @@
+# The map knows another service only; orders-api is found by discovery.
+services:
+  inventory-api:
+    match:
+      hostnames: ["inventory.example.com"]
+    environments:
+      prod:
+        account: prod-apps
+        region: eu-central-1
+        resources:
+          ecs_service: inventory/inventory-api
+    source: confirmed
+    last_verified: 2026-10-04

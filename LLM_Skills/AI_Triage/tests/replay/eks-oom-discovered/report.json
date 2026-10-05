@@ -1,0 +1,180 @@
+{
+  "status": "cause_found",
+  "summary": {
+    "what_broke": "The orders API stopped serving requests because the containers of the deployment orders-api were killed for memory.",
+    "impact": "Customers cannot place orders: the load balancer has no healthy targets and answers 503 since 14:20.",
+    "scope": "Only the deployment orders-api in the orders namespace of platform-prod is affected; the nodegroup and the database are healthy.",
+    "top_cause": "C1"
+  },
+  "symptoms": [
+    "The health check of orders.example.com returns 503",
+    "The target group of the load balancer has no healthy targets"
+  ],
+  "causes": [
+    {
+      "id": "C1",
+      "label": "confirmed",
+      "statement": "The containers of the deployment orders-api are OOMKilled at their 256Mi memory limit after traffic doubled at 14:10, and restart in a loop (CrashLoopBackOff)",
+      "supporting": [
+        "compute-1",
+        "compute-2",
+        "compute-3",
+        "compute-4",
+        "edge-1",
+        "edge-2"
+      ],
+      "contradicting": []
+    },
+    {
+      "id": "C2",
+      "label": "candidate",
+      "statement": "The node group update of platform-prod, finished at 13:55, made the orders pods unhealthy",
+      "supporting": [],
+      "contradicting": [
+        "compute-5",
+        "compute-2"
+      ]
+    },
+    {
+      "id": "C3",
+      "label": "candidate",
+      "statement": "The database orders-prod-db became unreachable, so the orders pods fail",
+      "supporting": [],
+      "contradicting": [
+        "data-1",
+        "data-2",
+        "changes-1"
+      ]
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "H1",
+      "statement": "The containers exceed their memory limit under the higher traffic",
+      "prediction": "Containers are OOMKilled with exit code 137 and restart in a loop",
+      "test": "Read the pod states, the warning events, the memory limit and the container logs",
+      "result": "confirmed",
+      "finding_ids": [
+        "compute-1",
+        "compute-4"
+      ],
+      "cause": "C1"
+    },
+    {
+      "id": "H2",
+      "statement": "The node group update broke the orders pods",
+      "prediction": "Pods fail at or soon after the update, or the nodegroup is unhealthy",
+      "test": "Compare the nodegroup state and the time the back-off began with the end of the update",
+      "result": "rejected",
+      "finding_ids": [
+        "compute-5",
+        "compute-2"
+      ],
+      "cause": "C2"
+    },
+    {
+      "id": "H3",
+      "statement": "The database is down",
+      "prediction": "The instance is unavailable or its CPU or storage is exhausted",
+      "test": "Read the instance state and its metrics",
+      "result": "rejected",
+      "finding_ids": [
+        "data-1",
+        "data-2"
+      ],
+      "cause": "C3"
+    }
+  ],
+  "actions": [
+    {
+      "id": "A1",
+      "type": "mitigation",
+      "label": "recommended",
+      "cause": "C1",
+      "title": "Raise the memory limit of the deployment orders-api from 256Mi to 512Mi",
+      "target": {
+        "account_alias": "prod-apps",
+        "account_id": "222222222222",
+        "region": "eu-central-1",
+        "service": "orders-api",
+        "resource_id": "platform-prod/orders/deployment/orders-api",
+        "arn": "arn:aws:eks:eu-central-1:222222222222:cluster/platform-prod"
+      },
+      "current_state": "The container orders-api of deployment orders-api in namespace orders of cluster platform-prod has a memory limit of 256Mi and is OOMKilled",
+      "required_state": "The container has a memory limit of 512Mi and the pods stay ready",
+      "change": "Set the memory limit of deployment/orders-api in namespace orders of cluster platform-prod to 512Mi",
+      "rationale": "The containers are killed at 256Mi under the current traffic, and nothing else in the stack is unhealthy",
+      "finding_ids": [
+        "compute-1",
+        "compute-3",
+        "compute-4"
+      ],
+      "risk": "Higher memory use per pod; nodes need room for three pods of 512Mi",
+      "blast_radius": "deployment orders-api in namespace orders only",
+      "preconditions": [
+        "The engineer approves the change",
+        "The nodes have 1.5Gi of free memory"
+      ],
+      "verification": [
+        "The pods of orders-api are Running and ready",
+        "The targets of orders-api-tg become healthy",
+        "No new OOMKilled state appears"
+      ],
+      "rollback": [
+        "Set the memory limit of deployment/orders-api back to 256Mi"
+      ]
+    },
+    {
+      "id": "A2",
+      "type": "permanent_fix",
+      "label": "candidate",
+      "cause": "C1",
+      "title": "Autoscale orders-api on request rate and size its memory from a load test",
+      "target": {
+        "account_alias": "prod-apps",
+        "account_id": "222222222222",
+        "region": "eu-central-1",
+        "service": "orders-api",
+        "resource_id": "platform-prod/orders/deployment/orders-api",
+        "arn": "arn:aws:eks:eu-central-1:222222222222:cluster/platform-prod"
+      },
+      "current_state": "The deployment has a fixed replica count of 3 and a memory limit that traffic doubling exceeds",
+      "required_state": "A horizontal pod autoscaler follows the request rate, and the memory limit comes from a load test",
+      "change": "Add a horizontal pod autoscaler to deployment/orders-api and run a load test to set requests and limits",
+      "rationale": "A marketing mail doubled the traffic and the fixed capacity could not follow",
+      "finding_ids": [
+        "edge-1"
+      ],
+      "risk": "More pods use more node capacity",
+      "blast_radius": "deployment orders-api in namespace orders",
+      "preconditions": [],
+      "verification": [
+        "A load test at twice the traffic runs without OOMKilled"
+      ],
+      "rollback": [
+        "Remove the autoscaler"
+      ]
+    }
+  ],
+  "open_questions": [
+    "Which marketing mail raised the traffic at 14:10, and can the team be told before the next one?"
+  ],
+  "coverage": {
+    "not_checked": [
+      {
+        "what": "Add-on coredns",
+        "why": "The triage role may not describe add-ons (access denied)"
+      },
+      {
+        "what": "Other namespaces of platform-prod",
+        "why": "Only the orders namespace was read"
+      }
+    ],
+    "typesafe": "available"
+  },
+  "map_changes": [],
+  "run": {
+    "engineer": "replay",
+    "duration_minutes": 8
+  }
+}

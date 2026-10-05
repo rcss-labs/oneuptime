@@ -1,0 +1,64 @@
+{
+  "analyst": "compute",
+  "findings": [
+    {
+      "id": "compute-1",
+      "claim": "All three pods of orders-api are in CrashLoopBackOff and the last state of their container is OOMKilled with exit code 137.",
+      "fact_ids": [
+        "eks-prod-apps-eu-central-1:eks-0003",
+        "eks-prod-apps-eu-central-1:eks-0004",
+        "eks-prod-apps-eu-central-1:eks-0005"
+      ],
+      "excerpt": "container orders-api last terminated OOMKilled exit code 137",
+      "provenance": "current",
+      "confidence": "high"
+    },
+    {
+      "id": "compute-2",
+      "claim": "Back-off warnings for the containers of orders-api began at 14:18, two minutes before the impact started.",
+      "fact_ids": [
+        "eks-prod-apps-eu-central-1:eks-0006"
+      ],
+      "excerpt": "Back-off restarting failed container orders-api in pod orders-api-7d9f8c6b5d-4xkq2_orders",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T14:18:40Z"
+    },
+    {
+      "id": "compute-3",
+      "claim": "The rollout history records that revision 7 of the deployment set the memory limit to 256Mi.",
+      "fact_ids": [
+        "eks-prod-apps-eu-central-1:eks-0011"
+      ],
+      "excerpt": "kubectl set resources deployment/orders-api -n orders --limits=memory=256Mi",
+      "provenance": "current",
+      "confidence": "high"
+    },
+    {
+      "id": "compute-4",
+      "claim": "A previous instance of the container logged memory use of 241Mi against a limit of 256Mi shortly before it was killed.",
+      "fact_ids": [
+        "eks-prod-apps-eu-central-1:eks-0012"
+      ],
+      "excerpt": "WARN memory usage 241Mi of 256Mi limit",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T14:46:05Z"
+    },
+    {
+      "id": "compute-5",
+      "claim": "The nodegroup apps-ng is active and reports no health issues.",
+      "fact_ids": [
+        "eks-prod-apps-eu-central-1:eks-0002"
+      ],
+      "excerpt": "Nodegroup apps-ng is ACTIVE: min 3, max 9, desired 6, no health issues",
+      "provenance": "current",
+      "confidence": "high"
+    }
+  ],
+  "checked": [
+    "pods, warning events, workload and rollout history of the orders namespace",
+    "nodegroup state",
+    "previous container logs"
+  ]
+}

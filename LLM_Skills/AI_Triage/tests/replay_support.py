@@ -7,6 +7,7 @@ runs the commands the way the skill does: as subprocesses of the skill's scripts
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import random
@@ -14,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,7 +31,7 @@ from triage.questions import default_questions_path, load_questions
 TESTS_DIR = Path(__file__).resolve().parent
 REPLAY_DIR = TESTS_DIR / "replay"
 SKILL_SOURCE = TESTS_DIR.parent / "skill" / "ai-triage"
-SCENARIOS = ("ecs-bad-deploy", "cert-expired")
+SCENARIOS = ("ecs-bad-deploy", "cert-expired", "eks-oom-discovered")
 SKILL_PARTS = ("scripts", "judgments", "templates", "VERSION")
 LOG_NAME = "pipeline-commands.json"
 CALL_LOG_NAME = "fixture-calls.jsonl"
@@ -107,6 +109,11 @@ def skill_style(argv: list[str], home: Path) -> str:
     return " ".join(words)
 
 
+def home_of(log: list[dict]) -> Path:
+    """The fake HOME of a run: the skill's python is <home>/.claude/skills/ai-triage/.venv/bin/python."""
+    return Path(log[0]["argv"][0]).parents[5]
+
+
 def load_call_log(base: Path) -> list[dict]:
     """Every aws, kubectl, and OpenSearch call the replay answered or missed, with the recorded entry that answered it."""
     path = base / CALL_LOG_NAME
@@ -136,6 +143,12 @@ class ReplayCase:
         env[LOG_ENV] = str(self.base / CALL_LOG_NAME)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         return env
+
+    def is_discovered(self) -> bool:
+        return json.loads((self.case_dir / "case.json").read_text())["target"]["source"] == "discovered"
+
+    def scenario_service_name(self) -> str:
+        return json.loads((self.scenario / "expected.json").read_text())["service_name"]
 
     def command(self, step: str, argv: list[str], required: bool = True) -> dict:
         """Run argv (its first word is the skill's python, which is swapped for this interpreter) and log it."""
@@ -190,6 +203,10 @@ class ReplayCase:
         return self.script("report render", "report.py", "render", "--case-dir", str(self.case_dir), "--now", now,
                            required=required)
 
+    def propose_map_entry(self, service_name: str) -> dict:
+        return self.script("map_suggest propose", "map_suggest.py", "propose", "--case-dir", str(self.case_dir),
+                           "--service-name", service_name)
+
     def publish(self) -> None:
         case = str(self.case_dir)
         self.script("publish audit", "publish.py", "audit", "--case-dir", case)
@@ -224,7 +241,10 @@ def apply_judged_labels(case_dir: Path) -> None:
 
 def _build_skill_dir(scenario: Path, base: Path) -> tuple[Path, Path]:
     """A skill folder shaped like an installed one, under a fake home, with the scenario's config and map."""
-    home = base / "home"
+    # A short, plain path: report.md prints the kubectl commands of the evidence, with the kubeconfig path in them, and
+    # pytest's long random temporary names would be flagged by the audit's entropy rule.
+    home = Path(tempfile.mkdtemp(prefix="replay-", dir="/tmp")).resolve()
+    atexit.register(shutil.rmtree, home, ignore_errors=True)
     skill_dir = home / ".claude" / "skills" / "ai-triage"
     (skill_dir / "config").mkdir(parents=True)
     for part in SKILL_PARTS:
@@ -240,6 +260,23 @@ def _build_skill_dir(scenario: Path, base: Path) -> tuple[Path, Path]:
     return skill_dir, home
 
 
+def _discover(case: ReplayCase, incident: dict) -> Path:
+    """The discovery path: discover.py on the incident's hostname, then the engineer's additions.
+
+    discover.py follows a hostname to a load balancer and then only to an ECS service or an Auto Scaling group, so
+    for pods behind IP targets it finds the account, the region, and the load balancer only. The scenario's
+    engineer-additions.json holds what the engineer would add by hand (the cluster, namespace, workload, database).
+    """
+    found = case.script("discover", "discover.py", "--hostname", incident["hostnames"][0])
+    document = json.loads(found["stdout"])
+    additions = case.scenario / "engineer-additions.json"
+    if additions.is_file():
+        document["discovery"]["resources"].update(json.loads(additions.read_text())["resources"])
+    path = case.base / "discovery-for-target.json"
+    path.write_text(json.dumps(document, indent=2))
+    return path
+
+
 def start_case(scenario: Path, base: Path) -> ReplayCase:
     """Steps 1 to 5: the skill folder, init, target, plan, every planned collector, the findings check, the timeline."""
     scenario, base = Path(scenario), Path(base)
@@ -251,11 +288,15 @@ def start_case(scenario: Path, base: Path) -> ReplayCase:
                        "--now", incident["observed_at"])
     summary = json.loads(init["stdout"])
     case.case_dir = Path(summary["case_dir"])
-    candidates = summary["match"]["candidates"]
-    if summary["match"]["status"] != "one" or len(candidates) != 1:
-        raise PipelineError(f"the incident did not match exactly one service: {summary['match']}")
-    case.script("case target", "case.py", "target", "--case-dir", str(case.case_dir),
-                "--service", candidates[0]["service"], "--environment", candidates[0]["environment"])
+    if summary["match"]["status"] == "none":
+        discovered = _discover(case, incident)
+        case.script("case target", "case.py", "target", "--case-dir", str(case.case_dir), "--discovery", str(discovered))
+    else:
+        candidates = summary["match"]["candidates"]
+        if summary["match"]["status"] != "one" or len(candidates) != 1:
+            raise PipelineError(f"the incident did not match exactly one service: {summary['match']}")
+        case.script("case target", "case.py", "target", "--case-dir", str(case.case_dir),
+                    "--service", candidates[0]["service"], "--environment", candidates[0]["environment"])
     case.script("case plan", "case.py", "plan", "--case-dir", str(case.case_dir))
     case.collect_evidence()
     case.check_findings()
@@ -271,4 +312,6 @@ def run_pipeline(scenario: Path, tmp_path: Path, judge: FakeJudge) -> Path:
     case.judge(judge, apply_labels=True)
     case.render(required=True)
     case.publish()
+    if case.is_discovered():
+        case.propose_map_entry(case.scenario_service_name())
     return case.case_dir

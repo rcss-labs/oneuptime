@@ -1,0 +1,18 @@
+{
+  "analyst": "changes",
+  "findings": [
+    {
+      "id": "changes-1",
+      "claim": "CloudTrail recorded no change to the database before the incident.",
+      "fact_ids": [
+        "changes-prod-apps-eu-central-1:changes-0002"
+      ],
+      "excerpt": "No change was recorded for orders-prod-db between 2026-10-04T13:20:00Z and 2026-10-04T14:25:00Z",
+      "provenance": "inferred",
+      "confidence": "high"
+    }
+  ],
+  "checked": [
+    "CloudTrail write events for the load balancer and the database"
+  ]
+}

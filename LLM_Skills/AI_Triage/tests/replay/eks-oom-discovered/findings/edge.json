@@ -1,0 +1,30 @@
+{
+  "analyst": "edge",
+  "findings": [
+    {
+      "id": "edge-1",
+      "claim": "The request count of the load balancer peaked at 8300 for five minutes from 14:10, double the level of the week before.",
+      "fact_ids": [
+        "edge-prod-apps-eu-central-1:edge-0015"
+      ],
+      "excerpt": "peak 8300 from 2026-10-04T14:10:00Z to 2026-10-04T14:15:00Z",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T14:10:00Z"
+    },
+    {
+      "id": "edge-2",
+      "claim": "The target group orders-api-tg has three unhealthy targets, and the unhealthy host count reached 3 from 14:20.",
+      "fact_ids": [
+        "edge-prod-apps-eu-central-1:edge-0018"
+      ],
+      "excerpt": "UnHealthyHostCount orders-api-tg (Maximum): peak 3 from 2026-10-04T14:20:00Z",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T14:20:00Z"
+    }
+  ],
+  "checked": [
+    "load balancer target health, certificate, DNS record and metrics"
+  ]
+}

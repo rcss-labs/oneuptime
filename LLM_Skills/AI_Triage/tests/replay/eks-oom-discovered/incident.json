@@ -1,0 +1,36 @@
+{
+  "number": "INC-1051",
+  "title": "Orders API returns 503",
+  "url": "https://oneuptime.example.com/incident/inc-1051",
+  "description": "The orders API health monitor fails and customers cannot place orders.",
+  "severity": "Critical",
+  "state": "Ongoing",
+  "declared_at": "2026-10-04T14:24:00Z",
+  "impact_started_at": "2026-10-04T14:20:00Z",
+  "monitors": [
+    {
+      "name": "Orders API",
+      "type": "API",
+      "target": "https://orders.example.com/health"
+    }
+  ],
+  "labels": [
+    "orders"
+  ],
+  "hostnames": [
+    "orders.example.com"
+  ],
+  "timeline": [
+    {
+      "time": "2026-10-04T14:24:00Z",
+      "text": "Incident declared by the on-call engineer"
+    }
+  ],
+  "notes": [
+    {
+      "time": "2026-10-04T14:31:00Z",
+      "text": "Platform team: the node group update of platform-prod finished at 13:55 and the nodes are Ready."
+    }
+  ],
+  "observed_at": "2026-10-04T14:50:00Z"
+}

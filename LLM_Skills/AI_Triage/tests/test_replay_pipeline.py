@@ -21,6 +21,7 @@ from replay_support import (
     contradicting_judge,
     distractor_draft,
     favourable_judge,
+    home_of,
     load_call_log,
     load_log,
     run_pipeline,
@@ -89,17 +90,25 @@ def test_every_command_of_the_pipeline_exits_zero(run):
 
 def test_the_pipeline_runs_the_planned_collectors_and_every_later_stage(run):
     steps = [record["step"] for record in run["log"]]
-    assert steps[:3] == ["case init", "case target", "case plan"]
-    assert sum(step.startswith("plan: ") for step in steps) >= 6
-    assert steps[-7:] == ["findings check", "timeline", "judge run", "report render", "publish audit",
-                          "publish confluence", "publish slack-message"]
+    discovered = "discover" in steps
+    assert steps[:4 if discovered else 3] == (["case init", "discover", "case target", "case plan"] if discovered
+                                              else ["case init", "case target", "case plan"])
+    assert sum(step.startswith("plan: ") for step in steps) >= 5
+    tail = ["findings check", "timeline", "judge run", "report render", "publish audit", "publish confluence",
+            "publish slack-message", *(["map_suggest propose"] if discovered else [])]
+    assert steps[-len(tail):] == tail
 
 
-def test_no_evidence_file_holds_an_error(run):
-    evidence = sorted((run["case_dir"] / "evidence").glob("*.json"))
-    assert len(evidence) >= 6
-    errors = {path.name: read_json(path)["errors"] for path in evidence if read_json(path)["errors"]}
-    assert errors == {}
+def test_no_evidence_file_holds_an_error_except_the_ones_the_scenario_intends(run):
+    documents = [read_json(path) for path in sorted((run["case_dir"] / "evidence").glob("*.json"))]
+    assert len(documents) >= 5
+    errors = [(document["collector"], error) for document in documents for error in document["errors"]]
+    wanted = run["expected"].get("errors_expected", [])
+    assert len(errors) == len(wanted)
+    for want in wanted:
+        hits = [error for collector, error in errors if collector == want["collector"] and error["code"] == want["code"]
+                and all(word in error["command"] for word in want["command_contains"])]
+        assert len(hits) == 1, want
 
 
 def test_the_canned_findings_are_all_valid(run):
@@ -184,7 +193,7 @@ def test_no_call_was_missed_and_every_recorded_answer_was_used(run):
     missed = [call.get("argv") or f"{call['method']} {call['url']}" for call in calls if call["entry"] is None]
     assert missed == []
     unused = []
-    for tool, name in (("aws", "aws.json"), ("opensearch", "opensearch.json")):
+    for tool, name in (("aws", "aws.json"), ("opensearch", "opensearch.json"), ("kubectl", "kubectl.json")):
         recorded = read_json(run["scenario"] / name) if (run["scenario"] / name).is_file() else []
         used = {call["entry"] for call in calls if call["tool"] == tool}
         unused += [f"{name}[{index}] {entry.get('match') or entry.get('path_contains')}"
@@ -200,6 +209,92 @@ def test_every_planned_collector_wrote_a_fact_or_is_listed_with_its_reason(run):
     assert planned <= {document["collector"] for document in documents}
     silent = {document["collector"] for document in documents if not document["facts"]}
     assert silent == set(allowed)
+
+
+# --- the third scenario: an unmapped service on EKS, found by discovery -------------------------
+
+@pytest.fixture(scope="module")
+def eks_run(tmp_path_factory):
+    scenario = REPLAY_DIR / "eks-oom-discovered"
+    base = tmp_path_factory.mktemp("eks-single")
+    judge = favourable_judge(scenario)
+    case_dir = run_pipeline(scenario, base, judge)
+    return {"scenario": scenario, "base": base, "case_dir": case_dir, "judge": judge, "log": load_log(base),
+            "expected": expected_of("eks-oom-discovered")}
+
+
+def test_the_service_is_found_by_discovery_and_the_engineer_adds_what_discovery_cannot_reach(eks_run):
+    steps = [record["step"] for record in eks_run["log"]]
+    assert steps.index("case init") < steps.index("discover") < steps.index("case target")
+    init = json.loads(next(r for r in eks_run["log"] if r["step"] == "case init")["stdout"])
+    assert init["match"]["status"] == "none"
+    discovery = json.loads(next(r for r in eks_run["log"] if r["step"] == "discover")["stdout"])["discovery"]
+    # Limit: discover.py follows a load balancer only to an ECS service or an Auto Scaling group, so for pods behind
+    # IP targets it finds the account, region, and load balancer; the cluster and database come from the engineer.
+    assert discovery["resources"] == {"load_balancer": "orders-prod-alb"}
+    assert discovery["account"] == "prod-apps" and discovery["region"] == "eu-central-1"
+    target = read_json(eks_run["case_dir"] / "case.json")["target"]
+    assert target["source"] == "discovered"
+    assert target["resources"]["eks"]["cluster"] == "platform-prod" and target["resources"]["rds"] == "orders-prod-db"
+
+
+def test_the_denied_optional_call_is_a_coverage_note_of_the_report(eks_run):
+    section = (eks_run["case_dir"] / "report.md").read_text().split("## 7. Coverage notes")[1].split("## 8.")[0]
+    assert "describe-addon" in section and "coredns" in section
+    assert "AccessDeniedException" in section
+
+
+def test_every_kubectl_command_was_answered_from_the_recording_and_passes_the_guard(eks_run, monkeypatch):
+    home = home_of(eks_run["log"])
+    monkeypatch.setenv("HOME", str(home))
+    skill_dir = home / ".claude" / "skills" / "ai-triage"
+    context = context_from_config(load_config(skill_dir / "config" / "triage-config.yaml"), skill_dir)
+    calls = [call for call in load_call_log(eks_run["base"]) if call["tool"] == "kubectl"]
+    assert {call["operation"].split()[0] for call in calls} == {"get", "rollout", "logs"}
+    assert len(calls) == 7  # pods, events, the workload, its rollout history, and the previous log of three pods
+    assert [call["argv"] for call in calls if call["entry"] is None] == []
+    refused = [call["argv"][-3:] for call in calls if decide(skill_style(call["argv"], home), context).kind != ALLOW]
+    assert refused == []
+    recorded = read_json(eks_run["scenario"] / "kubectl.json")
+    assert {call["entry"] for call in calls} == set(range(len(recorded)))
+
+
+def test_the_work_order_mitigation_names_the_workload_and_both_memory_limits(eks_run):
+    work_order = read_json(eks_run["case_dir"] / "work-order.json")
+    mitigation = next(action for action in work_order["actions"] if action["type"] == "mitigation")
+    text = json.dumps(mitigation)
+    for word in ("deployment/orders-api", "namespace orders", "cluster platform-prod", "256Mi", "512Mi"):
+        assert word in text, word
+    assert mitigation["target"]["arn"] == "arn:aws:eks:eu-central-1:222222222222:cluster/platform-prod"
+    assert mitigation["label"] == "recommended"
+
+
+def test_the_map_entry_proposed_at_the_end_names_the_cluster_namespace_balancer_and_database(eks_run):
+    propose = next(record for record in eks_run["log"] if record["step"] == "map_suggest propose")
+    for word in eks_run["expected"]["map_entry_contains"]:
+        assert word in propose["stdout"], word
+    assert "source: discovered" in propose["stdout"]
+    assert not any("apply" in record["argv"] for record in eks_run["log"])
+    service_map = (eks_run["scenario"] / "service-map.yaml").read_text()
+    assert (home_of(eks_run["log"]) / ".claude" / "skills" / "ai-triage" / "config" / "service-map.yaml").read_text() == service_map
+
+
+def test_the_secret_and_the_email_are_in_no_file_output_or_judge_state(eks_run):
+    texts = [path.read_text() for path in eks_run["case_dir"].rglob("*") if path.is_file()]
+    texts += [r["stdout"] + r["stderr"] for r in eks_run["log"]]
+    texts.append(json.dumps([state for state, _ in eks_run["judge"].calls]))
+    pieces = ("jane", "roe", "mail", "example", "com")
+    email = f"{pieces[0]}.{pieces[1]}@{pieces[2]}.{pieces[3]}.{pieces[4]}"
+    for forbidden in (SECRET, email):
+        assert forbidden in (REPLAY_DIR / "eks-oom-discovered" / "kubectl.json").read_text()
+        assert [text[:60] for text in texts if forbidden in text] == []
+
+
+def test_the_state_sent_for_a_pod_finding_carries_the_cluster_and_namespace_that_were_asked(eks_run):
+    claims = {finding["id"]: finding["claim"]
+              for finding in read_json(eks_run["scenario"] / "findings" / "compute.json")["findings"]}
+    evidence = finding_states(eks_run["judge"])[claims["compute-2"]]
+    assert "cluster=platform-prod" in evidence[0]["asked"] and "namespace=orders" in evidence[0]["asked"]
 
 
 # --- the secret ----------------------------------------------------------------------------
@@ -321,7 +416,7 @@ def test_replay_makes_no_call_to_aws_or_kubectl(scenario, tmp_path, monkeypatch)
 # --- the guard ------------------------------------------------------------------------------
 
 def test_the_guard_allows_every_command_the_pipeline_ran_and_asks_before_a_map_change(run, monkeypatch):
-    home = run["base"] / "home"
+    home = home_of(run["log"])
     monkeypatch.setenv("HOME", str(home))
     skill_dir = home / ".claude" / "skills" / "ai-triage"
     context = context_from_config(load_config(skill_dir / "config" / "triage-config.yaml"), skill_dir)

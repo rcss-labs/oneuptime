@@ -12,6 +12,8 @@ here is invented: the account ids are the placeholders `111111111111` and `22222
 | `incident.json` | The incident as OneUptime reports it. `observed_at` is the time the recording was taken; replay passes it as `--now`. |
 | `aws.json` | Canned `aws` answers, read by `AI_TRIAGE_FIXTURES`. Each entry has `match` (service and operation), optional `contains` (words that must appear in the arguments), and a `result` or an `error`. The first entry that fits wins. |
 | `opensearch.json` | Canned OpenSearch answers (only `ecs-bad-deploy`). Each entry has `path_contains` and a `body`. One body serves every query on that index, so it holds hits and both aggregations. |
+| `kubectl.json` | Canned `kubectl` answers (only `eks-oom-discovered`). Each entry has `match` (the verb and first argument, for example `get pods` or `logs <pod>`), optional `contains`, and a `stdout` or an `error`. |
+| `engineer-additions.json` | Only for a discovered service: what the engineer adds by hand to what `discover.py` found (see below). |
 | `triage-config.yaml` | The config of the recorded world. `cases_dir` is overridden by the test. |
 | `service-map.yaml` | The service map of the recorded world. |
 | `findings/` | The canned analyst findings, in the stage 3 format. Each cites facts the collectors really produce from these answers. |
@@ -24,6 +26,18 @@ The scenarios:
   does not resolve. Distractors: an RDS CPU spike and a backup before the impact.
 - `cert-expired`: the checkout API certificate on the load balancer expired at 12:00:00. Distractor: a routine
   deployment of `checkout-api:41` at 10:05.
+
+- `eks-oom-discovered`: the orders API, which is not in the service map, returns 503 because the containers of its
+  EKS deployment are OOMKilled at a 256Mi limit after traffic doubles. The first suspects are wrong: a node group
+  update that finished at 13:55 (the platform team's note in the incident) and a database whose connections drop
+  because its only client crash-loops. One optional read (`eks describe-addon` for coredns) is access denied, so the
+  eks evidence file holds one error. Pod logs hold the fake secret and an invented customer email address.
+
+For a service that is not in the map, `run_pipeline` takes the discovery path: `case.py init` finds no match,
+`discover.py --hostname` runs against the recording, its output (plus `engineer-additions.json`) goes to
+`case.py target --discovery`, and after publishing `map_suggest.py propose` prints the entry. `discover.py` follows a
+load balancer only to an ECS service or an Auto Scaling group, so for pods behind IP targets it finds the account,
+region, and load balancer only; the cluster, namespace, workload, and database are the engineer's additions.
 
 ## Run the pipeline in a test
 

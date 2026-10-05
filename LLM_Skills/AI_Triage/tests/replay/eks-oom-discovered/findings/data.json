@@ -1,0 +1,40 @@
+{
+  "analyst": "data",
+  "findings": [
+    {
+      "id": "data-1",
+      "claim": "The database instance orders-prod-db is available.",
+      "fact_ids": [
+        "rds-prod-apps-eu-central-1:rds-0001"
+      ],
+      "excerpt": "Instance orders-prod-db is available",
+      "provenance": "current",
+      "confidence": "high"
+    },
+    {
+      "id": "data-2",
+      "claim": "CPU of the database was flat at 18 percent over the whole window.",
+      "fact_ids": [
+        "rds-prod-apps-eu-central-1:rds-0004"
+      ],
+      "excerpt": "CPUUtilization (Average): peak 18 from 2026-10-04T13:20:00Z to 2026-10-04T14:45:00Z",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T13:20:00Z"
+    },
+    {
+      "id": "data-3",
+      "claim": "The connections of the database were at their peak of 96 until 14:15.",
+      "fact_ids": [
+        "rds-prod-apps-eu-central-1:rds-0005"
+      ],
+      "excerpt": "DatabaseConnections (Maximum): peak 96 from 2026-10-04T13:20:00Z to 2026-10-04T14:15:00Z",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T13:20:00Z"
+    }
+  ],
+  "checked": [
+    "RDS instance state, events and metrics"
+  ]
+}

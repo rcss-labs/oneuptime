@@ -1,0 +1,32 @@
+# Replay world: one account with an EKS cluster. cases_dir is overridden by the test.
+oneuptime:
+  url: https://oneuptime.example.com
+permission_set: ai-triage-read-only
+accounts:
+  prod-apps:
+    account_id: '222222222222'
+    profile: triage-prod-apps
+    regions:
+    - eu-central-1
+confluence:
+  space_key: OPS
+  parent_page_id: '123456'
+slack:
+  default_channel: '#incidents'
+cases_dir: ~/.ai-triage/cases
+limits:
+  max_window_hours: 6
+  logs_insights_max_log_groups: 5
+  opensearch_max_hits: 50
+  opensearch_timeout_seconds: 10
+typesafe:
+  model: jev-latest
+  thresholds:
+    evidence_supports: 0.8
+    cause_top_probability: 0.6
+    ask_engineer_below: 0.5
+eks_clusters:
+  platform-prod:
+    account: prod-apps
+    region: eu-central-1
+    context: triage-platform-prod
