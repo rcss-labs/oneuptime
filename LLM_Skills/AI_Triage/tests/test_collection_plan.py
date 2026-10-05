@@ -241,15 +241,15 @@ def test_changes_resource_names_are_capped_at_ten(config):
 def test_a_malformed_resource_is_skipped_with_a_reason(config):
     commands = plan({"ecs_service": "no-slash", "rds": ["not", "a", "string"], "ec2_instances": "i-1"}, config)
     skipped = [c for c in commands if c.tool == "skipped"]
-    assert {c.name for c in skipped} == {"ecs", "rds", "ec2", "alarms"}
+    assert {c.name for c in skipped} == {"ecs", "rds", "ec2"}
     assert all(c.reason and c.argv == [] for c in skipped)
-    assert {c.name for c in commands if c.tool != "skipped"} == {"changes", "platform"}
+    assert {c.name for c in commands if c.tool != "skipped"} == {"changes", "platform", "alarms"}
     assert "ecs_service" in next(c for c in skipped if c.name == "ecs").reason
 
 
 def test_an_empty_list_plans_nothing_and_is_not_an_error(config):
     commands = plan({"ec2_instances": [], "log_groups": [], "lambda_functions": []}, config)
-    assert {c.name for c in commands if c.tool != "skipped"} == {"changes", "platform"}
+    assert {c.name for c in commands if c.tool != "skipped"} == {"changes", "platform", "alarms"}
 
 
 def test_an_unknown_resource_key_is_skipped(config):
@@ -368,7 +368,7 @@ def evidence_stem(command):
     ("lambda_functions", ["a_b", "a.b", "a-b"]),
 ])
 def test_names_that_clean_to_the_same_text_get_distinct_files(config, key, names):
-    commands = [c for c in plan({key: names}, config) if c.tool == "collect.py" and c.name not in ("changes", "platform")]
+    commands = [c for c in plan({key: names}, config) if c.tool == "collect.py" and c.name not in ("changes", "platform", "alarms")]
     assert len(commands) == len(names)
     assert len({evidence_stem(c) for c in commands}) == len(names)
 
@@ -750,10 +750,24 @@ def test_alarm_names_are_capped_at_the_collectors_limit(config):
     assert len(targets_of(command)["alarm_names"].split(",")) == 50
 
 
-def test_without_mapped_alarms_a_skipped_line_says_so(config):
+def test_without_mapped_alarms_the_alarms_in_alarm_now_are_planned(config):
     for resources in ({"rds": "db"}, {"alarms": []}):
         alarms = one(plan(resources, config), "alarms")
-        assert alarms.tool == "skipped" and "no alarms are mapped" in alarms.reason
+        assert alarms.tool == "collect.py" and alarms.domain == "logs"
+        assert targets_of(alarms) == {"in_alarm": "true"}
+        assert alarms.reason == "alarms in ALARM now; alarms that fired and cleared need names in the service map"
+        assert alarms.evidence == "evidence/alarms-prod-main-eu-west-1.json"
+
+
+def test_mapped_alarms_are_not_replaced_by_the_in_alarm_listing(config):
+    commands = named(plan({"alarms": ["a1"]}, config), "alarms")
+    assert [targets_of(c) for c in commands] == [{"alarm_names": "a1"}]
+
+
+def test_a_dependency_without_mapped_alarms_gets_no_in_alarm_run(config):
+    dependency = {**PAYMENTS, "resources": {"rds": "payments-db"}}
+    commands = plan_collection(with_dependencies({"rds": "db"}, [dependency]), config, SKILL_DIR)
+    assert len(named(commands, "alarms")) == 1
 
 
 @pytest.mark.parametrize("resources", [{"alarms": "one"}, {"ecr_repository": ["x"]}, {"opensearch_domain": 5}])

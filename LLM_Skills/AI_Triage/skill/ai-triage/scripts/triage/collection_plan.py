@@ -411,7 +411,8 @@ def plan_collection(case: dict, config: TriageConfig, skill_dir: Path) -> list[P
         if key not in handlers and key not in ("sqs_queues", "sns_topics"):
             p.skip(key, "unknown resource key")
     if p.resources.get("alarms", []) == []:
-        p.skip("alarms", "no alarms are mapped for this service; the alarms collector needs alarm names, so ask the engineer or add alarms to the service map")
+        p.collect("alarms", {"in_alarm": "true"},
+                  "alarms in ALARM now; alarms that fired and cleared need names in the service map")
     p.collect("changes", *_changes_request(p.resources, case["incident_start"]))
     p.collect("platform", {}, "known AWS service events")
     for dependency in case["target"].get("dependencies", []):
