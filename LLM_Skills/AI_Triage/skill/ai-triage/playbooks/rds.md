@@ -8,8 +8,8 @@ connection errors, timeouts, slow queries, a failover, or a full disk.
 ## Collect
 
 The plan already runs `rds` for the mapped database (an instance, or a cluster whose
-member instances it then describes). Pass `incident_start` so the error log lines are
-chosen around it. Add these when they apply.
+member instances it then describes). Pass `incident_start` (an ISO time with a timezone) so the collector
+reads the log file that covers it and keeps the lines around it (up to 6 files). Add these when they apply.
 
 | When | Command |
 |---|---|
@@ -31,7 +31,8 @@ chosen around it. Add these when they apply.
 | "FreeStorageSpace (Minimum): peak N" (the number is the lowest point, in bytes) | storage left | near zero means the disk filled; check the allocated size in the state fact |
 | "CPUUtilization", "ReadLatency", "WriteLatency", "FreeableMemory", "ReplicaLag" with peak time and one-week comparison | load or lag against normal | "times higher" with a peak at the incident start is a lead; "about the same" rules it out |
 | "Top wait events by average database load in the window: A 1.20, B 0.40" | where sessions spend time (CPU, IO, locks, client) | the error lines; compare the load with the instance's vCPU count. Absent when Performance Insights is off, which is not a clean result |
-| "N error lines found in the lines read, K kept ..." with `data["lines"]` (times) | errors the engine logged | see below |
+| "N error lines found in the lines read, K kept, M not kept ..." with `data["lines"]` (time of the first kept line from the incident start) | errors the engine logged; K is at most 40: up to 5 just before the incident start, the first 15 from it, and the newest 20 | see below; M not kept means more lines exist than shown |
+| "No error log file overlapping the window was found", "Error log files overlapping the window that were not read: ...", "The listing was cut after 5 pages ..." | the log evidence is incomplete | the files named; do not read it as no errors |
 | "No error line inside the window was found in the last 1,000 lines read" | nothing in the tail of those files | earlier lines were not read; this does not prove there were no errors |
 
 Error lines are masked. What survives: the timestamp, process id, database name,
@@ -41,7 +42,7 @@ directly follows that word; engine codes (SQLSTATE, `MY-` codes, `ORA-` codes, S
 Server error, severity, state, MySQL `ERROR 1040 (HY000)`); and a few numbers (error
 number, errno, `at character`, `line`, a type length). Users, roles and accounts are
 never shown; other numbers show as `<n>`; from any other quote to the end of the line
-the text is `<rest masked>`. A line therefore tells you the class and where, not who
+the text is `<rest masked>`, followed only by the strict engine codes found in that part. A line therefore tells you the class and where, not who
 or which value. Do not guess a statement from it.
 
 ## Common causes

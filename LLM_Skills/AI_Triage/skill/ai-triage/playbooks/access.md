@@ -33,9 +33,13 @@ evidence needed (state, times, policy names, a decision) is in the metadata.
 | "... is implicitDeny; no statement allows it" | no policy of the role allows it | the work order names the missing action and resource |
 | "... is explicitDeny; denied by POLICY (TYPE)" | a statement denies it | that policy and its type |
 | "The simulation lacked values for: ...; the real decision may differ" | a condition needs a request value the simulation did not have | treat the verdict as open |
-| "Key K state Enabled, enabled True, origin AWS_KMS" (`current`) | the key is usable | the key policy and grants (Follow a lead) |
-| "Key K is disabled; calls that use it will fail" | encrypt and decrypt calls fail | when it was disabled: the change evidence |
-| "Key K is pending deletion (deletion date T); calls that use it will fail" | same; the key will be destroyed on that date | the same, and the date is the deadline for the work order |
+| "Key K state Enabled, enabled True, origin AWS_KMS" (`current`; no second line for a usable key) | the key is usable | the key policy and grants (Follow a lead) |
+| "Key K is disabled; calls that use it fail until it is enabled" | encrypt and decrypt calls fail | when it was disabled: the change evidence |
+| "Key K is pending deletion (deletion date T); calls that use it fail" | same; the key will be destroyed on that date | the same, and the date is the deadline for the work order |
+| "Key K is waiting for key material to be imported" or "is unavailable: the key or its custom key store cannot be reached" (even if enabled) | calls fail | the import, or the custom key store's state |
+| "Key K is a replica key in state pending replica deletion (deletion date T)" | a replica is being deleted; the primary key is not affected by this fact | which region's key the caller uses |
+| "Key K is still being created" or "is being updated" | a transient state | collect again later |
+| "Key K has state S" | a state the collector does not know; no claim is made | the state's own meaning in the AWS documentation |
 | "Secret S: rotation enabled, last rotated T, last changed T, next rotation T" (`current`; "unknown" means absent) | rotation metadata | "last changed" against the incident start |
 | "Secret S: rotation is overdue: last rotated T, interval N days" | the scheduled rotation did not happen | the rotation function's errors in `lambda.md` and its logs |
 | "Secret S changed inside the incident window, at T" | the stored value changed at T | a client that cached the old value, or a database not updated to match |
@@ -57,7 +61,7 @@ database login fails.
 3. **The trust policy does not include the caller.** Evidence: the error is from
    `AssumeRole`, and the caller's principal is not among the trusted principals. Work
    order: the role and the principal to add.
-4. **A KMS key is disabled or pending deletion.** Evidence: the key fact, errors that
+4. **A KMS key is disabled, pending deletion, or otherwise unusable.** Evidence: the key fact, errors that
    name the key or an invalid key state, and a start at the time the key changed.
    Work order: the key id, the state, the deletion date, who changed it (change
    evidence); mitigation is a person re-enabling or cancelling the deletion; permanent
