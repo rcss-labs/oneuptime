@@ -502,3 +502,61 @@ def test_service_event_summary_is_the_event_message(config_data, tmp_path):
     assert started.summary.startswith("(service checkout-api) has started 1 tasks")
     assert started.excerpt == long_message
     assert not any(f.summary == "Service event" for f in ctx.evidence.facts)
+
+
+# Resource ARNs
+
+SERVICE_ARN = f"arn:aws:ecs:eu-west-1:{ACCOUNT}:service/checkout/checkout-api"
+CLUSTER_ARN = f"arn:aws:ecs:eu-west-1:{ACCOUNT}:cluster/checkout"
+OLD_TASK_DEF_ARN = TASK_DEF_ARN.replace(":42", ":41")
+
+
+def _target_group(n):
+    return f"arn:aws:elasticloadbalancing:eu-west-1:{ACCOUNT}:targetgroup/checkout-{n}/0123456789abcdef"
+
+
+def _state_fact(ctx):
+    return next(f for f in ctx.evidence.facts if f.kind == "current" and f.summary.startswith("Service checkout-api is"))
+
+
+def test_service_state_fact_holds_the_arns_the_answer_returns(config_data, tmp_path):
+    svc = service(serviceArn=SERVICE_ARN, clusterArn=CLUSTER_ARN,
+                  loadBalancers=[{"targetGroupArn": _target_group(n), "containerName": "app", "containerPort": 8080} for n in range(23)],
+                  capacityProviderStrategy=[{"capacityProvider": "FARGATE", "weight": 1}, {"capacityProvider": "FARGATE_SPOT", "weight": 3}])
+    svc["services"][0]["deployments"].append({
+        "id": "ecs-svc/0", "status": "ACTIVE", "taskDefinition": OLD_TASK_DEF_ARN, "desiredCount": 1,
+        "runningCount": 1, "pendingCount": 0, "rolloutState": "COMPLETED", "createdAt": "2026-10-04T09:00:00+00:00"})
+    ctx, aws, kube = run(config_data, tmp_path, healthy_answers(**{"ecs describe-services": svc}))
+    data = _state_fact(ctx).data
+    assert data["arn"] == SERVICE_ARN
+    assert data["cluster_arn"] == CLUSTER_ARN
+    assert data["task_definition_arn"] == TASK_DEF_ARN
+    assert data["previous_task_definition_arn"] == OLD_TASK_DEF_ARN
+    assert data["target_group_arns"] == [_target_group(n) for n in range(20)]
+    assert data["target_group_arns_omitted"] == 3
+    assert data["capacity_providers"] == ["FARGATE", "FARGATE_SPOT"]
+    assert_read_only(ctx, aws)
+
+
+def test_service_answer_without_arns_writes_no_arn_keys(config_data, tmp_path):
+    svc = service()
+    svc["services"][0].pop("taskDefinition")
+    ctx, _, _ = run(config_data, tmp_path, healthy_answers(**{"ecs describe-services": svc}))
+    data = next(f for f in ctx.evidence.facts if f.summary.startswith("Service checkout-api is")).data
+    for key in ("arn", "cluster_arn", "task_definition_arn", "previous_task_definition_arn", "target_group_arns", "capacity_providers"):
+        assert key not in data
+
+
+def test_diff_fact_names_both_task_definition_arns(config_data, tmp_path):
+    current = {"taskDefinition": {"taskDefinitionArn": TASK_DEF_ARN, "family": "checkout-api", "revision": 42,
+                                  "containerDefinitions": [container(cpu=512)]}}
+    previous = {"taskDefinition": {"taskDefinitionArn": OLD_TASK_DEF_ARN, "family": "checkout-api", "revision": 41,
+                                   "containerDefinitions": [container(cpu=256)]}}
+    ctx, _, _ = make_context(config_data, tmp_path, healthy_answers(), collector="ecs")
+    ctx.runner = RevisionAws(healthy_answers(), current, previous)
+    COLLECTOR.run(ctx, dict(TARGETS))
+    diff = next(f for f in ctx.evidence.facts if "between revision" in f.summary)
+    assert diff.data["task_definition_arn"] == TASK_DEF_ARN
+    assert diff.data["previous_task_definition_arn"] == OLD_TASK_DEF_ARN
+    definition_fact = next(f for f in ctx.evidence.facts if f.summary.startswith("Task definition"))
+    assert definition_fact.data["task_definition_arn"] == TASK_DEF_ARN

@@ -18,6 +18,7 @@ CHANGE_CUT_MARKER = "… [change cut]"
 IMAGE = "image"
 MAX_EVENT_SUMMARY = 200
 MIN_IMAGE_PART = 100
+MAX_RELATED_ARNS = 20
 
 
 def _short_name(arn: str) -> str:
@@ -47,8 +48,32 @@ def _add_service_state(ctx: CollectContext, resource: str, service: dict) -> Non
             f"running {service.get('runningCount')}, pending {service.get('pendingCount')}, "
             f"task definition {_short_name(service.get('taskDefinition', ''))}"
         ),
-        data={key: service.get(key) for key in ("status", "desiredCount", "runningCount", "pendingCount")},
+        data={**{key: service.get(key) for key in ("status", "desiredCount", "runningCount", "pendingCount")},
+              **_service_arns(service)},
     )
+
+
+def _service_arns(service: dict) -> dict[str, Any]:
+    """The ARNs the describe-services answer returns for the service and what an action could target.
+    Capacity providers are named, not given by ARN, in that answer."""
+    arns: dict[str, Any] = {}
+    for key, field in (("arn", "serviceArn"), ("cluster_arn", "clusterArn"), ("task_definition_arn", "taskDefinition")):
+        if service.get(field):
+            arns[key] = service[field]
+    current = service.get("taskDefinition")
+    previous = next((d.get("taskDefinition") for d in service.get("deployments", [])
+                     if d.get("status") != "PRIMARY" and d.get("taskDefinition") and d.get("taskDefinition") != current), None)
+    if previous:
+        arns["previous_task_definition_arn"] = previous
+    groups = list(dict.fromkeys(lb["targetGroupArn"] for lb in service.get("loadBalancers", []) if lb.get("targetGroupArn")))
+    if groups:
+        arns["target_group_arns"] = groups[:MAX_RELATED_ARNS]
+        if len(groups) > MAX_RELATED_ARNS:
+            arns["target_group_arns_omitted"] = len(groups) - MAX_RELATED_ARNS
+    providers = [entry["capacityProvider"] for entry in service.get("capacityProviderStrategy", []) if entry.get("capacityProvider")]
+    if providers:
+        arns["capacity_providers"] = providers[:MAX_RELATED_ARNS]
+    return arns
 
 
 def _add_deployments(ctx: CollectContext, resource: str, service: dict) -> None:
@@ -135,7 +160,8 @@ def _add_task_definition(ctx: CollectContext, resource: str, reference: str, def
                 f"Task definition {reference} container {container.get('name')}: image {container.get('image')}, "
                 f"cpu {container.get('cpu')}, memory {container.get('memory')}{task_level}, environment variables {names}"
             ),
-            data={"container": container.get("name"), "environment": environment},
+            data={"container": container.get("name"), "environment": environment,
+                  **({"task_definition_arn": definition["taskDefinitionArn"]} if definition.get("taskDefinitionArn") else {})},
         )
 
 
@@ -235,6 +261,9 @@ def _add_definition_diff(ctx: CollectContext, resource: str, reference: str, cur
     data: dict[str, Any] = {"changes": lines[:MAX_CHANGES]}
     if len(lines) > MAX_CHANGES:
         data["changes_omitted"] = len(lines) - MAX_CHANGES
+    for key, definition in (("task_definition_arn", current), ("previous_task_definition_arn", previous)):
+        if definition.get("taskDefinitionArn"):
+            data[key] = definition["taskDefinitionArn"]
     ctx.evidence.add(
         kind=DERIVED, resource=resource, command=ctx.last_command, data=data,
         summary=_diff_summary(before, after, changes),
