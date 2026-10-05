@@ -26,6 +26,11 @@ def _overlaps_window(ctx: CollectContext, event: dict) -> bool:
     return ended is not None and ended >= ctx.window.start
 
 
+def _is_for_region(ctx: CollectContext, event: dict) -> bool:
+    """The event is in the collection's region or is global."""
+    return (event.get("region") or "global") in (ctx.region, "global")
+
+
 def _add_health(ctx: CollectContext) -> None:
     reply = ctx.aws(
         "health", "describe-events",
@@ -40,7 +45,13 @@ def _add_health(ctx: CollectContext) -> None:
             )
         return
     overlapping = [e for e in reply.get("events", []) if _overlaps_window(ctx, e)]
-    for event in overlapping[:MAX_HEALTH_FACTS]:
+    here = [e for e in overlapping if _is_for_region(ctx, e)]
+    if len(here) < len(overlapping):
+        ctx.evidence.add(
+            kind=DERIVED, resource="aws-health", command=ctx.last_command,
+            summary=f"{len(overlapping) - len(here)} events in other regions were left out",
+        )
+    for event in here[:MAX_HEALTH_FACTS]:
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=f"health/{event.get('service')}", time=event.get("startTime"),
             command=ctx.last_command,

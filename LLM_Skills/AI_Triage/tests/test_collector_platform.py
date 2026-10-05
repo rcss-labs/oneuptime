@@ -67,6 +67,34 @@ def test_events_overlapping_the_window_are_kept(config_data, tmp_path):
     assert "RDS" not in text and "S3" not in text
 
 
+def test_events_in_other_regions_are_left_out_and_counted(config_data, tmp_path):
+    events = [
+        health_event(service="EC2", region="eu-west-1"),
+        health_event(service="RDS", region="us-east-1"),
+        health_event(service="ECS", region="ap-south-1"),
+        health_event(service="IAM", region="global"),
+        {k: v for k, v in health_event(service="ROUTE53").items() if k != "region"},
+    ]
+    ctx, _, _ = run(config_data, tmp_path, {"health describe-events": {"events": events}})
+    text = " ".join(f.summary for f in ctx.evidence.facts if f.resource.startswith("health/"))
+    assert "EC2" in text and "IAM" in text and "ROUTE53" in text
+    assert "RDS" not in text and "ECS" not in text
+    notes = [f for f in ctx.evidence.facts if "other regions" in f.summary]
+    assert len(notes) == 1 and notes[0].kind == "derived"
+    assert notes[0].summary == "2 events in other regions were left out"
+
+
+def test_no_note_when_no_event_is_in_another_region(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, {"health describe-events": {"events": [health_event(region="eu-west-1")]}})
+    assert not any("other regions" in f.summary for f in ctx.evidence.facts)
+
+
+def test_events_outside_the_window_are_not_counted_as_other_region(config_data, tmp_path):
+    events = [health_event(service="S3", start=OUTSIDE, status="closed", end="2026-10-04T07:30:00+00:00", region="ap-south-1")]
+    ctx, _, _ = run(config_data, tmp_path, {"health describe-events": {"events": events}})
+    assert not any("other regions" in f.summary for f in ctx.evidence.facts)
+
+
 def test_health_facts_are_capped_at_thirty(config_data, tmp_path):
     events = [health_event(service=f"SVC{n}") for n in range(60)]
     ctx, _, _ = run(config_data, tmp_path, {"health describe-events": {"events": events}}, {"service_codes": "ecs"})
