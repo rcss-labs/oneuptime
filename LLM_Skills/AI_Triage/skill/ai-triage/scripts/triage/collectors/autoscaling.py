@@ -1,14 +1,38 @@
 """EC2 Auto Scaling collector: group state, scaling activities, instance refreshes, and ECS service scaling."""
 from __future__ import annotations
 
+import re
+
 from triage.collectors import Collector
 from triage.collectors.common import in_window, newest_in_window, parse_iso
 from triage.context import CollectContext
 from triage.evidence import CURRENT, INCIDENT_TIME
+from triage.window import format_time
 
 MAX_ACTIVITIES = "30"
 MAX_REFRESHES = "5"
 ACTIVE_REFRESH_STATES = frozenset({"Pending", "InProgress", "Cancelling", "RollbackInProgress"})
+
+
+_REASON_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})")
+
+
+def _suspended_processes_text(ctx: CollectContext, group: dict) -> str:
+    """The suspended processes with their reasons. The API has no separate time field; AWS puts
+    the time in the reason text ("User suspended at <time>"), so it is read from there."""
+    suspended = group.get("SuspendedProcesses") or []
+    if not suspended:
+        return "; no process is suspended"
+    parts = []
+    for process in suspended:
+        name, reason = process.get("ProcessName"), process.get("SuspensionReason") or ""
+        found = _REASON_TIME.search(reason)
+        if found and in_window(ctx.window, found.group(0)):
+            moment = format_time(parse_iso(found.group(0)))
+            parts.append(f"{name} suspended at {moment}, inside the incident window ({reason})")
+        else:
+            parts.append(f"{name} ({reason})" if reason else str(name))
+    return "; suspended processes: " + "; ".join(parts)
 
 
 def _add_group_state(ctx: CollectContext, resource: str, group: dict) -> None:
@@ -24,8 +48,12 @@ def _add_group_state(ctx: CollectContext, resource: str, group: dict) -> None:
             f"Group {group.get('AutoScalingGroupName')}: min {group.get('MinSize')}, max {group.get('MaxSize')}, "
             f"desired {group.get('DesiredCapacity')}, {len(instances)} instances, "
             f"health check {group.get('HealthCheckType')}, grace period {group.get('HealthCheckGracePeriod')} s{health}"
+            f"{_suspended_processes_text(ctx, group)}"
         ),
-        data={key: group.get(key) for key in ("MinSize", "MaxSize", "DesiredCapacity")},
+        data={
+            **{key: group.get(key) for key in ("MinSize", "MaxSize", "DesiredCapacity")},
+            "suspended_processes": [p.get("ProcessName") for p in group.get("SuspendedProcesses") or []],
+        },
     )
 
 

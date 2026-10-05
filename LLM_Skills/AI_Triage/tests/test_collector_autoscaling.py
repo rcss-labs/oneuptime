@@ -208,3 +208,36 @@ def test_absent_status_message_is_left_out(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, answers(**{"autoscaling describe-scaling-activities": {"Activities": [
         activity(code="Failed")]}}))
     assert "None" not in with_text(ctx, "FAILED")[0].summary
+
+
+def test_no_suspended_process_is_stated(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, answers())
+    assert "no process is suspended" in ctx.evidence.facts[0].summary
+
+
+def test_processes_suspended_before_the_window(config_data, tmp_path):
+    suspended = [
+        {"ProcessName": "Launch", "SuspensionReason": "User suspended at 2026-10-01T08:00:00Z"},
+        {"ProcessName": "ReplaceUnhealthy", "SuspensionReason": "User suspended at 2026-10-01T08:00:05Z"},
+    ]
+    ctx, _, _ = run(config_data, tmp_path, answers(**{
+        "autoscaling describe-auto-scaling-groups": group(SuspendedProcesses=suspended)}))
+    summary = ctx.evidence.facts[0].summary
+    assert "suspended processes: Launch (User suspended at 2026-10-01T08:00:00Z)" in summary
+    assert "ReplaceUnhealthy (User suspended at 2026-10-01T08:00:05Z)" in summary
+    assert "inside the incident window" not in summary
+    assert ctx.evidence.facts[0].data["suspended_processes"] == ["Launch", "ReplaceUnhealthy"]
+
+
+def test_process_suspended_inside_the_window_states_the_time(config_data, tmp_path):
+    suspended = [{"ProcessName": "Terminate", "SuspensionReason": "User suspended at 2026-10-04T10:15:00Z"}]
+    ctx, _, _ = run(config_data, tmp_path, answers(**{
+        "autoscaling describe-auto-scaling-groups": group(SuspendedProcesses=suspended)}))
+    assert "Terminate suspended at 2026-10-04T10:15:00Z, inside the incident window" in ctx.evidence.facts[0].summary
+
+
+def test_suspension_without_a_time_in_its_reason(config_data, tmp_path):
+    suspended = [{"ProcessName": "AZRebalance", "SuspensionReason": "Suspended by the service"}]
+    ctx, _, _ = run(config_data, tmp_path, answers(**{
+        "autoscaling describe-auto-scaling-groups": group(SuspendedProcesses=suspended)}))
+    assert "AZRebalance (Suspended by the service)" in ctx.evidence.facts[0].summary
