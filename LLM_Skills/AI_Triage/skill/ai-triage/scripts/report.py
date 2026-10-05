@@ -12,7 +12,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from triage.case import CaseError, load_case
+from triage.case import CaseError, load_case, resolve_case_dir
 from triage.config import ConfigError, default_config_path, load_config
 from triage.report import (
     OUTPUT_NAMES,
@@ -104,6 +104,17 @@ def _render(case_dir: Path, config, now: datetime, inputs: dict) -> int:
     return 0
 
 
+def _check_case_names_this_folder(case_dir: Path) -> None:
+    """case.json says where the run lives, and the library reads the judgments from there; it must be this folder."""
+    named = load_case(case_dir).get("case_dir")
+    try:
+        same = isinstance(named, str) and Path(named).resolve() == case_dir
+    except (OSError, RuntimeError):
+        same = False
+    if not same:
+        raise CaseError([f"{case_dir}/case.json: case_dir does not name this folder"])
+
+
 def _stale_note(case_dir: Path) -> str:
     renamed, failed = mark_stale(case_dir)
     parts = []
@@ -118,9 +129,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     outputs_at_risk = False
     try:
-        if not args.case_dir.is_dir():
-            raise CaseError([f"case folder not found: {args.case_dir}"])
         config = load_config(default_config_path(args.skill_dir))
+        args.case_dir = resolve_case_dir(args.case_dir, config)
+        _check_case_names_this_folder(args.case_dir)
         had_outputs = any((args.case_dir / name).exists() for name in OUTPUT_NAMES)
         reasons = render_is_current(args.case_dir)
         if had_outputs and reasons:

@@ -25,9 +25,14 @@ HYPOTHESIS_RESULTS = ("confirmed", "rejected", "inconclusive")
 ACTION_TYPES = ("mitigation", "permanent_fix")
 ACTION_LABELS = ("recommended", "candidate")
 WORK_ORDER_CAUSE_LABELS = LABEL_ORDER + ("unresolved",)
-WORK_ORDER_ACTION_KEYS = ("id", "type", "label", "title", "target", "current_state", "required_state", "change",
+WORK_ORDER_ACTION_KEYS = ("id", "type", "label", "cause", "title", "target", "current_state", "required_state", "change",
                           "rationale", "finding_ids", "risk", "blast_radius", "preconditions", "verification", "rollback")
-WORK_ORDER_KEYS = ("incident", "generated_at", "skill_version", "cause", "actions", "open_questions", "coverage_gaps")
+WORK_ORDER_KEYS = ("incident", "generated_at", "skill_version", "cause", "causes", "findings", "actions", "open_questions",
+                   "coverage_gaps")
+WORK_ORDER_OPTIONAL_KEYS = ("replay",)
+LABEL_WORD_RE = re.compile(r"\b(?:confirmed|probable|candidate|recommended|root\s+cause|typesafe)\b", re.IGNORECASE)
+REPLAY_LINE = "REPLAY: the evidence in this report comes from recordings, not from live systems."
+DISCOVERED_TARGET_TEXT = "The target was discovered, not mapped; a map entry is proposed after publishing."
 TARGET_KEYS = ("account_alias", "account_id", "region", "service", "resource_id", "arn")
 ACTION_TEXT_KEYS = ("title", "current_state", "required_state", "change", "rationale", "risk", "blast_radius")
 ACTION_LIST_KEYS = ("preconditions", "verification", "rollback")
@@ -593,6 +598,20 @@ def _check_typesafe_against_summary(report: dict, summary: dict | None, problems
         problems.append(f"coverage.typesafe: must equal the value stored in judgments/{SUMMARY_NAME}")
 
 
+def _check_hypothesis_results(parts: dict, summary: dict | None, problems: list[str]) -> None:
+    """A hypothesis may be confirmed only when its cause is judged probable or confirmed in the summary."""
+    only_cause = parts["causes"][0][1].get("id") if len(parts["causes"]) == 1 else None
+    for index, hypothesis in parts["hypotheses"]:
+        if hypothesis.get("result") != "confirmed":
+            continue
+        cause = hypothesis.get("cause")
+        cause_id = cause if isinstance(cause, str) else only_cause if cause is None else None
+        entry = _summary_entry((summary or {}).get("causes"), cause_id)
+        judged = entry.get("label") if entry else None
+        if not (isinstance(judged, str) and judged in ("probable", "confirmed")):
+            problems.append(f"hypotheses[{index}].result: confirmed, but no cause judged probable or confirmed backs it")
+
+
 def _check_judgments(report: dict, case: dict, parts: dict, findings: dict[str, dict], problems: list[str]) -> None:
     raw, unreadable = load_summary(case)
     if unreadable:
@@ -660,6 +679,21 @@ def _too_deep(value: Any) -> bool:
     return False
 
 
+def _check_label_words(report: dict, parts: dict, problems: list[str]) -> None:
+    """Free text that the draft digest covers may not state a label; labels are printed from the judgments."""
+    message = "labels are printed from the judgments; describe what happened without them"
+    texts: list[tuple[str, Any]] = []
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    texts += [(f"summary.{key}", summary.get(key)) for key in ("what_broke", "impact")]
+    questions = report.get("open_questions")
+    texts += [(f"open_questions[{i}]", item) for i, item in enumerate(questions if isinstance(questions, list) else [])]
+    texts += [(f"hypotheses[{i}].{key}", h.get(key)) for i, h in parts["hypotheses"] for key in ("statement", "prediction", "test")]
+    texts += [(f"actions[{i}].rationale", a.get("rationale")) for i, a in parts["actions"]]
+    for path, text in texts:
+        if isinstance(text, str) and LABEL_WORD_RE.search(text):
+            problems.append(f"{path}: {message}")
+
+
 def _draft_problems(report: Any, findings: dict[str, dict], config: TriageConfig) -> tuple[list[str], dict | None]:
     """The checks that do not depend on labels or judgments, and the parts of the draft they found."""
     if not isinstance(report, dict):
@@ -674,6 +708,7 @@ def _draft_problems(report: Any, findings: dict[str, dict], config: TriageConfig
     _check_status(report, parts, problems)
     _check_actions(config, parts, findings, problems)
     _check_hypothesis_causes(parts, problems)
+    _check_label_words(report, parts, problems)
     _check_secrets(report, problems)
     return problems, parts
 
@@ -702,6 +737,8 @@ def validate_report(report: Any, case: dict, findings: dict[str, dict], config: 
     _check_action_labels(parts, problems)
     _check_typesafe(report, parts, problems)
     _check_judgments(report, case, parts, findings, problems)
+    raw, unreadable = load_summary(case)
+    _check_hypothesis_results(parts, None if unreadable else _judged(raw), problems)
     return problems
 
 
@@ -802,6 +839,8 @@ def _case_shape_problems(case_dir: Path) -> list[str]:
         for key in ("url", "severity", "state", "declared_at", "impact_started_at", "resolved_at"):
             if not _optional_text(incident.get(key)):
                 problems.append(f"{where} incident.{key}: must be text or null")
+    if case.get("replay") is not None and not isinstance(case["replay"], bool):
+        problems.append(f"{where} replay: must be true or false")
     window = case.get("window")
     if not isinstance(window, dict) or not all(isinstance(window.get(key), str) for key in ("start", "end")):
         problems.append(f"{where} window: must be an object with text start and end")
@@ -872,15 +911,56 @@ def build_work_order(report: dict, case: dict, now: datetime, checked: dict | No
     for item in (checked or {}).get("unreadable") or []:
         if isinstance(item, dict):
             gaps.append(f"Finding file not read: {item.get('file')} ({item.get('reason')})")
-    return {
+    acted_on = {action["cause"] for action in report["actions"]}
+    causes = [{"id": c["id"], "statement": c["statement"], "label": c["label"], "finding_ids": list(c["supporting"])}
+              for c in report["causes"] if c["id"] in acted_on]
+    order = {
         "incident": {"number": incident["number"], "title": incident["title"], "url": incident.get("url") or ""},
         "generated_at": format_time(now),
         "skill_version": case["skill_version"],
         "cause": cause,
+        "causes": causes,
+        "findings": _cited_findings(causes, report["actions"], cause, checked),
         "actions": [{key: copy.deepcopy(action[key]) for key in WORK_ORDER_ACTION_KEYS} for action in report["actions"]],
         "open_questions": list(report["open_questions"]),
         "coverage_gaps": gaps,
     }
+    if case.get("replay") is True:
+        order["replay"] = True
+    return order
+
+
+def _cited_findings(causes: list[dict], actions: list[dict], top: dict, checked: dict | None) -> list[dict]:
+    """Claim, quote, and provenance of every finding the work order cites, in order of first mention."""
+    ids: list[str] = []
+    for source in (top, *causes, *actions):
+        for finding_id in source.get("finding_ids", []):
+            if finding_id not in ids:
+                ids.append(finding_id)
+    stored = {item.get("id"): item for item in (checked or {}).get("valid") or [] if isinstance(item, dict)}
+    return [{"id": finding_id, "claim": str(stored[finding_id].get("claim", "")),
+             "quote": str(stored[finding_id].get("excerpt", "")), "provenance": str(stored[finding_id].get("provenance", ""))}
+            for finding_id in ids if finding_id in stored]
+
+
+def _check_work_order_causes(work_order: dict, problems: list[str]) -> None:
+    for key, text_keys in (("causes", ("id", "statement")), ("findings", ("id", "claim", "quote", "provenance"))):
+        if key not in work_order:
+            problems.append(f"work order.{key}: missing")
+        elif not isinstance(work_order[key], list):
+            problems.append(f"work order.{key}: must be a list")
+        else:
+            for index, entry in enumerate(work_order[key]):
+                where = f"{key}[{index}]"
+                if not isinstance(entry, dict):
+                    problems.append(f"{where}: must be an object")
+                    continue
+                _only_keys(entry, text_keys + (("label", "finding_ids") if key == "causes" else ()), where, problems)
+                for text_key in text_keys:
+                    _text_field(entry, text_key, where, problems, required_text=text_key != "quote" and text_key != "claim" or True)
+                if key == "causes":
+                    _choice_field(entry, "label", LABEL_ORDER, where, problems)
+                    _string_list_field(entry, "finding_ids", where, problems)
 
 
 def validate_work_order(work_order: Any) -> list[str]:
@@ -888,7 +968,9 @@ def validate_work_order(work_order: Any) -> list[str]:
     if not isinstance(work_order, dict):
         return ["work order: must be a JSON object"]
     problems: list[str] = []
-    _only_keys(work_order, WORK_ORDER_KEYS, "work order", problems)
+    _only_keys(work_order, WORK_ORDER_KEYS + WORK_ORDER_OPTIONAL_KEYS, "work order", problems)
+    if "replay" in work_order and work_order["replay"] is not True:
+        problems.append("work order.replay: must be true when present")
     incident = _dict_field(work_order, "incident", "work order", problems)
     if incident is not None:
         _only_keys(incident, ("number", "title", "url"), "incident", problems)
@@ -909,6 +991,7 @@ def validate_work_order(work_order: Any) -> list[str]:
         _text_field(cause, "statement", "cause", problems)
         _choice_field(cause, "label", WORK_ORDER_CAUSE_LABELS, "cause", problems)
         _string_list_field(cause, "finding_ids", "cause", problems)
+    _check_work_order_causes(work_order, problems)
     if "actions" not in work_order:
         problems.append("work order.actions: missing")
     elif not isinstance(work_order["actions"], list):
@@ -921,7 +1004,7 @@ def validate_work_order(work_order: Any) -> list[str]:
             _only_keys(action, WORK_ORDER_ACTION_KEYS, f"actions[{index}]", problems)
             if isinstance(action.get("target"), dict):
                 _only_keys(action["target"], TARGET_KEYS, f"actions[{index}].target", problems)
-            _check_action_shape({**action, "cause": "-"}, f"actions[{index}]", problems)
+            _check_action_shape(action, f"actions[{index}]", problems)
     for key in ("open_questions", "coverage_gaps"):
         _string_list_field(work_order, key, "work order", problems)
     return problems
@@ -958,7 +1041,7 @@ def _inline(value: Any) -> str:
     """One line of safe text: whitespace collapsed so a field cannot start a heading or break a list, angle
     brackets written as entities so it cannot make HTML, and "](" broken so it cannot make a link."""
     text = " ".join(str(value).split()).replace("<", "&lt;").replace(">", "&gt;")
-    return text.replace("](", "] (").replace("`", "'")
+    return text.replace("](", "] (").replace("`", "'").replace("*", "\\*")
 
 
 def _time_text(value: Any) -> str:
@@ -1041,18 +1124,23 @@ def _field(label: str, value: Any) -> str:
     return f"- {label}: {_inline(value) if value not in (None, '') else '-'}"
 
 
-def _render_summary(report: dict) -> list[str]:
-    summary = report["summary"]
+def _judged_top_cause(report: dict, summary: dict | None) -> tuple[dict, str] | None:
+    """The top cause and its label from the judgments summary, or None when no cause was judged as the top."""
     top = _top_cause(report)
-    lines = ["## 1. Summary", "", f"**What broke:** {_inline(summary['what_broke'])}", "",
-             f"**Impact:** {_inline(summary['impact'])}", "", f"**Scope:** {_inline(summary['scope'])}", "",
+    entry = _summary_entry((summary or {}).get("causes"), top.get("id")) if top else None
+    label = entry.get("label") if entry else None
+    return (top, label) if top and isinstance(label, str) and label in LABEL_ORDER else None
+
+
+def _render_summary(report: dict, summary: dict | None) -> list[str]:
+    author = report["summary"]
+    judged = _judged_top_cause(report, summary)
+    what = f"{_inline(judged[0]['statement'])} ({_inline(judged[1])})" if judged else NO_CAUSE_TEXT
+    lines = ["## 1. Summary", "", f"**What broke:** {what}", "", f"**Scope:** {_inline(author['scope'])}", "",
              "**Symptoms:**", ""]
     lines += _bullets(report["symptoms"])
-    lines.append("")
-    if top:
-        lines.append(f"**Top cause ({top['label']}):** {_inline(top['id'])}: {_inline(top['statement'])}")
-    else:
-        lines.append(f"**Top cause:** {NO_CAUSE_TEXT}")
+    lines += ["", "**Author's summary (not scored)**", "",
+              f"- What broke: {_inline(author['what_broke'])}", f"- Impact: {_inline(author['impact'])}"]
     return lines
 
 
@@ -1089,12 +1177,25 @@ def _renderable(finding: Any) -> bool:
             and _text_list(finding.get("fact_ids")) and all(ID_RE.fullmatch(f) for f in finding["fact_ids"]))
 
 
+def _short_command(command: Any) -> str:
+    """A metric query command is shortened to the operation, metric names, statistic, and period."""
+    text = str(command or "")
+    if "get-metric-data" not in text or "MetricName" not in text:
+        return text or "-"
+    names = list(dict.fromkeys(re.findall(r"MetricName\W+([A-Za-z0-9_./-]+)", text)))
+    stat = re.search(r"(?<![A-Za-z])Stat\W+([A-Za-z0-9.]+)", text)
+    period = re.search(r"Period\W+(\d+)", text)
+    return (f"aws cloudwatch get-metric-data (metric {', '.join(names)}; statistic {stat.group(1) if stat else '-'}; "
+            f"period {period.group(1) + ' s' if period else '-'})")
+
+
 def _fact_line(fact_id: str, fact: dict | None) -> str:
     if fact is None or not isinstance(fact.get("id"), str) or not ID_RE.fullmatch(fact["id"]):
         return f"  - {_inline(fact_id)}: fact not available"
-    return (f"  - {_inline(fact_id)}: command `{_inline(fact.get('command') or '-')}`, "
+    line = (f"  - {_inline(fact_id)}: command `{_inline(_short_command(fact.get('command')))}`, "
             f"resource {_inline(fact.get('resource') or '-')}, time {_time_text(fact.get('time'))}, "
-            f"excerpt: {_inline(fact.get('excerpt') or fact.get('summary') or '-')}")
+            f"summary: {_inline(fact.get('summary') or '-')}")
+    return line + (f", excerpt: {_inline(fact['excerpt'])}" if fact.get("excerpt") else "")
 
 
 def _safe_rows(rows: list[dict]) -> list[dict]:
@@ -1127,6 +1228,7 @@ def _render_findings(findings: dict[str, dict], facts: dict[str, dict], summary:
         for finding in by_analyst[analyst]:
             lines += [f"**{_inline(finding['id'])}**: {_inline(finding.get('claim', '-'))}", "",
                       _field("Provenance", finding.get("provenance")), _field("Confidence", finding.get("confidence")),
+                      _field("Quote", finding.get("excerpt")),
                       _field("Cited facts", ", ".join(finding["fact_ids"]))]
             lines += [_fact_line(fact_id, facts.get(fact_id)) for fact_id in finding["fact_ids"]]
             lines += _finding_verdict_lines(finding["id"], summary)
@@ -1268,9 +1370,13 @@ def _render_coverage(report: dict, case: dict, evidence_gaps: list[dict], summar
     return lines
 
 
-def _render_map_changes(report: dict, checked: dict) -> list[str]:
+def _render_map_changes(report: dict, case: dict) -> list[str]:
     changes = [item if isinstance(item, str) else json.dumps(item, sort_keys=True) for item in report["map_changes"]]
-    return ["## 8. Proposed service map changes", ""] + (_bullets(changes) if changes else _none(checked))
+    target = case.get("target") if isinstance(case.get("target"), dict) else {}
+    lines = ["## 8. Proposed service map changes", ""] + (_bullets(changes) if changes else ["None."])
+    if target.get("source") == "discovered":
+        lines += ["", DISCOVERED_TARGET_TEXT]
+    return lines
 
 
 def _render_run(report: dict, case: dict, now: datetime) -> list[str]:
@@ -1292,15 +1398,16 @@ def render_report(report: dict, case: dict, findings: dict[str, dict], timeline_
     adhoc = (raw_summary or {}).get("adhoc") or []
     checked = _read_checked(case)
     blocks = [
-        [f"{REQUIRED_HEADINGS[0]} {_inline(incident['number'])} {_inline(incident['title'])}"],
-        _render_summary(report),
+        [f"{REQUIRED_HEADINGS[0]} {_inline(incident['number'])} {_inline(incident['title'])}"]
+        + (["", REPLAY_LINE] if case.get("replay") is True else []),
+        _render_summary(report, summary),
         _render_incident(case),
         ["## 3. Timeline", "", render_rows(_safe_rows(timeline_rows)) if timeline_rows else "\n".join(_none(checked))],
         _render_findings(findings, facts, summary, checked),
         _render_causes(report, summary, checked),
         _render_actions(report, summary, checked),
         _render_coverage(report, case, evidence_gaps, summary, adhoc, checked),
-        _render_map_changes(report, checked),
+        _render_map_changes(report, case),
         _render_run(report, case, now),
     ]
     text = "\n\n".join("\n".join(block) for block in blocks) + "\n"

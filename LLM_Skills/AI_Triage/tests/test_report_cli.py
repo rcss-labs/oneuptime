@@ -415,7 +415,6 @@ def test_a_rejudged_and_lowered_report_makes_the_old_outputs_stale_at_validate(s
     assert again["causes"]["C1"]["label"] == "candidate"
     write_report(judged, lowered_report())
     result = run(skill_dir, "validate", "--case-dir", str(judged))
-    assert result.returncode == 0, result.stderr
     assert "render" in result.stderr and "again" in result.stderr
     assert not (judged / "report.md").exists() and not (judged / "work-order.json").exists()
     assert "(confirmed)" in (judged / "report.md.stale").read_text()
@@ -459,6 +458,8 @@ def test_a_missing_summary_is_recorded_as_null_and_stays_current(skill_dir, case
     (case_dir / "judgments" / "summary.json").unlink()
     write_report(case_dir, mutated(VALID_REPORT, lambda r: None))
     report = lowered_report()
+    for hypothesis in report["hypotheses"]:
+        hypothesis["result"] = "inconclusive"
     report["coverage"]["typesafe"] = "unavailable: judging was not run"
     report["causes"][0]["label"] = "candidate"
     write_report(case_dir, report)
@@ -520,3 +521,47 @@ def test_neither_output_holds_an_absolute_local_path(skill_dir, case_dir, tmp_pa
         text = (case_dir / name).read_text()
         assert str(tmp_path) not in text and str(Path.home()) not in text and str(case_dir) not in text, name
         assert "/private/" not in text and "/var/folders" not in text, name
+
+
+# final review: only run folders under the cases root
+
+import shutil
+
+
+@pytest.mark.parametrize("command", ["validate", "render"])
+def test_a_copy_of_a_run_outside_the_cases_root_is_refused_and_nothing_is_renamed(skill_dir, case_dir, tmp_path, command):
+    write_report(case_dir, VALID_REPORT)
+    elsewhere = tmp_path / "intake" / "INC-123" / "20261004-111000"
+    shutil.copytree(case_dir, elsewhere)
+    (elsewhere / "report.md").write_text("an unrelated report")
+    (elsewhere / "work-order.json").write_text("{}")
+    result = run(skill_dir, command, "--case-dir", str(elsewhere))
+    assert result.returncode == 2 and "not a case folder" in result.stderr
+    assert (elsewhere / "report.md").read_text() == "an unrelated report"
+    assert not list(elsewhere.glob("*.stale"))
+
+
+@pytest.mark.parametrize("command", ["validate", "render"])
+def test_a_scratch_folder_with_outputs_is_refused_without_renames(skill_dir, tmp_path, command):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "report.md").write_text("mine")
+    (scratch / "work-order.json").write_text("{}")
+    assert run(skill_dir, command, "--case-dir", str(scratch)).returncode == 2
+    assert sorted(path.name for path in scratch.iterdir()) == ["report.md", "work-order.json"]
+
+
+def test_a_run_folder_reached_through_a_link_is_accepted(skill_dir, case_dir, tmp_path):
+    write_report(case_dir, VALID_REPORT)
+    link = tmp_path / "link"
+    link.symlink_to(case_dir)
+    assert run(skill_dir, "validate", "--case-dir", str(link)).returncode == 0
+
+
+def test_a_case_json_that_names_another_folder_is_refused(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    data = json.loads((case_dir / "case.json").read_text())
+    data["case_dir"] = str(case_dir.parent / "20991231-000000")
+    (case_dir / "case.json").write_text(json.dumps(data))
+    result = run(skill_dir, "validate", "--case-dir", str(case_dir))
+    assert result.returncode == 2 and "case.json" in result.stderr

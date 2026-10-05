@@ -513,14 +513,15 @@ def test_secret_in_any_field_is_reported_by_path_and_category_not_value(case, fi
 
 def test_work_order_matches_the_contract(case, findings, config):
     order = build_work_order(VALID_REPORT, case, RENDERED_AT)
-    assert set(order) == {"incident", "generated_at", "skill_version", "cause", "actions", "open_questions", "coverage_gaps"}
+    assert set(order) == {"incident", "generated_at", "skill_version", "cause", "causes", "findings", "actions",
+                          "open_questions", "coverage_gaps"}
     assert order["incident"] == {"number": "INC-123", "title": "Checkout API is down", "url": INCIDENT["url"]}
     assert order["generated_at"] == "2026-10-04T11:30:00Z"
     assert order["skill_version"] == "0.1.0"
     assert order["cause"] == {"statement": VALID_REPORT["causes"][0]["statement"], "label": "confirmed",
                               "finding_ids": ["compute-1"]}
     assert [a["id"] for a in order["actions"]] == ["A1", "A2"]
-    assert all("cause" not in action for action in order["actions"])
+    assert [action["cause"] for action in order["actions"]] == ["C1", "C1"]
     assert order["open_questions"] == ["Was the limit changed by hand?"]
     assert order["coverage_gaps"] == ["Application logs: No log group in the map"]
     assert validate_work_order(order) == []
@@ -638,7 +639,7 @@ def test_summary_and_incident_sections(case_dir, case):
     text = render(VALID_REPORT, case_dir, case)
     summary = section(text, "## 1. Summary")
     for needle in ("The checkout API stopped serving requests.", "Customers could not complete checkout",
-                   "Only checkout-api in prod", "The health check of checkout.example.com returns 502", "confirmed", "C1"):
+                   "Only checkout-api in prod", "The health check of checkout.example.com returns 502", "confirmed"):
         assert needle in summary
     incident = section(text, "## 2. Incident and window")
     for needle in (INCIDENT["url"], "Critical", "Acknowledged", "2026-10-04T10:42:00Z", "2026-10-04T10:45:00Z",
@@ -771,10 +772,12 @@ def test_secret_never_appears_in_rendered_output(case_dir, case, findings, confi
 # hypothesis cause key
 
 @pytest.mark.parametrize("value", [None, "C1", "C2"])
-def test_hypothesis_cause_may_be_null_a_cause_id_or_absent(case, findings, config, value):
+def test_hypothesis_cause_may_be_null_a_cause_id_or_absent(case_dir, case, findings, config, value):
     report = mutated(VALID_REPORT, lambda r: r["hypotheses"][1].update(cause=value))
+    rejudge(case_dir, report)
     assert problems_for(report, case, findings, config) == []
     report = mutated(VALID_REPORT, lambda r: r["hypotheses"][1].pop("cause"))
+    rejudge(case_dir, report)
     assert problems_for(report, case, findings, config) == []
 
 
@@ -1102,14 +1105,15 @@ def test_duplicate_ids_do_not_hide_later_problems(case, findings, config):
     assert_problem(problems, "causes[2]", "no supporting finding")
 
 
-def test_work_order_rejects_keys_outside_the_contract(case):
-    order = build_work_order(VALID_REPORT, case, RENDERED_AT)
+def test_work_order_rejects_keys_outside_the_contract(case, case_dir):
+    order = build_work_order(VALID_REPORT, case, RENDERED_AT, checked=checked_findings(case_dir))
     cases = [
         lambda o: o.update(extra=1),
         lambda o: o["incident"].update(extra=1),
         lambda o: o["cause"].update(extra=1),
         lambda o: o["actions"][0].update(extra=1),
-        lambda o: o["actions"][0].update(cause="C1"),
+        lambda o: o["causes"][0].update(extra=1),
+        lambda o: o["findings"][0].update(extra=1),
         lambda o: o["actions"][0]["target"].update(extra=1),
     ]
     for break_it in cases:
@@ -1260,7 +1264,7 @@ def empty_report(report):
 def test_empty_sections_say_what_the_analysts_checked(case_dir, case):
     write_checked(case_dir, checked={"compute": ["ECS service events", "stopped tasks"], "edge": ["Load balancer health"]})
     text = render(mutated(VALID_REPORT, empty_report), case_dir, case)
-    for heading in ("## 5. Ranked causes", "## 6. Remediation work order", "## 8. Proposed service map changes"):
+    for heading in ("## 5. Ranked causes", "## 6. Remediation work order"):
         body = section(text, heading)
         assert "ECS service events; stopped tasks" in body and "Load balancer health" in body, heading
         assert "compute" in body and "edge" in body
@@ -1276,7 +1280,6 @@ def test_none_alone_says_that_nothing_was_recorded(case_dir, case):
     write_checked(case_dir, checked={})
     text = render(mutated(VALID_REPORT, empty_report), case_dir, case)
     assert "None. No checks were recorded." in section(text, "## 5. Ranked causes")
-    assert "None. No checks were recorded." in section(text, "## 8. Proposed service map changes")
 
 
 def test_an_unreadable_evidence_file_is_a_coverage_gap(case_dir, case):
@@ -1604,11 +1607,11 @@ def test_a_label_only_edit_still_passes(judged, config):
     assert judged_problems(judged, config, report) == []
 
 
-def test_a_changed_hypothesis_or_open_question_does_not_change_the_draft(judged, config):
+def test_a_changed_hypothesis_or_open_question_changes_the_draft(judged, config):
     def edit(report):
         report["hypotheses"][0]["test"] = "Read the stopped task reasons again"
         report["open_questions"] = ["Another question"]
-    assert judged_problems(judged, config, mutated(VALID_REPORT, edit)) == []
+    assert_problem(judged_problems(judged, config, mutated(VALID_REPORT, edit)), "draft", "changed after judging")
 
 
 def test_the_draft_digest_is_recomputed_with_this_cases_identity(judged):
@@ -1647,6 +1650,7 @@ def failed_run(case_dir, case, config):
     ])
     check_findings(case_dir)
     (case_dir / "report.json").write_text(json.dumps(VALID_REPORT))
+    (case_dir / "report.json").write_text(json.dumps(all_candidate_report("available")))
     summary = run_judgments(case_dir, config, FakeJudge(lambda state, questions: {}), QUESTIONS, random.Random(1))
     assert summary["status"] == "failed" and summary["typesafe"].startswith("failed: "), summary
     return case_dir
@@ -1655,6 +1659,8 @@ def failed_run(case_dir, case, config):
 def all_candidate_report(typesafe, cause_label="candidate"):
     report = mutated(VALID_REPORT, lambda r: r["coverage"].update(typesafe=typesafe))
     report["status"], report["summary"]["top_cause"] = "unresolved", None
+    for hypothesis in report["hypotheses"]:
+        hypothesis["result"] = "inconclusive"
     for cause in report["causes"]:
         cause["label"] = cause_label if cause["id"] == "C1" else "candidate"
     report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
@@ -1883,3 +1889,211 @@ def test_a_draft_without_a_summary_file_has_the_same_draft_problems(case_dir, ca
 def test_check_draft_never_raises_on_the_wrong_types(findings, config):
     for value in (None, 5, [], "x", {}, {"status": []}):
         assert isinstance(check_draft(value, findings, config), list)
+
+
+# final review fixes
+
+REPLAY_LINE = "REPLAY: the evidence in this report comes from recordings, not from live systems."
+
+
+@pytest.mark.parametrize("word", ["confirmed", "probable", "candidate", "recommended", "root cause", "Root Cause",
+                                  "TypeSafe", "TYPESAFE", "CONFIRMED"])
+@pytest.mark.parametrize("where", [
+    ("summary", "what_broke"), ("summary", "impact"), ("open_questions", 0), ("hypotheses", 0, "statement"),
+    ("hypotheses", 0, "prediction"), ("hypotheses", 1, "test"), ("actions", 0, "rationale"),
+])
+def test_free_text_may_not_state_a_label(findings, config, word, where):
+    def put(report):
+        node = report
+        for step in where[:-1]:
+            node = node[step]
+        node[where[-1]] = f"The team says this is {word} and should be done now"
+    problems = check_draft(mutated(VALID_REPORT, put), findings, config)
+    path = where[0] + "".join(f"[{step}]" if isinstance(step, int) else f".{step}" for step in where[1:])
+    assert any(problem.startswith(path + ": labels are printed from the judgments; describe what happened without them")
+               for problem in problems), problems
+
+
+@pytest.mark.parametrize("text", ["The unconfirmed theory", "a candidates list", "recommendation", "probably slow",
+                                  "rootcause", "Containers are killed for memory"])
+def test_label_words_inside_other_words_are_fine(findings, config, text):
+    report = mutated(VALID_REPORT, lambda r: r["summary"].update(impact=text))
+    assert check_draft(report, findings, config) == []
+
+
+def test_label_words_are_fine_in_fields_the_scoring_covers(findings, config):
+    report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(statement="A confirmed memory limit problem"))
+    assert not any("labels are printed" in problem for problem in check_draft(report, findings, config))
+
+
+def test_a_confirmed_hypothesis_needs_a_cause_the_summary_labels_probable_or_confirmed(case_dir, case, findings, config):
+    assert problems_for(VALID_REPORT, case, findings, config) == []
+    summary = stored_summary_plain(case_dir)
+    summary["causes"]["C1"]["label"] = "candidate"
+    store_summary(case_dir, summary, digests=False)
+    problems = problems_for(VALID_REPORT, case, findings, config)
+    assert_problem(problems, "hypotheses[0].result", "confirmed")
+
+
+def stored_summary_plain(case_dir):
+    return json.loads((case_dir / "judgments" / "summary.json").read_text())
+
+
+def test_a_confirmed_hypothesis_without_a_judged_summary_is_a_problem(case_dir, case, findings, config):
+    remove_summary(case_dir)
+    report = mutated(UNRESOLVED_REPORT, lambda r: r["hypotheses"][0].update(result="confirmed", cause="C1"))
+    report["coverage"]["typesafe"] = "unavailable: judging was not run"
+    assert_problem(problems_for(report, case, findings, config), "hypotheses[0].result", "confirmed")
+
+
+def test_a_confirmed_hypothesis_with_no_cause_counts_only_for_a_single_cause_report(case_dir, case, findings, config):
+    def causeless(report):
+        report["hypotheses"][0]["cause"] = None
+    assert_problem(problems_for(mutated(VALID_REPORT, causeless), case, findings, config), "hypotheses[0].result")
+
+
+def test_inconclusive_and_rejected_hypotheses_need_no_judged_cause(case_dir, case, findings, config):
+    def soften(report):
+        report["hypotheses"][1]["result"] = "inconclusive"
+    report = mutated(VALID_REPORT, soften)
+    rejudge(case_dir, report)
+    assert problems_for(report, case, findings, config) == []
+
+
+def test_emphasis_markers_in_text_are_neutralised(case_dir, case):
+    def bold(report):
+        report["summary"]["scope"] = "Only **checkout** was hit and *payments* was not"
+    text = render(mutated(VALID_REPORT, bold), case_dir, case)
+    assert "**checkout**" not in text and "\\*\\*checkout" in text
+
+
+def summary_block(text):
+    return section(text, "## 1. Summary")
+
+
+def test_what_broke_is_the_judged_top_cause_with_its_label(case_dir, case):
+    block = summary_block(render(VALID_REPORT, case_dir, case))
+    first = block.strip().splitlines()[0]
+    assert first == "**What broke:** Revision 42 of checkout-api exits with code 137 because its memory limit is too low (confirmed)"
+    assert block.index("What broke") < block.index("Author's summary (not scored)")
+    author = block[block.index("Author's summary (not scored)"):]
+    assert "The checkout API stopped serving requests." in author and "Customers could not complete checkout" in author
+    assert "**Top cause" not in block
+
+
+def test_the_label_comes_from_the_summary_not_the_report(case_dir, case):
+    summary = stored_summary_plain(case_dir)
+    summary["causes"]["C1"]["label"] = "probable"
+    store_summary(case_dir, summary, digests=False)
+    assert "(probable)" in summary_block(render(VALID_REPORT, case_dir, case)).splitlines()[2]
+
+
+def test_without_a_judged_cause_the_page_says_none_was_established(case_dir, case):
+    block = summary_block(render(UNRESOLVED_REPORT, case_dir, case))
+    assert block.strip().splitlines()[0] == "**What broke:** No cause was established."
+    assert "Author's summary (not scored)" in block
+    remove_summary(case_dir)
+    assert "No cause was established." in summary_block(render(VALID_REPORT, case_dir, case)).splitlines()[2]
+
+
+def test_a_replay_case_prints_the_replay_line_under_the_title_and_marks_the_work_order(case_dir, case):
+    replay = {**case, "replay": True}
+    text = render_report(VALID_REPORT, replay, valid_findings(case_dir), [], [], RENDERED_AT)
+    lines = text.splitlines()
+    assert lines[0].startswith("# Triage report:") and lines[2] == REPLAY_LINE
+    assert build_work_order(VALID_REPORT, replay, RENDERED_AT)["replay"] is True
+    assert "replay" not in build_work_order(VALID_REPORT, case, RENDERED_AT)
+    assert REPLAY_LINE not in render_report(VALID_REPORT, case, valid_findings(case_dir), [], [], RENDERED_AT)
+
+
+def test_a_work_order_with_replay_validates_and_a_non_boolean_does_not(case):
+    order = build_work_order(VALID_REPORT, {**case, "replay": True}, RENDERED_AT)
+    assert validate_work_order(order) == []
+    order["replay"] = "yes"
+    assert_problem(validate_work_order(order), "replay")
+
+
+def test_case_json_replay_must_be_a_boolean(case_dir):
+    rewrite_case(case_dir, lambda d: d.update(replay="yes"))
+    assert any("replay" in problem for problem in check_case_inputs(case_dir)[1])
+
+
+def test_each_finding_shows_its_own_quote_and_each_fact_its_summary_and_excerpt(case_dir, case):
+    findings_section = section(render(VALID_REPORT, case_dir, case), "## 4. Findings")
+    assert "- Quote: exit code 137" in findings_section
+    assert "summary: Essential container exited with code 137" in findings_section
+    assert "excerpt: desired 2, running 0" in findings_section
+    first_fact = next(line for line in findings_section.splitlines() if "ecs-0001" in line and "command" in line)
+    assert "excerpt" not in first_fact or "exit code 137" in first_fact
+
+
+METRIC_COMMAND = ("aws --profile triage-prod-main cloudwatch get-metric-data --region eu-west-1 --metric-data-queries "
+                  + json.dumps([{"Id": "m0", "MetricStat": {"Metric": {"Namespace": "AWS/ECS", "MetricName": "CPUUtilization",
+                                                                      "Dimensions": [{"Name": "ServiceName", "Value": "x" * 800}]},
+                                                       "Period": 60, "Stat": "Average"}, "ReturnData": True}])
+                  + " --start-time 2026-10-04T10:00:00Z --end-time 2026-10-04T12:00:00Z")
+
+
+def test_a_metric_command_is_shortened_to_operation_metric_statistic_and_period(case_dir, case):
+    path = next((case_dir / "evidence").glob("ecs-*.json"))
+    document = json.loads(path.read_text())
+    document["facts"][0]["command"] = METRIC_COMMAND
+    path.write_text(json.dumps(document))
+    text = section(render(VALID_REPORT, case_dir, case), "## 4. Findings")
+    assert "get-metric-data" in text and "CPUUtilization" in text and "Average" in text and "60" in text
+    assert "x" * 100 not in text and "--metric-data-queries" not in text
+
+
+def test_other_commands_are_not_shortened(case_dir, case):
+    assert "aws ecs describe-tasks" in section(render(VALID_REPORT, case_dir, case), "## 4. Findings")
+
+
+def test_the_work_order_keeps_each_actions_cause_and_lists_every_cause_with_an_action(case_dir, case):
+    def second(report):
+        report["actions"][1]["cause"] = "C2"
+    report = mutated(VALID_REPORT, second)
+    order = build_work_order(report, case, RENDERED_AT, checked=checked_findings(case_dir))
+    assert [a["cause"] for a in order["actions"]] == ["C1", "C2"]
+    assert [(c["id"], c["label"]) for c in order["causes"]] == [("C1", "confirmed"), ("C2", "candidate")]
+    assert order["causes"][0]["statement"] == VALID_REPORT["causes"][0]["statement"]
+    assert order["causes"][0]["finding_ids"] == ["compute-1"]
+    assert validate_work_order(order) == []
+
+
+def test_a_cause_without_an_action_is_not_listed(case_dir, case):
+    order = build_work_order(VALID_REPORT, case, RENDERED_AT, checked=checked_findings(case_dir))
+    assert [c["id"] for c in order["causes"]] == ["C1"]
+
+
+def test_the_work_order_embeds_each_cited_findings_claim_quote_and_provenance(case_dir, case):
+    order = build_work_order(VALID_REPORT, case, RENDERED_AT, checked=checked_findings(case_dir))
+    assert order["findings"] == [{"id": "compute-1", "claim": "Containers exit with code 137",
+                                  "quote": "exit code 137", "provenance": "incident_time"}]
+
+
+def test_findings_cited_only_by_an_action_are_embedded_once(case_dir, case):
+    def cite(report):
+        report["actions"][1]["finding_ids"] = ["compute-2", "compute-1"]
+    order = build_work_order(mutated(VALID_REPORT, cite), case, RENDERED_AT, checked=checked_findings(case_dir))
+    assert [f["id"] for f in order["findings"]] == ["compute-1", "compute-2"]
+
+
+def test_the_work_order_findings_must_have_text_fields(case, case_dir):
+    order = build_work_order(VALID_REPORT, case, RENDERED_AT, checked=checked_findings(case_dir))
+    order["findings"][0]["quote"] = 5
+    assert_problem(validate_work_order(order), "findings[0].quote")
+    order = build_work_order(VALID_REPORT, case, RENDERED_AT)
+    order.pop("findings")
+    assert_problem(validate_work_order(order), "findings", "missing")
+
+
+def test_section_8_does_not_print_the_check_list_and_says_a_discovered_target_is_proposed(case_dir, case):
+    write_checked(case_dir, checked={"compute": ["ECS service events"]})
+    text = render(mutated(VALID_REPORT, lambda r: None), case_dir, case)
+    assert section(text, "## 8. Proposed service map changes").strip() == "None."
+    discovered = {**case, "target": {"source": "discovered", "service": None, "environment": None, "account": "prod-main",
+                                     "region": "eu-west-1", "resources": {}, "depends_on": []}}
+    block = section(render_report(VALID_REPORT, discovered, valid_findings(case_dir), [], [], RENDERED_AT),
+                    "## 8. Proposed service map changes")
+    assert "The target was discovered, not mapped; a map entry is proposed after publishing." in block
+    assert "ECS service events" not in block
