@@ -334,3 +334,28 @@ def test_the_guard_allows_collect_in_the_skills_form(tmp_path, monkeypatch):
                            "--case-dir", str(case.case_dir)], home)
     assert command.startswith('"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/case.py" collect')
     assert decide(command, context).kind == ALLOW
+
+
+# a case folder is only ever a run folder under the cases root
+
+@pytest.mark.parametrize("subcommand, extra", [
+    ("show", []), ("plan", []), ("collect", []),
+    ("target", ["--service", "checkout-api", "--environment", "prod"]),
+])
+def test_a_copy_of_a_run_outside_the_cases_root_is_refused_with_exit_2_and_nothing_is_written(
+        skill_dir, case_dir, tmp_path, subcommand, extra):
+    import shutil
+    forged = tmp_path / "intake" / "INC-123" / "20261004-110000"
+    shutil.copytree(case_dir, forged)
+    before = sorted((p.relative_to(forged), p.stat().st_mtime_ns) for p in forged.rglob("*"))
+    result = run(skill_dir, subcommand, "--case-dir", str(forged), *extra)
+    assert_clean_exit_2(result)
+    assert "not a case folder under" in result.stderr
+    assert before == sorted((p.relative_to(forged), p.stat().st_mtime_ns) for p in forged.rglob("*"))
+    assert not list((forged / "evidence").glob("*"))
+
+
+def test_a_run_folder_given_through_a_link_still_works(skill_dir, case_dir, tmp_path):
+    link = tmp_path / "link"
+    link.symlink_to(case_dir)
+    assert run(skill_dir, "show", "--case-dir", str(link)).returncode == 0

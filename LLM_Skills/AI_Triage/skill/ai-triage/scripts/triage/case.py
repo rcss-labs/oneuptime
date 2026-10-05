@@ -235,6 +235,23 @@ def _check_case_shape(case: Any, path: Path) -> None:
         raise CaseError([f"{path}: is not a valid case file"])
 
 
+def resolve_case_dir(path: Path, config: TriageConfig) -> Path:
+    """The real path of a case folder, or a CaseError.
+
+    A case folder is exactly <cases root>/<incident folder>/<run folder> after links are resolved, an existing
+    folder with a case.json. The guard protects the script-owned files only at that depth, so a copy of a run
+    anywhere else must never be read, validated, rendered, or published."""
+    root = config.cases_dir.resolve()
+    refusal = CaseError([f"{path}: not a case folder under {root}"])
+    try:
+        real = Path(path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise refusal from None
+    if real.parent.parent != root or not real.is_dir() or not (real / "case.json").is_file():
+        raise refusal
+    return real
+
+
 def load_case(case_dir: Path) -> dict:
     path = case_dir / "case.json"
     if not path.is_file():

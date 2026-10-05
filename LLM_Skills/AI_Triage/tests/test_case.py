@@ -9,6 +9,7 @@ from triage.case import (
     incident_keys,
     load_case,
     parse_incident,
+    resolve_case_dir,
     save_case,
     set_target_from_discovery,
     set_target_from_map,
@@ -505,3 +506,68 @@ def test_a_cut_never_splits_an_entity(cases_config, service_map, skill_dir):
 def test_a_value_within_the_cap_after_escaping_is_not_cut(cases_config, service_map, skill_dir):
     text = case_md_values(cases_config, service_map, skill_dir, title="<" * 75)
     assert "(cut)" not in text
+
+
+# resolve_case_dir: a case folder is only ever <cases root>/<incident>/<run>
+
+import shutil
+
+
+def test_a_run_folder_under_the_cases_root_is_accepted(cases_config, service_map, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    assert resolve_case_dir(case_dir, cases_config) == case_dir.resolve()
+
+
+def test_a_link_to_a_run_folder_resolves_to_the_real_folder(cases_config, service_map, skill_dir, tmp_path):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    link = tmp_path / "shortcut"
+    link.symlink_to(case_dir)
+    assert resolve_case_dir(link, cases_config) == case_dir.resolve()
+
+
+def _copy(case_dir, target):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(case_dir, target)
+    return target
+
+
+@pytest.mark.parametrize("place", [
+    "elsewhere/INC-123/20261004-110000",          # a copy outside the cases root
+    "sibling-root/INC-123/20261004-110000",
+    "cases/intake/INC-123/20261004-110000",       # one level too deep
+    "cases/INC-123/20261004-110000/evidence-copy",  # one level deeper still
+    "cases/20261004-110000",                      # one level too shallow
+    "cases",                                      # the root itself
+])
+def test_a_folder_that_is_not_exactly_root_incident_run_is_refused(cases_config, service_map, skill_dir, tmp_path, place):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    copy = _copy(case_dir, tmp_path / place) if place != "cases" else cases_config.cases_dir
+    if place == "cases":
+        (copy / "case.json").write_text((case_dir / "case.json").read_text())
+    with pytest.raises(CaseError) as caught:
+        resolve_case_dir(copy, cases_config)
+    assert "not a case folder under" in str(caught.value) and "\n" not in str(caught.value)
+
+
+def test_a_link_that_leaves_the_cases_root_is_refused(cases_config, service_map, skill_dir, tmp_path):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    outside = _copy(case_dir, tmp_path / "outside" / "INC-123" / "run")
+    (cases_config.cases_dir / "INC-9").mkdir()
+    (cases_config.cases_dir / "INC-9" / "20261004-110000").symlink_to(outside)
+    with pytest.raises(CaseError):
+        resolve_case_dir(cases_config.cases_dir / "INC-9" / "20261004-110000", cases_config)
+
+
+def test_a_folder_without_case_json_or_that_does_not_exist_is_refused(cases_config, service_map, skill_dir):
+    make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    empty = cases_config.cases_dir / "INC-9" / "20261004-110000"
+    empty.mkdir(parents=True)
+    for path in (empty, cases_config.cases_dir / "INC-9" / "20260101-000000"):
+        with pytest.raises(CaseError):
+            resolve_case_dir(path, cases_config)
+
+
+def test_a_file_is_refused(cases_config, service_map, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    with pytest.raises(CaseError):
+        resolve_case_dir(case_dir / "case.json", cases_config)

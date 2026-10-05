@@ -17,6 +17,7 @@ from triage.case import (
     create_case,
     load_case,
     parse_incident,
+    resolve_case_dir,
     set_target_from_discovery,
     set_target_from_map,
 )
@@ -128,6 +129,8 @@ def main(argv: list[str] | None = None) -> int:
     handler = {"init": _init, "target": _target, "plan": _plan, "collect": _collect, "show": _show}[args.subcommand]
     try:
         config = load_config(default_config_path(args.skill_dir))
+        if getattr(args, "case_dir", None) is not None:
+            args.case_dir = resolve_case_dir(args.case_dir, config)
         return handler(args, config)
     except (ConfigError, MapError, CaseError) as error:
         return _fail("; ".join(error.errors))
