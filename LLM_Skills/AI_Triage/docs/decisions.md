@@ -148,6 +148,51 @@ The guard is the hook that approves or refuses commands. "Platform" covers the p
 - **Why:** `run_aws` has the same defence, added after a review found it ran anything.
 - **Cost if wrong:** None.
 
+#### G29. Case folders are only run folders
+- **Decision:** A case folder is only `<cases_dir>/<incident>/<run>`, and every command checks this before it reads or writes.
+- **Why:** The guard protects script-owned files at that depth only. A case copied elsewhere could be edited by hand and published with a forged label (final review A-C1).
+- **Cost if wrong:** A case folder moved by hand no longer works.
+
+#### G30. The hook decides connector calls
+- **Decision:** The hook also decides connector calls. OneUptime write tools are denied, Slack tools that send or change anything ask, and a Confluence page write is allowed only with the exact body that the publish audit recorded.
+- **Why:** "Ask before Slack" was only an instruction to the agent (A-I2, B-I-8).
+- **Cost if wrong:** Tool names are matched by words, so an unusual connector name falls through to the normal prompt. Whether skill hooks fire inside subagents stays unverified, and analysts stay read-only by instruction.
+
+#### G31. Replay is recorded and cannot be published
+- **Decision:** Replay mode is recorded in `case.json`, in every evidence file and on the first line of the report, and publishing a replay case is refused. Replay itself is strict: an unrecorded call is an error and explicit empty answers are recorded.
+- **Why:** A recording must not invent facts, and a report built from recordings must not reach Confluence (A-I3).
+- **Cost if wrong:** None known.
+
+#### G32. Policy trimmed, access check widened
+- **Decision:** The usage-plans command leaves the API Gateway playbook, 18 policy actions that nothing used were removed (the policy now has 77), and every read that rests on `ViewOnlyAccess` is simulated by `verify_access.py`.
+- **Why:** The document could not say what `ViewOnlyAccess` contains, so the owner's first verify run is made to answer it (A-I4, A-M4).
+- **Cost if wrong:** A playbook lead that needed a removed action now needs a policy edit.
+
+#### G33. More denials in the AWS guard
+- **Decision:** `--cli-input-json` and `--cli-input-yaml` are denied, EC2 user data and DynamoDB stream records are denied, and the word after `aws` must be a real service name. A follow-up asks for reads that return launch templates or build environments and denies VPN connection reads.
+- **Why:** Each of these could return secrets or hide a different command from the checker (A-I5).
+- **Cost if wrong:** An occasional prompt for such a read.
+
+#### G34. The installer stays blocked
+- **Decision:** The fix that stops the installer copying the two stray folders waits for the owner's word to delete them. Keeping the raw intake file after a run (A-M9) is a stated limit.
+- **Why:** The permission system denied the delete earlier, and a denied action goes to the owner (see G16).
+- **Cost if wrong:** The installer would copy the stray folders as a nested second skill until the owner acts.
+
+#### G35. One command wrapper and one exit-code table
+- **Decision:** Every script's main goes through one wrapper (`triage/cli.py`) with one exit-code table. A config or map that is not UTF-8 is an invalid-file error, `opensearch_query.py` never overwrites evidence, `collect.py` and `opensearch_query.py` accept only run folders, and `case.py collect` exits non-zero when a collector failed. One owner made the change because every script's main was touched.
+- **Why:** The final quality review found tracebacks, silent replacement of evidence files and inconsistent exit codes (C-I1, C-I4, C-M6).
+- **Cost if wrong:** A broad but mechanical diff.
+
+#### G36. Surviving mutations get tests
+- **Decision:** The weak spots that the quality review found by mutation each get a test from their owner: a recommended action needs a confirmed cause, `read_audited` compares the audited hash, `map_suggest apply` keeps its three safety checks, the guard's name normalisation is pinned, and the audit scan writes invisible characters as escapes. `timeline.md` is dropped from the protected names, because `timeline.json` is the file that exists.
+- **Why:** The tests caught 67 of 81 deliberate defects, and the others were real gaps.
+- **Cost if wrong:** None.
+
+#### G37. Quality items parked or left for last
+- **Decision:** Explicit UTF-8 on every read and write (C-M5) is to be done last as one mechanical pass, when no owner is editing. Duplicated rules, private imports, dead code, the breadth of the hygiene test, suite cost and small items (C-M1, M2, M3, M8, M10, M11) are parked and stated, not fixed now. The note that plans 02 to 05 are superseded is added with this documentation pass.
+- **Why:** None of them changes what a user meets, and each would be a refactor across other owners' files late in the round.
+- **Cost if wrong:** The parked items remain. The UTF-8 pass has not landed yet.
+
 ## Evidence and collectors
 
 #### E1. Unique evidence file names
@@ -240,6 +285,51 @@ The guard is the hook that approves or refuses commands. "Platform" covers the p
 - **Why:** The expiry fact had no time, so the timing gate always failed and an expired certificate could never be a confirmed cause.
 - **Cost if wrong:** None.
 
+#### E19. ECR states the repository name only
+- **Decision:** The ECR collector states the repository name and registry id only. It makes no extra `describe-repositories` call for the ARN.
+- **Why:** The call would need a permission that the policy was not checked for.
+- **Cost if wrong:** An ARN the engineer can derive.
+
+#### E20. Metric points are sorted
+- **Decision:** (Replaced by E22.) Metric facts sort their points and give the earliest peak.
+- **Why:** Peaks were reported from unsorted data.
+- **Cost if wrong:** None.
+
+#### E21. Change lookups also go by event source
+- **Decision:** CloudTrail change lookups also go by event source, and the absence fact says only what was asked.
+- **Why:** A lookup by name alone missed changes made through another resource name, and an absence fact claimed more than the lookup showed (B-I-3).
+- **Cost if wrong:** Up to 10 more pages per source. The assumption about event-source short names is unverified until the live check.
+
+#### E22. Metric facts say lowest, highest and the first departure
+- **Decision:** Metric summaries state the lowest and highest values with their times, compare the incident part with the same time last week, and name the first point where the series left its baseline.
+- **Why:** A peak alone hid a series that had dropped, and it gave no reference to say whether the value was unusual (B-I-1).
+- **Cost if wrong:** Every recorded metric summary changed wording.
+
+#### E23. The plan uses the new map keys and one level of dependencies
+- **Decision:** The collection plan runs `alarms`, `ecr` and `opensearch_domain` from the new map keys, and a light set (changes, and alarms when mapped) for each direct dependency in `depends_on`. `vpc` and `access` stay lead-following, and the playbooks say so.
+- **Why:** The collectors existed but nothing ran them (B-I-2).
+- **Cost if wrong:** More calls per run. Dependency depth is one only.
+
+#### E24. Discovery saves its own output
+- **Decision:** `discover.py --save` writes its output under the intake folder and still saves when nothing was found, with what it tried. Dead ends are named in the skill text and in the ask list.
+- **Why:** The agent had to save discovery output by a Write call that the guard did not expect (B-I-5).
+- **Cost if wrong:** None.
+
+#### E25. A failed read never becomes an absence
+- **Decision:** A property test across all collectors checks that a failed read never produces an absence statement. The access collector said a failed role policy listing could not be read.
+- **Why:** A statement that nothing was found is evidence, and a failed read is not (C-I2).
+- **Cost if wrong:** The test does not probe kubectl calls, and for alarms, ecr and logs it covers the first call only.
+
+#### E26. Collectors state resource ARNs
+- **Decision:** Collectors state the ARNs of their resources from the answers they already read.
+- **Why:** A work order without exact identifiers is not actionable (from the instruction-text test log).
+- **Cost if wrong:** None.
+
+#### E27. Collection runs with one command
+- **Decision:** `case.py collect` runs the whole collection plan, at most four collectors at a time, and prints what each wrote.
+- **Why:** Ten copied commands per run invite mistakes and permission prompts (from the instruction-text test log).
+- **Cost if wrong:** A failed collector shows in the exit code and in the counts, not only in a file.
+
 ## Redaction
 
 #### R1. Secret names by components
@@ -277,10 +367,10 @@ The guard is the hook that approves or refuses commands. "Platform" covers the p
 - **Why:** Patching shapes one by one had not converged.
 - **Cost if wrong:** Some harmless long tokens are masked.
 
-#### R8. IP addresses stay visible
-- **Decision:** IP addresses are not masked. Phone numbers with a leading `+` are.
-- **Why:** IP addresses are needed for triage.
-- **Cost if wrong:** Client IP addresses appear in internal reports.
+#### R8. Public IP addresses are masked
+- **Decision:** (Corrected after the final review: this entry first said that IP addresses are not masked, which the code never did.) Public IPv4 addresses are masked as `<IP-n>`, and the numbering restarts in each evidence file. Private addresses stay readable. Phone numbers with a leading `+` are masked. IPv6 addresses are not.
+- **Why:** A public page is safer without public addresses, and private addresses are what an engineer needs to follow a request inside the network.
+- **Cost if wrong:** "The app points to y but it is on z" reads as two masks when y and z are both public addresses.
 
 #### R9. Values shown by value type
 - **Decision:** Environment values are shown by value type for each kind of setting name. The secret-name check has one source, `redact.looks_secret_key`, which strips digits and knows abbreviations. Under a secret-like name only a URL origin is shown.
@@ -306,6 +396,11 @@ The guard is the hook that approves or refuses commands. "Platform" covers the p
 - **Decision:** A short follow-up, not a fix round, took the reviewer's first choice (user information in URLs without a scheme), a prose exemption, three names, Windows shapes and secret-name table cells. Everything else in that review is a stated limit.
 - **Why:** The round limit was reached, and no open item was judged load-bearing.
 - **Cost if wrong:** A leak in one of the stated limits (see the README).
+
+#### R14. A value after a secret word is masked whatever its shape
+- **Decision:** A value after a secret word is masked in the redactor whatever its shape. The second detector independently flags values of 16 or more characters after a secret word. What stays readable: values under 8 characters, a single word of up to 15 letters, numbers of up to 14 digits, letter-only names, ARNs and passphrases written as words joined by dashes.
+- **Why:** A 32-hex key and a UUID passed all three layers and would have reached the scoring service (A-C2).
+- **Cost if wrong:** Some resource names after "key" or "secret" are masked or prompt at publish time. UUID KMS key ids are over-masked. The readable shapes above are a stated limit.
 
 ## Findings
 
@@ -364,6 +459,11 @@ The guard is the hook that approves or refuses commands. "Platform" covers the p
 - **Why:** It only makes the findings check stricter.
 - **Cost if wrong:** None.
 
+#### F12. The judge sees the quoted passage
+- **Decision:** Every evidence item in a finding's state carries `quoted`, the checked matched text.
+- **Why:** The judge was sent each cited fact's summary and excerpt, not the passage the finding quoted, so a clearly evidenced cause stayed probable in a live run.
+- **Cost if wrong:** Up to 500 characters more per finding.
+
 ## Judging
 
 #### J1. Digest of whole objects
@@ -421,6 +521,16 @@ The guard is the hook that approves or refuses commands. "Platform" covers the p
 - **Why:** A looser rule would let a changed action keep its judged label.
 - **Cost if wrong:** A paid re-run for a cosmetic edit.
 
+#### J12. The timing gate has no lower bound inside the window
+- **Decision:** The timing gate keeps no lower bound inside the window.
+- **Why:** A cause may precede its effect by any amount of time.
+- **Cost if wrong:** A cause far earlier in the window is not penalised for timing.
+
+#### J13. The evidence gate stays strict
+- **Decision:** Every listed supporting finding must be verified. The skill text gives the agent the way out: rewrite an uncertain finding's claim to what its quote says, or take it off the cause's list, and judge again, at most twice.
+- **Why:** Listing only solid support is the behaviour wanted.
+- **Cost if wrong:** Up to two more judging runs.
+
 ## Report
 
 #### RP1. Safe ids, quiet messages, stale outputs
@@ -442,6 +552,16 @@ The guard is the hook that approves or refuses commands. "Platform" covers the p
 - **Decision:** The report and work order never print an absolute local path. The case folder is shown relative to the cases root.
 - **Why:** The report published the home folder and tripped the audit.
 - **Cost if wrong:** None.
+
+#### RP5. Report free text may not state a label
+- **Decision:** Report free text is covered by the draft digest and may not state a label. "What broke" on the page is the judged top cause. The author's own sentences are printed under "author's summary, not scored". No new scored question was added for the summary.
+- **Why:** One more judgment kind in a final fix round is more risk than the deterministic rule (A-I1, B-I-7).
+- **Cost if wrong:** A misleading but label-free author sentence can still be printed, under that heading.
+
+#### RP6. Quotes and causes on the page and in the work order
+- **Decision:** The report prints each finding's quote and both the summary and the excerpt of each cited fact. The work order carries each action's cause, the cited claims and the quotes.
+- **Why:** A reader could not check a claim without opening the evidence (B-I-6, B-I-9).
+- **Cost if wrong:** A longer report.
 
 ## Publishing
 
@@ -495,6 +615,11 @@ The guard is the hook that approves or refuses commands. "Platform" covers the p
 - **Why:** The reviewer's open items were one condition and a list of exemptions.
 - **Cost if wrong:** A late finding if an exemption is wrong.
 
+#### P11. The publish request names the body format and the default channel
+- **Decision:** The Confluence request names the body format and the Slack default channel. After publishing, the agent reads the page back and saves the body, and `publish.py verify-confluence` compares its hash with the audited report.
+- **Why:** The agent could not know that the page it wrote was the audited text (B-I-8).
+- **Cost if wrong:** Unverified until the live check, because the connector cannot be exercised here. There is no `confluence.space_id` config field yet; the request prints a note.
+
 ## Skill text
 
 These come from the test log of the instruction files, not from the ledgers' ruling lines. The instructions were written after two baseline runs without the skill.
@@ -514,11 +639,22 @@ These come from the test log of the instruction files, not from the ledgers' rul
 - **Why:** The playbook writers found several gaps between what the collectors did and what the text could say.
 - **Cost if wrong:** The text and the collectors drift apart when a test is skipped.
 
+#### S4. Intake has its own reference file
+- **Decision:** `reference/intake.md` maps OneUptime tool results to the incident file, written from the reviewer's field mapping and marked as not run against a live OneUptime.
+- **Why:** The agent had no source for which tool gave which field (B-I-4).
+- **Cost if wrong:** Two details are unconfirmed: the monitor URL inside `monitorSteps` and the time field of a public note.
+
 ## Open items
 
 These need the owner.
 
-- **Two stray folders and the installer fix.** `skill/ai-triage/ai-triage/` and `skill/ai-triage/skills/` are untracked folders that an earlier installer run created inside the repository (G16). The owner removes them. Until then `install.sh` and `tests/test_install.py` hold an uncommitted fix for installing through a path that contains a symbolic link, and that fix has not been verified.
-- **The live check.** Task 15 (G6) has not been run: install the skill into a real home folder and run it in Claude Code against real AWS accounts, a real OneUptime, Confluence and Slack. This also shows whether skill hooks cover subagents.
-- **Commits whose co-author line names a different model than the session's.** The ledgers record the three foundation commits for tasks 4 to 6, whose message folded the body and a Haiku co-author line into the subject, and the guard round 4 commits `fe117c991d` and `7ad4b2a120`, whose co-author line names another model. Co-author lines elsewhere name the model that wrote each commit. None were rewritten, because rewriting history needs the owner's consent.
-- **Rulings to confirm or reverse.** Every entry above was decided by the coordinating model. The ones with the largest cost if wrong are G9, G19 (more prompts), R8 and P6 (what a report may show), P5 (override by the engineer only) and J11 (judging again after an edit).
+- **Two stray folders and the installer fix.** `skill/ai-triage/ai-triage/` and `skill/ai-triage/skills/` are untracked folders that an earlier installer run created inside the repository (G16, G34). The owner removes them. Until then `install.sh` and `tests/test_install.py` hold an uncommitted fix for installing through a path that contains a symbolic link, and that fix has not been verified.
+- **The live check.** Install the skill into a real home folder and run it in Claude Code against real accounts. It has to settle:
+  - a run against real AWS accounts and a real OneUptime, including the intake shapes (`reference/intake.md`, two unconfirmed details);
+  - the connector trial: a Confluence page write and read-back, the space id, and Slack to people as well as a channel;
+  - CloudTrail lookups by resource name and by event source on a known change;
+  - the ViewOnlyAccess grants, through `verify_access.py` (the simulated action names are unverified);
+  - whether skill hooks fire inside subagents;
+  - the calibration of the TypeSafe thresholds, which are uncalibrated starting values.
+- **Commits whose co-author line names a different model than the session's.** The ledgers record the three foundation commits for tasks 4 to 6, whose message folded the body and a Haiku co-author line into the subject, and the guard round 4 commits `fe117c991d` and `7ad4b2a120`. Co-author lines elsewhere name the model that wrote each commit. None were rewritten, because rewriting history needs the owner's consent.
+- **Rulings to confirm or reverse.** Every entry above was decided by the coordinating model. The ones with the largest cost if wrong are G9, G19 (more prompts), R8 and R14 (what a report may show), P5 (override by the engineer only), J11 (judging again after an edit) and RP5 (author text under its own heading).
