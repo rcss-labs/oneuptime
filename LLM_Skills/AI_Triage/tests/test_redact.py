@@ -1072,7 +1072,7 @@ RULING_11_SECRET_NAMES = [
     "DB_PASS1", "DbPassword2", "DB_TOKEN2", "SERVICE_SECRET2", "DB_KEY1", "REDIS_AUTH1_HOST",
     # long stems anywhere inside a part
     "pass", "passwd", "password", "secret", "token", "cred", "auth", "session", "cookie",
-    "bearer", "signature", "hmac", "MyPassValue", "x_sessionx",
+    "bearer", "signature", "hmac", "MyPassValue", "session_token", "sessionid",
     "github_bearer_value", "X-Amz-Signature", "hmacvalue", "license_key", "private_key",
     # short stems as whole parts, key and pwd also at the end of a part
     "db_key", "apikey", "db_pwd", "mysqlpwd", "psw", "pswd", "psk", "sk", "pat", "pin",
@@ -2170,3 +2170,75 @@ def test_cost_grows_linearly(shape):
 
     small, large = best_time(200_000), best_time(400_000)
     assert large < 3 * max(small, 0.05), (shape, small, large)
+
+
+
+# ---------------------------------------------------------------------------
+# Resource names that look like secret names
+# ---------------------------------------------------------------------------
+
+RESOURCE_NAMES = [
+    "sessions", "user-sessions", "auth", "auth-service", "tokens", "api-keys", "secrets", "credentials-store",
+    "password-reset", "private", "license-server", "signing-keys", "cookie-jar",
+]
+SUMMARY_SHAPES = [
+    "Event on {name}: Failover from master node {name}-001 to replica",
+    "Service {name} is ACTIVE: desired 3, running 0, pending 3",
+    "Instance {name} endpoint is db.internal.example.com port 5432",
+    "Alarm {name} went into ALARM: Threshold Crossed",
+    "Queue {name}: 1200 messages visible, oldest 340 seconds",
+    "Function {name}: timeout 30 seconds, memory 512 MB",
+    "Secret {name}: rotation enabled, last rotated 40 days ago",
+    "Target on {name}: unhealthy (Target.FailedHealthChecks)",
+]
+
+
+@pytest.mark.parametrize("shape", SUMMARY_SHAPES)
+@pytest.mark.parametrize("name", RESOURCE_NAMES)
+def test_collector_summaries_about_resources_named_like_secrets_are_kept(name, shape):
+    source = shape.format(name=name)
+    assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "Event on sessions-001: Failover from master node sessions-001 to replica",
+        "Event on sessions-001: old",
+        "Target on sessions: unhealthy",
+        "role for auth: missing permission",
+        "Event on sessions-001: auth failed",
+    ],
+)
+def test_reported_resource_lines_are_kept(source):
+    assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize(
+    "source, secret",
+    [
+        ("Event on cache-1: password=" + PUNCT_PW + " rejected", PUNCT_PW),
+        ("config: session_token=" + PUNCT_PW, PUNCT_PW),
+        ("sessions: " + "Zq7" * 9, "Zq7" * 9),
+        ("Event on sessions-001: auth failed token=" + PUNCT_PW, PUNCT_PW),
+        ("2026-10-04 10:00:00 ERROR password: " + PUNCT_PW, PUNCT_PW),
+        ("[INFO] api_key: " + PUNCT_PW, PUNCT_PW),
+        ("level=info db_password: " + PUNCT_PW, PUNCT_PW),
+        ("session: " + PUNCT_PW, PUNCT_PW),
+    ],
+)
+def test_real_assignments_in_the_same_shapes_are_still_masked(source, secret):
+    assert secret not in Redactor().text(source)
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("sessions", False), ("session-store", False), ("user-sessions", False), ("SessionStore", False),
+        ("session", True), ("session_id", True), ("sessionid", True), ("session_token", True), ("session_key", True),
+        ("session_secret", True), ("session_cookie", True), ("sessiontoken", True), ("SessionId", True),
+        ("sessions-001", False), ("session-1", True),
+    ],
+)
+def test_session_names(name, expected):
+    assert looks_secret_key(name) is expected

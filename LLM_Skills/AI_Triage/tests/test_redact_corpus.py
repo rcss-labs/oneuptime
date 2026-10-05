@@ -430,6 +430,9 @@ HARMLESS = [
     ("secret-name-table", "| Secret | Rotated |\n|---|---|\n| prod/db | yes |"),
     ("git-ssh-colon", "git clone git@github.com:org/repo.git"),
     ("status-prose", "password: not set"),
+    ("elasticache-failover", "Event on sessions-001: Failover from master node sessions-001 to replica"),
+    ("target-unhealthy", "Target on sessions: unhealthy (Target.FailedHealthChecks)"),
+    ("secret-rotation-summary", "Secret auth-service: rotation enabled, last rotated 40 days ago"),
     # round 5 ruling 6: labelled commits and AWS request ids
     ("git-commit", "deployed commit " + _hex(60, 40) + " to prod"),
     ("image-tag-sha", "image tag " + _hex(61, 40)),

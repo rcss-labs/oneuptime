@@ -56,9 +56,13 @@ SECRET_WORDS = frozenset({
 # Long stems match anywhere inside a part (round 5: private, license and licence only count
 # together with key, and cred, auth and code have their own rules in _holds_secret_stem).
 LONG_SECRET_STEMS = (
-    "pass", "passwd", "password", "secret", "token", "session", "cookie", "bearer", "signature", "hmac",
+    "pass", "passwd", "password", "secret", "token", "cookie", "bearer", "signature", "hmac",
     "tkn", "pword", "psswd",
 )
+# "session" is secret as a bare key, as sessionid/sessiontoken ..., or before one of these parts;
+# sessions, session-store and user-sessions name things, not secrets.
+SESSION_SECRET_NEXT = frozenset({"id", "token", "key", "secret", "cookie"})
+SESSION_SECRET_WORDS = frozenset({"sessionid", "sessiontoken", "sessionkey", "sessionsecret", "sessioncookie"})
 # Words inside which "auth" names a secret; a whole part "auth" does too. Not author, authorize ...
 AUTH_SECRET_WORDS = ("authorization", "authentication", "authtoken")
 # Whole English words that hold a long stem but never name a secret ("Gates passed: ...").
@@ -194,8 +198,10 @@ def _holds_secret_stem(part: str) -> bool:
 
 def _secret_part(parts: tuple[str, ...], raw: tuple[str, ...], index: int) -> bool:
     part = parts[index]
-    if _holds_secret_stem(part):
+    if _holds_secret_stem(part) or part in SESSION_SECRET_WORDS:
         return True
+    if part == "session":
+        return index == len(parts) - 1 or parts[index + 1] in SESSION_SECRET_NEXT
     if part in ("license", "licence") and index == len(parts) - 1:
         return True  # NEW_RELIC_LICENSE; LicenseModel never gets here (its ending wins)
     if part == "code":
@@ -222,6 +228,8 @@ def looks_secret_key(key: str) -> bool:
     parts = _name_parts(key)
     if not parts:
         return False
+    if any(a == "session" and b == "id" for a, b in zip(parts, parts[1:])):
+        return True  # session_id is a bearer value, though it ends in id
     env_style = parts[-1] in ENV_STYLE_SECRET_ENDINGS and bool(_ENV_STYLE_RE.fullmatch(key))
     if parts[-1] in NAME_ENDINGS and not env_style:
         return False
@@ -432,6 +440,31 @@ _STATUS_WORDS = frozenset({
 })
 _PROSE_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'-]*[.,:;!?)]*|[\d:.TZ+-]+[.,;)]*")
 _LITERAL_THEN_PAIR_RE = re.compile(r"(?P<word>\S+)[ \t]+[\w.\-]+=")
+
+
+_KEY_SEPARATORS = ",;{[|&?\"'(]>)"
+_LOG_LEVEL_WORDS = frozenset({"trace", "debug", "info", "notice", "warn", "warning", "error", "err", "fatal", "critical", "crit"})
+_PAIR_TOKEN_RE = re.compile(r"\S*[=:]\S+")
+BARE_PLURAL_NAMES = frozenset({"tokens", "keys", "secrets", "sessions", "cookies", "credentials", "passwords"})
+
+
+def _stands_as_key(text: str, key_start: int, line_start: int) -> bool:
+    """Whether a word stands where a key can stand: at the start of a line, after a separator or a
+    quote, or after a previous key=value pair, timestamp, log level or bracketed prefix. A word after
+    an ordinary word ("Event on sessions-001:") is part of a phrase, not a key."""
+    cursor = key_start
+    while cursor > line_start and text[cursor - 1] in " \t":
+        cursor -= 1
+    if cursor == line_start:
+        return True
+    if text[cursor - 1] in _KEY_SEPARATORS:
+        return True
+    if cursor == key_start:
+        return True  # glued to what is before it (repr, escaped JSON)
+    space = max(text.rfind(" ", max(line_start, cursor - 200), cursor), text.rfind("\t", max(line_start, cursor - 200), cursor))
+    previous = text[space + 1 if space != -1 else max(line_start, cursor - 200):cursor]
+    return (previous.endswith((":", "-", "--", "|")) or bool(_PAIR_TOKEN_RE.fullmatch(previous))
+            or previous.strip("[]()<>").lower() in _LOG_LEVEL_WORDS)
 
 
 def _literal_then_pair(value: str) -> bool:
@@ -767,6 +800,12 @@ def _key_value_spans(text: str) -> list[Span]:
             continue
         value = text[span[0]:span[1]]
         first_word = value.split(None, 1)[0] if value.strip() else value
+        token_form = sep == "=" or sep.strip() in ("=>", ":=")  # NAME=value, Ruby and Go assignments
+        if not token_form and not _stands_as_key(text, match.start("key"), line_start):
+            continue
+        if (sep.strip() == ":" and not quote and _name_parts(key.lstrip("-")) and len(value.split()) >= 2
+                and "".join(_name_parts(key.lstrip("-"))) in BARE_PLURAL_NAMES):
+            continue  # "secrets: rotation enabled": a bare plural followed by prose (key-like words still hit the token rule)
         unquoted_colon = "=" not in sep and text[span[0] - 1:span[0]] not in ("'", '"')
         if unquoted_colon and quote and sep[:1] in " \t":
             continue  # "db-creds" : secret ... is a quoted word in prose, not a key
