@@ -6,7 +6,7 @@ from datetime import timedelta
 from triage.collectors import Collector
 from triage.collectors.common import parse_iso, was_not_found
 from triage.context import CollectContext
-from triage.evidence import CURRENT, DERIVED
+from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
 from triage.metrics import MetricSpec, add_metric_facts
 from triage.window import describe_offset, format_time
 
@@ -226,23 +226,26 @@ def _add_certificate(ctx: CollectContext, resource: str, arn: str) -> None:
     name = f"{_last_segment(arn)}"
     not_after = parse_iso(certificate.get("NotAfter"))
     until = f", valid until {format_time(not_after)}" if not_after else ""
+    # The status is read now but names the expiry time; the expiry fact below is an incident fact when it
+    # falls inside the window.
+    kind = INCIDENT_TIME if not_after and ctx.window.contains(not_after) else CURRENT
     ctx.evidence.add(
-        kind=CURRENT, resource=resource, command=ctx.last_command,
+        kind=CURRENT, resource=resource, time=not_after, command=ctx.last_command,
         summary=f"Certificate {name} ({certificate.get('DomainName') or 'no domain'}) is {certificate.get('Status')}{until}",
     )
     if not_after is None:
         return
-    end = ctx.window.end
-    offset = describe_offset(not_after, end)
+    when = f"{format_time(not_after)}, {describe_offset(not_after, ctx.window.start)} the window start"
     if ctx.window.contains(not_after):
-        text = f"Certificate {name} expired at {format_time(not_after)}, inside the incident window"
-    elif not_after <= end:
-        text = f"Certificate {name} expired {offset} the window end"
-    elif not_after - end <= CERTIFICATE_WARNING:
-        text = f"Certificate {name} expires {offset} the window end"
+        text = f"Certificate {name} expired at {format_time(not_after)}, inside the incident window, " \
+               f"{describe_offset(not_after, ctx.window.start)} the window start"
+    elif not_after <= ctx.window.end:
+        text = f"Certificate {name} expired at {when}"
+    elif not_after - ctx.window.end <= CERTIFICATE_WARNING:
+        text = f"Certificate {name} expires at {when}"
     else:
         return
-    ctx.evidence.add(kind=DERIVED, resource=resource, command=ctx.last_command, summary=text)
+    ctx.evidence.add(kind=kind, resource=resource, time=not_after, command=ctx.last_command, summary=text)
 
 
 def _normal_name(name: str) -> str:

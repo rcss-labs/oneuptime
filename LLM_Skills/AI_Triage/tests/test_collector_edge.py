@@ -69,6 +69,13 @@ def run(config_data, tmp_path, answers, targets=None):
     return ctx, aws, kube
 
 
+def expiry_fact(ctx):
+    found = [f for f in ctx.evidence.facts
+             if f.summary.startswith("Certificate") and ("expired at" in f.summary or "expires at" in f.summary)]
+    assert len(found) == 1
+    return found[0]
+
+
 def derived_facts(ctx):
     return [f for f in ctx.evidence.facts if f.kind == "derived" and "no data" not in f.summary]
 
@@ -209,16 +216,18 @@ def certificate(not_after):
 
 def test_certificate_that_expired_before_the_window(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, healthy_answers(**certificate("2026-10-01T12:00:00+00:00")))
-    derived = [f for f in ctx.evidence.facts if f.kind == "derived" and "Certificate" in f.summary][0]
-    assert "expired" in derived.summary and "3 days before" in derived.summary
+    expiry = expiry_fact(ctx)
+    assert "expired at 2026-10-01T12:00:00Z" in expiry.summary and "2 days 22 hours before the window start" in expiry.summary
+    assert expiry.kind == "current" and expiry.time == "2026-10-01T12:00:00Z"
     assert by_summary(ctx, "ISSUED")[0].kind == "current"
 
 
 def test_certificate_expiring_in_ten_days(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, healthy_answers(**certificate("2026-10-14T12:00:00+00:00")))
-    derived = [f for f in ctx.evidence.facts if f.kind == "derived" and "Certificate" in f.summary][0]
-    assert "expires" in derived.summary and "10 days after" in derived.summary
-    assert "expired" not in derived.summary
+    expiry = expiry_fact(ctx)
+    assert "expires at 2026-10-14T12:00:00Z" in expiry.summary and "10 days 2 hours after the window start" in expiry.summary
+    assert "expired" not in expiry.summary
+    assert expiry.kind == "current" and expiry.time == "2026-10-14T12:00:00Z"
 
 
 def test_certificate_valid_for_a_year_has_no_derived_fact(config_data, tmp_path):
@@ -331,8 +340,10 @@ def test_network_load_balancer_uses_only_host_count_metrics(config_data, tmp_pat
 
 def test_certificate_that_expired_inside_the_window(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, healthy_answers(**certificate("2026-10-04T11:00:00+00:00")))
-    derived = [f for f in ctx.evidence.facts if f.kind == "derived" and "Certificate" in f.summary][0]
-    assert "expired at 2026-10-04T11:00:00Z, inside the incident window" in derived.summary
+    expiry = expiry_fact(ctx)
+    assert "expired at 2026-10-04T11:00:00Z, inside the incident window" in expiry.summary
+    assert "1 hour after the window start" in expiry.summary
+    assert expiry.kind == "incident_time" and expiry.time == "2026-10-04T11:00:00Z"
 
 
 def test_iam_server_certificates_are_not_sent_to_acm(config_data, tmp_path):
@@ -423,3 +434,18 @@ def test_a_failed_certificate_list_falls_back_to_listener_order(config_data, tmp
 
 def value_of_option(call, option):
     return call[call.index(option) + 1]
+
+
+def test_a_certificate_that_expired_seconds_before_the_incident_is_a_timed_incident_fact(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, healthy_answers(**certificate("2026-10-04T11:59:55+00:00")))
+    expiry = expiry_fact(ctx)
+    assert expiry.kind == "incident_time" and expiry.time == "2026-10-04T11:59:55Z"
+    assert "expired at 2026-10-04T11:59:55Z, inside the incident window" in expiry.summary
+    status = by_summary(ctx, "ISSUED")[0]
+    assert status.kind == "current" and status.time == "2026-10-04T11:59:55Z"
+
+
+def test_a_certificate_valid_for_a_year_still_carries_its_expiry_time(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, healthy_answers(**certificate("2027-10-04T12:00:00+00:00")))
+    status = by_summary(ctx, "ISSUED")[0]
+    assert status.kind == "current" and status.time == "2027-10-04T12:00:00Z"
