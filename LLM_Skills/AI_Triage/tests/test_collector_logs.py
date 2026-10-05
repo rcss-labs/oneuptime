@@ -1,3 +1,5 @@
+import pytest
+
 from helpers import assert_read_only, fact_summaries, make_context
 from triage.collectors.logs import COLLECTOR, run_query
 
@@ -293,3 +295,14 @@ def test_unparseable_line_time_gives_a_derived_fact_without_time(config_data, tm
     assert "could not be read" in bad.summary
     good = [f for f in ctx.evidence.facts if f.excerpt == "ERROR fine"][0]
     assert good.kind == "incident_time"
+
+
+# Fix round 4
+
+@pytest.mark.parametrize("answer", [{}, {"queryId": ""}, {"queryId": None}, []])
+def test_start_query_answer_without_a_query_id_is_an_evidence_error(config_data, tmp_path, answer):
+    ctx, fake, _ = make_context(config_data, tmp_path, {"logs start-query": answer}, collector="logs")
+    assert run_query(ctx, GROUPS, "q", sleep=Sleeper()) is None
+    assert [error["code"] for error in ctx.evidence.errors] == ["QueryNotStarted"]
+    assert "queryId" in ctx.evidence.errors[0]["message"]
+    assert not fake.called("logs", "get-query-results")

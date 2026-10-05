@@ -15,6 +15,7 @@ DEFAULT_PATTERN = "(?i)(error|exception|fatal|panic|timed? ?out|refused|denied|o
 POLL_SECONDS = 1
 QUERY_FAILED = "QueryFailed"
 QUERY_TIMEOUT = "QueryTimeout"
+QUERY_NOT_STARTED = "QueryNotStarted"
 _FAILED_STATUSES = ("Failed", "Cancelled", "Timeout")
 MAX_BUCKET_FACTS = 60
 
@@ -37,8 +38,11 @@ def run_query(
         "logs", "start-query",
         ["--log-group-names", *log_groups, "--start-time", str(start), "--end-time", str(end), "--query-string", query],
     )
-    query_id = (started or {}).get("queryId")
+    if started is None and ctx.last_error is not None:  # the failed call is already recorded
+        return None
+    query_id = started.get("queryId") if isinstance(started, dict) else None
     if not query_id:
+        ctx.evidence.add_error(ctx.last_command, QUERY_NOT_STARTED, "start-query answered without a queryId")
         return None
     waited = 0
     while True:
