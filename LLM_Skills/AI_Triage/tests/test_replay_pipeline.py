@@ -29,6 +29,7 @@ from replay_support import (
     start_case,
 )
 from triage.config import load_config
+from triage.fixtures import FIXTURE_ENV
 from triage.findings import (
     REPEATS_REQUEST,
     asked_strings,
@@ -416,14 +417,131 @@ def test_publishing_after_a_change_to_report_json_needs_a_new_render(scenario, t
     case.judge(favourable_judge(folder), apply_labels=True)
     case.render(required=True)
     report = read_json(case.case_dir / "report.json")
-    report["open_questions"].append("Who approved the change, and when?")
+    report["run"]["duration_minutes"] += 1  # a field the judgments do not cover, so a new render is still valid
     (case.case_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-    refused = case.script("publish audit", "publish.py", "audit", "--case-dir", str(case.case_dir), required=False)
+    refused = case.script("publish audit", "publish.py", "audit", "--case-dir", str(case.case_dir), "--allow-replay",
+                          required=False)
     assert refused["returncode"] == 1 and "rendered again" in refused["stderr"]
     assert not (case.case_dir / "audit.json").exists()
     case.render(required=True)
     case.publish()
     assert read_json(case.case_dir / "audit.json")["clean"] is True
+
+
+# --- replay is visible, and a copied run is refused --------------------------------------------
+
+def test_a_replay_case_carries_the_replay_mark_everywhere(run):
+    case_dir = run["case_dir"]
+    assert read_json(case_dir / "case.json")["replay"] is True
+    assert all(read_json(path)["replay"] is True for path in (case_dir / "evidence").glob("*.json"))
+    report = (case_dir / "report.md").read_text().splitlines()
+    assert report[0].startswith("# Triage report:")
+    assert "REPLAY: the evidence in this report comes from recordings, not from live systems." in report[1:4]
+    assert read_json(case_dir / "work-order.json")["replay"] is True
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_publishing_a_replay_case_needs_allow_replay(scenario, tmp_path):
+    folder = REPLAY_DIR / scenario
+    case = start_case(folder, tmp_path)
+    case.judge(favourable_judge(folder), apply_labels=True)
+    case.render(required=True)
+    for name in ("audit", "confluence", "slack-message"):
+        refused = case.script(f"publish {name} without the option", "publish.py", name, "--case-dir", str(case.case_dir),
+                              required=False)
+        assert refused["returncode"] == 1 and "replay" in refused["stderr"], name
+        assert refused["stdout"] == ""
+    assert not (case.case_dir / "audit.json").exists() and not (case.case_dir / "slack-message.md").exists()
+    allowed = case.script("publish audit with the option", "publish.py", "audit", "--case-dir", str(case.case_dir), "--allow-replay")
+    assert allowed["returncode"] == 0
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_a_copy_of_a_finished_run_is_refused_by_validate_render_judge_and_publish(scenario, tmp_path, monkeypatch):
+    folder = REPLAY_DIR / scenario
+    case = start_case(folder, tmp_path)
+    case.judge(favourable_judge(folder), apply_labels=True)
+    case.render(required=True)
+    cases_root = case.case_dir.parents[1]
+    copies = [tmp_path / "elsewhere" / "run", cases_root / "INC-copy"]  # outside the cases root, and one level too shallow
+    for copy in copies:
+        shutil.copytree(case.case_dir, copy)
+    # The same commands work on the real run, so each refusal below is about the folder, not about the command.
+    validate = case.script("validate the real run", "report.py", "validate", "--case-dir", str(case.case_dir))
+    assert validate["returncode"] == 0
+    judge_main = _judge_main()
+    monkeypatch.setenv(FIXTURE_ENV, str(folder))
+    assert judge_main(["run", "--case-dir", str(case.case_dir), "--skill-dir", str(case.skill_dir)], judge=favourable_judge(folder)) == 0
+    for copy in copies:
+        refused = [
+            case.script("validate a copy", "report.py", "validate", "--case-dir", str(copy), required=False),
+            case.script("render a copy", "report.py", "render", "--case-dir", str(copy), required=False),
+            case.script("audit a copy", "publish.py", "audit", "--case-dir", str(copy), "--allow-replay", required=False),
+            case.script("confluence a copy", "publish.py", "confluence", "--case-dir", str(copy), "--allow-replay", required=False),
+            case.script("slack a copy", "publish.py", "slack-message", "--case-dir", str(copy), "--allow-replay", required=False),
+        ]
+        for record in refused:
+            assert record["returncode"] == 2 and "not a case folder under" in record["stderr"], (record["step"], record["stderr"])
+        judge = FakeJudge({})
+        code = judge_main(["run", "--case-dir", str(copy), "--skill-dir", str(case.skill_dir)], judge=judge)
+        assert code == 2 and judge.calls == []
+        assert not (copy / "work-order.json.tmp").exists()
+    for copy in copies:  # nothing was written into a copy, either
+        assert (copy / "audit.json").read_bytes() == (case.case_dir / "audit.json").read_bytes() if (copy / "audit.json").exists() else True
+        assert not (copy / "slack-message.md").exists() or not (case.case_dir / "slack-message.md").exists()
+
+
+def _judge_main():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("judge_script", SKILL_SRC / "scripts" / "judge.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.main
+
+
+# --- the traffic rise that triggers the EKS incident ------------------------------------------------
+
+def test_the_traffic_metric_is_notable_and_appears_in_the_timeline(eks_run):
+    edge = next(read_json(path) for path in (eks_run["case_dir"] / "evidence").glob("edge-*.json"))
+    fact = next(item for item in edge["facts"] if item["summary"].startswith("RequestCount"))
+    assert fact["data"]["notable"] is True and fact["data"]["direction"] == "rose"
+    assert fact["time"] == fact["data"]["first_departure_time"] == "2026-10-04T14:10:00Z"
+    rows = read_json(eks_run["case_dir"] / "timeline.json")
+    rows = rows["rows"] if isinstance(rows, dict) else rows
+    row = next(row for row in rows if row["fact_id"] == f"edge-prod-apps-eu-central-1:{fact['id']}")
+    assert row["time"] == "2026-10-04T14:10:00Z"
+    assert row["text"] == f"Metric rose: {fact['summary']}"
+    assert row["text"] in (eks_run["case_dir"] / "report.md").read_text()
+
+
+def test_the_canned_eks_draft_names_no_trigger_that_no_evidence_holds():
+    text = (REPLAY_DIR / "eks-oom-discovered" / "report.json").read_text().lower()
+    assert "marketing" not in text
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Defect in triage/audit_scan.py: the report prints the command of a cited fact, and the skill's own CloudTrail "
+    "lookup by event source ('AttributeKey=EventSource,AttributeValue=eks.amazonaws.com') is read as a secret: "
+    "'AttributeKey' ends in the secret word 'key', and the 17-character host name two tokens later is flagged "
+    "'secret_word_value', so publish audit refuses an ordinary report that cites a change-lookup absence fact."))
+def test_a_report_that_cites_a_change_lookup_by_event_source_audits_clean(tmp_path):
+    folder = REPLAY_DIR / "eks-oom-discovered"
+    case = start_case(folder, tmp_path)
+    facts = read_json(next((case.case_dir / "evidence").glob("changes-*.json")))["facts"]
+    absence = next(fact for fact in facts if fact["summary"].startswith("CloudTrail returned no write event naming 'orders-prod-db'"))
+    extra = {"id": "changes-1", "claim": "CloudTrail recorded no change to the database before the incident.",
+             "fact_ids": [f"changes-prod-apps-eu-central-1:{absence['id']}"], "excerpt": absence["summary"][:110],
+             "provenance": "inferred", "confidence": "high"}
+    findings = read_json(folder / "findings" / "changes.json")
+    findings["findings"].append(extra)
+    (case.case_dir / "findings" / "changes.json").write_text(json.dumps(findings))
+    case.script("findings check again", "findings.py", "check", "--case-dir", str(case.case_dir))
+    draft = read_json(folder / "report.json")
+    draft["causes"][2]["contradicting"].append("changes-1")
+    case.judge(favourable_judge(folder), apply_labels=True, draft=draft)
+    case.render(required=True)
+    audit = case.script("publish audit", "publish.py", "audit", "--case-dir", str(case.case_dir), "--allow-replay", required=False)
+    assert audit["returncode"] == 0, audit["stderr"]
 
 
 # --- no real call ---------------------------------------------------------------------------
@@ -453,8 +571,11 @@ def test_the_guard_allows_every_command_the_pipeline_ran_and_asks_before_a_map_c
     assert [step for step, _ in checked].count("plan: opensearch") == (3 if run["name"] == "ecs-bad-deploy" else 0)
     assert "judge run" in [step for step, _ in checked]
     assert len({command for _, command in checked}) == len(checked)  # no command stands in for another
-    refused = [(step, command[-120:]) for step, command in checked if decide(command, context).kind != ALLOW]
-    assert refused == []
+    verdicts = {step: decide(command, context).kind for step, command in checked}
+    # --allow-replay exists for tests and the guard always asks about it; every other command is allowed.
+    asked = {step for step, kind in verdicts.items() if kind == ASK}
+    assert asked == {"publish audit", "publish confluence", "publish slack-message"}
+    assert [step for step, kind in verdicts.items() if kind not in (ALLOW, ASK)] == []
     apply_command = skill_style(
         [str(skill_dir / ".venv" / "bin" / "python"), str(skill_dir / "scripts" / "map_suggest.py"), "apply",
          "--case-dir", str(run["case_dir"]), "--service-name", "checkout-api"], home)

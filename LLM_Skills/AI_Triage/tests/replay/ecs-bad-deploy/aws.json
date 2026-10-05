@@ -1019,6 +1019,50 @@
       "2026-10-04T09:42:00+00:00"
      ],
      "Values": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "StatusCode": "Complete"
+    },
+    {
+     "Id": "m7",
+     "Timestamps": [
+      "2026-10-04T11:07:00+00:00",
+      "2026-10-04T11:02:00+00:00",
+      "2026-10-04T10:57:00+00:00",
+      "2026-10-04T10:52:00+00:00",
+      "2026-10-04T10:47:00+00:00",
+      "2026-10-04T10:42:00+00:00",
+      "2026-10-04T10:37:00+00:00",
+      "2026-10-04T10:32:00+00:00",
+      "2026-10-04T10:27:00+00:00",
+      "2026-10-04T10:22:00+00:00",
+      "2026-10-04T10:17:00+00:00",
+      "2026-10-04T10:12:00+00:00",
+      "2026-10-04T10:07:00+00:00",
+      "2026-10-04T10:02:00+00:00",
+      "2026-10-04T09:57:00+00:00",
+      "2026-10-04T09:52:00+00:00",
+      "2026-10-04T09:47:00+00:00",
+      "2026-10-04T09:42:00+00:00"
+     ],
+     "Values": [
       2,
       2,
       2,
@@ -1041,7 +1085,7 @@
      "StatusCode": "Complete"
     },
     {
-     "Id": "m7",
+     "Id": "m8",
      "Timestamps": [
       "2026-10-04T11:07:00+00:00",
       "2026-10-04T11:02:00+00:00",
@@ -1408,6 +1452,50 @@
     },
     {
      "Id": "m7",
+     "Timestamps": [
+      "2026-09-27T11:07:00+00:00",
+      "2026-09-27T11:02:00+00:00",
+      "2026-09-27T10:57:00+00:00",
+      "2026-09-27T10:52:00+00:00",
+      "2026-09-27T10:47:00+00:00",
+      "2026-09-27T10:42:00+00:00",
+      "2026-09-27T10:37:00+00:00",
+      "2026-09-27T10:32:00+00:00",
+      "2026-09-27T10:27:00+00:00",
+      "2026-09-27T10:22:00+00:00",
+      "2026-09-27T10:17:00+00:00",
+      "2026-09-27T10:12:00+00:00",
+      "2026-09-27T10:07:00+00:00",
+      "2026-09-27T10:02:00+00:00",
+      "2026-09-27T09:57:00+00:00",
+      "2026-09-27T09:52:00+00:00",
+      "2026-09-27T09:47:00+00:00",
+      "2026-09-27T09:42:00+00:00"
+     ],
+     "Values": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "StatusCode": "Complete"
+    },
+    {
+     "Id": "m8",
      "Timestamps": [
       "2026-09-27T11:07:00+00:00",
       "2026-09-27T11:02:00+00:00",
@@ -3914,5 +4002,157 @@
    "\"Value\": \"ElasticLoadBalancing\"",
    "2026-09-27T09:42:00Z"
   ]
+ },
+ {
+  "match": [
+   "cloudtrail",
+   "lookup-events"
+  ],
+  "result": {
+   "Events": [
+    {
+     "EventId": "11111111-aaaa-4bbb-8ccc-c0ffee000001",
+     "EventName": "UpdateService",
+     "EventSource": "ecs.amazonaws.com",
+     "EventTime": "2026-10-04T10:37:00+00:00",
+     "ReadOnly": "false",
+     "Username": "deployer",
+     "Resources": [
+      {
+       "ResourceType": "AWS::ECS::Service",
+       "ResourceName": "checkout-api"
+      }
+     ],
+     "CloudTrailEvent": "{\"eventVersion\": \"1.08\", \"eventName\": \"UpdateService\", \"eventSource\": \"ecs.amazonaws.com\", \"userIdentity\": {\"type\": \"IAMUser\", \"userName\": \"deployer\"}, \"requestParameters\": {\"service\": \"checkout-api\", \"cluster\": \"checkout\", \"taskDefinition\": \"checkout-api:42\"}}"
+    },
+    {
+     "EventId": "11111111-aaaa-4bbb-8ccc-c0ffee000002",
+     "EventName": "RegisterTaskDefinition",
+     "EventSource": "ecs.amazonaws.com",
+     "EventTime": "2026-10-04T10:36:00+00:00",
+     "ReadOnly": "false",
+     "Username": "deployer",
+     "Resources": [
+      {
+       "ResourceType": "AWS::ECS::TaskDefinition",
+       "ResourceName": "checkout-api:42"
+      }
+     ],
+     "CloudTrailEvent": "{\"eventVersion\": \"1.08\", \"eventName\": \"RegisterTaskDefinition\", \"eventSource\": \"ecs.amazonaws.com\", \"userIdentity\": {\"type\": \"IAMUser\", \"userName\": \"deployer\"}, \"requestParameters\": {\"family\": \"checkout-api\"}}"
+    },
+    {
+     "EventId": "11111111-aaaa-4bbb-8ccc-c0ffee000009",
+     "EventName": "UpdateService",
+     "EventSource": "ecs.amazonaws.com",
+     "EventTime": "2026-10-04T10:05:00+00:00",
+     "ReadOnly": "false",
+     "Username": "ci-bot",
+     "Resources": [
+      {
+       "ResourceType": "AWS::ECS::Service",
+       "ResourceName": "inventory-api"
+      }
+     ],
+     "CloudTrailEvent": "{\"eventVersion\": \"1.08\", \"eventName\": \"UpdateService\", \"eventSource\": \"ecs.amazonaws.com\", \"userIdentity\": {\"type\": \"IAMUser\", \"userName\": \"ci-bot\"}, \"requestParameters\": {\"service\": \"inventory-api\", \"cluster\": \"inventory\"}}"
+    }
+   ]
+  },
+  "contains": [
+   "AttributeValue=ecs.amazonaws.com"
+  ]
+ },
+ {
+  "match": [
+   "cloudtrail",
+   "lookup-events"
+  ],
+  "result": {
+   "Events": []
+  },
+  "contains": [
+   "AttributeValue=application-autoscaling.amazonaws.com"
+  ]
+ },
+ {
+  "match": [
+   "cloudtrail",
+   "lookup-events"
+  ],
+  "result": {
+   "Events": []
+  },
+  "contains": [
+   "AttributeValue=elasticloadbalancing.amazonaws.com"
+  ]
+ },
+ {
+  "match": [
+   "cloudtrail",
+   "lookup-events"
+  ],
+  "result": {
+   "Events": []
+  },
+  "contains": [
+   "AttributeValue=rds.amazonaws.com"
+  ]
+ },
+ {
+  "match": [
+   "cloudtrail",
+   "lookup-events"
+  ],
+  "result": {
+   "Events": []
+  },
+  "contains": [
+   "AttributeValue=elasticache.amazonaws.com"
+  ]
+ },
+ {
+  "match": [
+   "cloudwatch",
+   "describe-alarms"
+  ],
+  "contains": [
+   "--state-value",
+   "ALARM"
+  ],
+  "result": {
+   "MetricAlarms": [
+    {
+     "AlarmName": "checkout-prod-alb-elb-5xx",
+     "StateValue": "ALARM",
+     "StateReason": "Threshold Crossed: 1 datapoint [410.0 (04/10/26 10:45:00)] was greater than the threshold (100.0).",
+     "MetricName": "HTTPCode_ELB_5XX_Count",
+     "Namespace": "AWS/ApplicationELB",
+     "Threshold": 100.0,
+     "ComparisonOperator": "GreaterThanThreshold",
+     "StateUpdatedTimestamp": "2026-10-04T10:46:00+00:00"
+    }
+   ],
+   "CompositeAlarms": []
+  }
+ },
+ {
+  "match": [
+   "cloudwatch",
+   "describe-alarm-history"
+  ],
+  "contains": [
+   "checkout-prod-alb-elb-5xx"
+  ],
+  "result": {
+   "AlarmHistoryItems": [
+    {
+     "AlarmName": "checkout-prod-alb-elb-5xx",
+     "AlarmType": "MetricAlarm",
+     "Timestamp": "2026-10-04T10:46:00+00:00",
+     "HistoryItemType": "StateUpdate",
+     "HistorySummary": "Alarm updated from OK to ALARM",
+     "HistoryData": "{\"version\": \"1.0\", \"oldState\": {\"stateValue\": \"OK\"}, \"newState\": {\"stateValue\": \"ALARM\", \"stateReason\": \"Threshold Crossed\"}}"
+    }
+   ]
+  }
  }
 ]

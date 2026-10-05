@@ -17,21 +17,21 @@
       "fact_ids": [
         "rds-prod-apps-eu-central-1:rds-0004"
       ],
-      "excerpt": "CPUUtilization (Average): peak 18 from 2026-10-04T13:20:00Z to 2026-10-04T14:45:00Z",
+      "excerpt": "lowest 18 from 2026-10-04T13:20:00Z to 2026-10-04T14:45:00Z, highest 18 from 2026-10-04T13:20:00Z to 2026-10-04T14:45:00Z",
       "provenance": "incident_time",
       "confidence": "high",
       "time": "2026-10-04T13:20:00Z"
     },
     {
       "id": "data-3",
-      "claim": "The connections of the database were at their peak of 96 until 14:15.",
+      "claim": "The connections of the database fell below the range of one week earlier at 14:20.",
       "fact_ids": [
         "rds-prod-apps-eu-central-1:rds-0005"
       ],
-      "excerpt": "DatabaseConnections (Maximum): peak 96 from 2026-10-04T13:20:00Z to 2026-10-04T14:15:00Z",
+      "excerpt": "fell below the range of one week earlier at 2026-10-04T14:20:00Z",
       "provenance": "incident_time",
       "confidence": "high",
-      "time": "2026-10-04T13:20:00Z"
+      "time": "2026-10-04T14:20:00Z"
     }
   ],
   "checked": [

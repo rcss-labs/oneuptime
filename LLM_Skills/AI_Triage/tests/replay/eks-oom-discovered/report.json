@@ -45,8 +45,7 @@
       "supporting": [],
       "contradicting": [
         "data-1",
-        "data-2",
-        "changes-1"
+        "data-2"
       ]
     }
   ],
@@ -144,7 +143,7 @@
       "current_state": "The deployment has a fixed replica count of 3 and a memory limit that traffic doubling exceeds",
       "required_state": "A horizontal pod autoscaler follows the request rate, and the memory limit comes from a load test",
       "change": "Add a horizontal pod autoscaler to deployment/orders-api and run a load test to set requests and limits",
-      "rationale": "A marketing mail doubled the traffic and the fixed capacity could not follow",
+      "rationale": "The request count rose above the range of one week earlier at 14:10 and the fixed capacity could not follow",
       "finding_ids": [
         "edge-1"
       ],
@@ -160,7 +159,7 @@
     }
   ],
   "open_questions": [
-    "Which marketing mail raised the traffic at 14:10, and can the team be told before the next one?"
+    "What raised the traffic at 14:10, and can the team be told before the next rise?"
   ],
   "coverage": {
     "not_checked": [

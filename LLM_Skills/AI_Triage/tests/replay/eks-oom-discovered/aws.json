@@ -542,6 +542,50 @@
       "2026-10-04T13:20:00+00:00"
      ],
      "Values": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "StatusCode": "Complete"
+    },
+    {
+     "Id": "m7",
+     "Timestamps": [
+      "2026-10-04T14:45:00+00:00",
+      "2026-10-04T14:40:00+00:00",
+      "2026-10-04T14:35:00+00:00",
+      "2026-10-04T14:30:00+00:00",
+      "2026-10-04T14:25:00+00:00",
+      "2026-10-04T14:20:00+00:00",
+      "2026-10-04T14:15:00+00:00",
+      "2026-10-04T14:10:00+00:00",
+      "2026-10-04T14:05:00+00:00",
+      "2026-10-04T14:00:00+00:00",
+      "2026-10-04T13:55:00+00:00",
+      "2026-10-04T13:50:00+00:00",
+      "2026-10-04T13:45:00+00:00",
+      "2026-10-04T13:40:00+00:00",
+      "2026-10-04T13:35:00+00:00",
+      "2026-10-04T13:30:00+00:00",
+      "2026-10-04T13:25:00+00:00",
+      "2026-10-04T13:20:00+00:00"
+     ],
+     "Values": [
       3,
       3,
       3,
@@ -564,7 +608,7 @@
      "StatusCode": "Complete"
     },
     {
-     "Id": "m7",
+     "Id": "m8",
      "Timestamps": [
       "2026-10-04T14:45:00+00:00",
       "2026-10-04T14:40:00+00:00",
@@ -931,6 +975,50 @@
     },
     {
      "Id": "m7",
+     "Timestamps": [
+      "2026-09-27T14:45:00+00:00",
+      "2026-09-27T14:40:00+00:00",
+      "2026-09-27T14:35:00+00:00",
+      "2026-09-27T14:30:00+00:00",
+      "2026-09-27T14:25:00+00:00",
+      "2026-09-27T14:20:00+00:00",
+      "2026-09-27T14:15:00+00:00",
+      "2026-09-27T14:10:00+00:00",
+      "2026-09-27T14:05:00+00:00",
+      "2026-09-27T14:00:00+00:00",
+      "2026-09-27T13:55:00+00:00",
+      "2026-09-27T13:50:00+00:00",
+      "2026-09-27T13:45:00+00:00",
+      "2026-09-27T13:40:00+00:00",
+      "2026-09-27T13:35:00+00:00",
+      "2026-09-27T13:30:00+00:00",
+      "2026-09-27T13:25:00+00:00",
+      "2026-09-27T13:20:00+00:00"
+     ],
+     "Values": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "StatusCode": "Complete"
+    },
+    {
+     "Id": "m8",
      "Timestamps": [
       "2026-09-27T14:45:00+00:00",
       "2026-09-27T14:40:00+00:00",
@@ -1966,6 +2054,104 @@
   ],
   "result": {
    "Quotas": []
+  }
+ },
+ {
+  "match": [
+   "cloudtrail",
+   "lookup-events"
+  ],
+  "result": {
+   "Events": []
+  },
+  "contains": [
+   "AttributeValue=elasticloadbalancing.amazonaws.com"
+  ]
+ },
+ {
+  "match": [
+   "cloudtrail",
+   "lookup-events"
+  ],
+  "result": {
+   "Events": []
+  },
+  "contains": [
+   "AttributeValue=rds.amazonaws.com"
+  ]
+ },
+ {
+  "match": [
+   "cloudtrail",
+   "lookup-events"
+  ],
+  "result": {
+   "Events": [
+    {
+     "EventId": "22222222-bbbb-4ccc-8ddd-c0ffee000101",
+     "EventName": "UpdateNodegroupVersion",
+     "EventSource": "eks.amazonaws.com",
+     "EventTime": "2026-10-04T13:30:00+00:00",
+     "ReadOnly": "false",
+     "Username": "platform-engineer",
+     "Resources": [
+      {
+       "ResourceType": "AWS::EKS::Cluster",
+       "ResourceName": "platform-prod"
+      }
+     ],
+     "CloudTrailEvent": "{\"eventVersion\": \"1.08\", \"eventName\": \"UpdateNodegroupVersion\", \"eventSource\": \"eks.amazonaws.com\", \"userIdentity\": {\"type\": \"IAMUser\", \"userName\": \"platform-engineer\"}, \"requestParameters\": {\"name\": \"platform-prod\", \"nodegroupName\": \"apps-ng\"}}"
+    }
+   ]
+  },
+  "contains": [
+   "AttributeValue=eks.amazonaws.com"
+  ]
+ },
+ {
+  "match": [
+   "cloudwatch",
+   "describe-alarms"
+  ],
+  "contains": [
+   "--state-value",
+   "ALARM"
+  ],
+  "result": {
+   "MetricAlarms": [
+    {
+     "AlarmName": "orders-api-tg-unhealthy-hosts",
+     "StateValue": "ALARM",
+     "StateReason": "Threshold Crossed: 1 datapoint [3.0 (04/10/26 14:20:00)] was greater than the threshold (0.0).",
+     "MetricName": "UnHealthyHostCount",
+     "Namespace": "AWS/ApplicationELB",
+     "Threshold": 0.0,
+     "ComparisonOperator": "GreaterThanThreshold",
+     "StateUpdatedTimestamp": "2026-10-04T14:21:00+00:00"
+    }
+   ],
+   "CompositeAlarms": []
+  }
+ },
+ {
+  "match": [
+   "cloudwatch",
+   "describe-alarm-history"
+  ],
+  "contains": [
+   "orders-api-tg-unhealthy-hosts"
+  ],
+  "result": {
+   "AlarmHistoryItems": [
+    {
+     "AlarmName": "orders-api-tg-unhealthy-hosts",
+     "AlarmType": "MetricAlarm",
+     "Timestamp": "2026-10-04T14:21:00+00:00",
+     "HistoryItemType": "StateUpdate",
+     "HistorySummary": "Alarm updated from OK to ALARM",
+     "HistoryData": "{\"version\": \"1.0\", \"oldState\": {\"stateValue\": \"OK\"}, \"newState\": {\"stateValue\": \"ALARM\", \"stateReason\": \"Threshold Crossed\"}}"
+    }
+   ]
   }
  }
 ]

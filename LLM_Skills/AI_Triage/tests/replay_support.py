@@ -209,9 +209,10 @@ class ReplayCase:
 
     def publish(self) -> None:
         case = str(self.case_dir)
-        self.script("publish audit", "publish.py", "audit", "--case-dir", case)
-        self.script("publish confluence", "publish.py", "confluence", "--case-dir", case)
-        self.script("publish slack-message", "publish.py", "slack-message", "--case-dir", case)
+        # A replay case is published only with --allow-replay, which exists for tests (the guard always asks about it).
+        self.script("publish audit", "publish.py", "audit", "--case-dir", case, "--allow-replay")
+        self.script("publish confluence", "publish.py", "confluence", "--case-dir", case, "--allow-replay")
+        self.script("publish slack-message", "publish.py", "slack-message", "--case-dir", case, "--allow-replay")
 
 
 def distractor_draft(scenario: Path) -> dict:
