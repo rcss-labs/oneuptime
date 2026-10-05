@@ -51,6 +51,14 @@ def skill_dir(tmp_path):
     return tmp_path / "skill"
 
 
+@pytest.fixture(autouse=True)
+def clean_aws_environment(monkeypatch, tmp_path):
+    """Keep the engineer's own credentials, aliases and replay setting out of every test."""
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AI_TRIAGE_FIXTURES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+
 def signed_in():
     return FakeAws(
         {
@@ -65,7 +73,7 @@ def run(skill_dir, accounts=(), runner=None, env=None, missing=(), snapshots_dir
         skill_dir,
         accounts,
         runner=runner or signed_in(),
-        env={"TYPESAFE_API_KEY": "set"} if env is None else env,
+        env={"TYPESAFE_API_KEY": "set", "HOME": str(skill_dir.parent / "home")} if env is None else env,
         which=lambda name: None if name in missing else f"/usr/bin/{name}",
         snapshots_dir=snapshots_dir or skill_dir.parent / "shell-snapshots",
     )
@@ -196,7 +204,7 @@ def test_preflight_command_in_replay_mode_uses_fixtures_and_treats_tools_as_pres
         raise AssertionError("a real subprocess was started in replay mode")
 
     monkeypatch.setattr("subprocess.run", real_call_fails)
-    code = preflight.main(["--json", "--skill-dir", str(skill_dir)])
+    code = preflight.main(["--json", "--allow-replay", "--skill-dir", str(skill_dir)])
     captured = capsys.readouterr()
     checks = {check["name"]: check for check in json.loads(captured.out)["checks"]}
     assert code == 0
@@ -221,7 +229,7 @@ def test_preflight_command_with_a_bad_fixture_directory_exits_2(skill_dir, tmp_p
 def test_replay_skips_the_kubeconfig_check_even_when_the_file_is_missing(skill_dir):
     (skill_dir / "config" / "kubeconfig").unlink()
     checks = run_preflight(skill_dir, runner=signed_in(), env={"TYPESAFE_API_KEY": "set"},
-                           which=lambda name: f"replay/{name}", replay=True)
+                           which=lambda name: f"replay/{name}", replay=True, allow_replay=True)
     assert by_name(checks)["kubectl"].status == "skipped"
     assert exit_code(checks) == 0
 
@@ -374,7 +382,7 @@ def test_other_harmless_spellings_pass(skill_dir, extra):
 def test_replay_makes_no_sign_in_call_and_reports_it_skipped(skill_dir):
     fake = FakeAws({})
     checks = run_preflight(skill_dir, runner=fake, env={"TYPESAFE_API_KEY": "set"},
-                           which=lambda name: f"replay/{name}", replay=True)
+                           which=lambda name: f"replay/{name}", replay=True, allow_replay=True)
     assert fake.calls == []
     named = by_name(checks)
     assert named["Sign-in: prod-main"].status == "skipped" and named["Sign-in: staging"].status == "skipped"
@@ -384,7 +392,7 @@ def test_replay_makes_no_sign_in_call_and_reports_it_skipped(skill_dir):
 
 def test_replay_sign_in_skip_respects_the_account_filter(skill_dir):
     checks = run_preflight(skill_dir, ["staging"], runner=FakeAws({}), env={"TYPESAFE_API_KEY": "set"},
-                           which=lambda name: f"replay/{name}", replay=True)
+                           which=lambda name: f"replay/{name}", replay=True, allow_replay=True)
     assert "Sign-in: prod-main" not in by_name(checks) and by_name(checks)["Sign-in: staging"].status == "skipped"
 
 
@@ -392,3 +400,73 @@ def test_outside_replay_the_sign_in_check_still_runs(skill_dir):
     fake = signed_in()
     checks = run(skill_dir, runner=fake)
     assert fake.calls and by_name(checks)["Sign-in: prod-main"].status == OK
+
+
+# fix wave: identity kubectl would use, aliases, replay
+
+CREDENTIAL_NAMES = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
+
+
+@pytest.mark.parametrize("name", CREDENTIAL_NAMES)
+def test_credentials_in_the_environment_fail_and_name_the_variable_but_not_the_value(skill_dir, name):
+    value = "value-" + "that-must-not-print"
+    checks = run(skill_dir, env={"TYPESAFE_API_KEY": "set", name: value, "HOME": str(skill_dir.parent / "home")})
+    check = by_name(checks)["AWS credentials in environment"]
+    assert check.status == FAIL and name in check.detail and "triage profile" in check.detail
+    assert value not in render_text(checks)
+    assert exit_code(checks) == 1
+
+
+def test_only_the_variables_that_are_set_are_named(skill_dir):
+    checks = run(skill_dir, env={"AWS_SESSION_TOKEN": "x", "AWS_ACCESS_KEY_ID": "", "HOME": str(skill_dir.parent / "home")})
+    detail = by_name(checks)["AWS credentials in environment"].detail
+    assert "AWS_SESSION_TOKEN" in detail and "AWS_ACCESS_KEY_ID" not in detail
+
+
+def test_no_credentials_means_no_such_check(skill_dir):
+    assert "AWS credentials in environment" not in by_name(run(skill_dir))
+
+
+def write_aliases(skill_dir, text):
+    path = skill_dir.parent / "home" / ".aws" / "cli" / "alias"
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+
+
+def test_an_aws_cli_alias_file_is_listed_as_a_warning(skill_dir):
+    write_aliases(skill_dir, "[toplevel]\n\n# a comment\nwhoami = sts get-caller-identity\nlogs =\n  logs tail\n")
+    checks = run(skill_dir)
+    check = by_name(checks)["AWS CLI aliases"]
+    assert check.status == WARN and "whoami" in check.detail and "logs" in check.detail
+    assert exit_code(checks) == 0
+
+
+def test_no_alias_file_means_no_alias_check(skill_dir):
+    assert "AWS CLI aliases" not in by_name(run(skill_dir))
+
+
+def test_replay_without_allow_replay_is_a_failed_check_line(skill_dir):
+    checks = run_preflight(skill_dir, runner=FakeAws({}), env={"TYPESAFE_API_KEY": "set", "HOME": str(skill_dir.parent / "home")},
+                           which=lambda name: f"replay/{name}", replay=True,
+                           snapshots_dir=skill_dir.parent / "shell-snapshots")
+    assert by_name(checks)["REPLAY"].status == FAIL
+    assert "REPLAY" in render_text(checks) and exit_code(checks) == 1
+
+
+def test_replay_with_allow_replay_has_no_replay_failure(skill_dir):
+    checks = run_preflight(skill_dir, runner=FakeAws({}), env={"TYPESAFE_API_KEY": "set", "HOME": str(skill_dir.parent / "home")},
+                           which=lambda name: f"replay/{name}", replay=True, allow_replay=True,
+                           snapshots_dir=skill_dir.parent / "shell-snapshots")
+    assert "REPLAY" not in by_name(checks) and exit_code(checks) == 0
+
+
+def test_the_command_fails_on_replay_unless_allowed(skill_dir, tmp_path, monkeypatch, capsys):
+    import preflight
+
+    replay = tmp_path / "replay"
+    replay.mkdir()
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(replay))
+    monkeypatch.setenv("TYPESAFE_API_KEY", "set")
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: pytest.fail("a real subprocess was started"))
+    assert preflight.main(["--skill-dir", str(skill_dir)]) == 1
+    assert "REPLAY" in capsys.readouterr().out

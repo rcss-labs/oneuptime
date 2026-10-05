@@ -171,6 +171,51 @@ def _shell_environment(skill_dir: Path, snapshots_dir: Path) -> Check:
     return Check(name, OK, newest.name)
 
 
+CREDENTIAL_VARIABLES = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
+
+
+def _credentials_in_environment(env: Mapping[str, str]) -> Check | None:
+    """kubectl's credential helper would use these in place of the triage profile. Names only, never values."""
+    names = [name for name in CREDENTIAL_VARIABLES if env.get(name)]
+    if not names:
+        return None
+    return Check(
+        "AWS credentials in environment",
+        FAIL,
+        f"{', '.join(names)} is set, so kubectl would use it instead of the triage profile",
+        f"Unset it in this shell: unset {' '.join(names)}",
+    )
+
+
+def _alias_names(text: str) -> list[str]:
+    """Names defined in the [toplevel] section of an AWS CLI alias file."""
+    names: list[str] = []
+    in_toplevel = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_toplevel = stripped == "[toplevel]"
+        elif in_toplevel and line == line.lstrip() and "=" in stripped and not stripped.startswith(("#", ";")):
+            names.append(stripped.split("=", 1)[0].strip())
+    return names
+
+
+def _cli_aliases(home: str) -> Check | None:
+    path = Path(home) / ".aws" / "cli" / "alias"
+    if not path.is_file():
+        return None
+    try:
+        names = _alias_names(path.read_text(errors="replace"))
+    except OSError as error:
+        return Check("AWS CLI aliases", WARN, f"{path} exists but could not be read ({error.strerror or error})")
+    if not names:
+        return None
+    return Check(
+        "AWS CLI aliases", WARN, f"{path} defines aliases: {', '.join(names)}",
+        "An alias can change what an aws command does. Remove any that shadows a command triage runs.",
+    )
+
+
 def run_preflight(
     skill_dir: Path,
     accounts: Sequence[str] = (),
@@ -180,6 +225,7 @@ def run_preflight(
     which: Callable[[str], str | None] = shutil.which,
     replay: bool = False,
     snapshots_dir: Path | None = None,
+    allow_replay: bool = False,
 ) -> list[Check]:
     config, checks = _load(skill_dir)
     if config is None:
@@ -208,6 +254,11 @@ def run_preflight(
             else:
                 checks.append(Check(name, FAIL, identity.detail, f"Check the profile {account.profile} in your AWS config."))
 
+    home = env.get("HOME") or os.path.expanduser("~")
+    for problem in (_credentials_in_environment(env), _cli_aliases(home)):
+        if problem:
+            checks.append(problem)
+
     if config.eks_clusters:
         kubeconfig = skill_dir / "config" / KUBECONFIG_NAME
         if replay:
@@ -222,8 +273,13 @@ def run_preflight(
     if replay:
         checks.append(Check("Shell environment", SKIPPED, "replay mode: the shell is not checked"))
     else:
-        home = env.get("HOME") or os.path.expanduser("~")
         checks.append(_shell_environment(skill_dir, snapshots_dir or Path(home) / ".claude" / "shell-snapshots"))
+
+    if replay and not allow_replay:
+        checks.append(Check(
+            "REPLAY", FAIL, "AI_TRIAGE_FIXTURES is set, so answers come from recorded files and nothing is checked against AWS",
+            "Unset AI_TRIAGE_FIXTURES, or pass --allow-replay for a replay run.",
+        ))
 
     try:
         config.cases_dir.mkdir(parents=True, exist_ok=True)
