@@ -129,30 +129,31 @@ def facts_for(tmp_path, config_data, window_values, baseline_values):
 def test_summary_wording_higher(tmp_path, config_data):
     facts, _ = facts_for(tmp_path, config_data, [46.0, 96.2], [23.5])
     assert facts[0].summary == (
-        "CPUUtilization (Average): peak 96.2 at 2026-10-04T10:41:00Z; "
-        "window average 71.1 against 23.5 one week earlier (3.03 times higher)"
+        "CPUUtilization (Average): lowest 46 at 2026-10-04T10:40:00Z, highest 96.2 at 2026-10-04T10:41:00Z; "
+        "71.1 during the incident against 23.5 in the same hours one week earlier; "
+        "rose above the range of one week earlier at 2026-10-04T10:40:00Z"
     )
     assert facts[0].kind == INCIDENT_TIME
-    assert facts[0].time == "2026-10-04T10:41:00Z"
+    assert facts[0].time == "2026-10-04T10:40:00Z"
     assert facts[0].resource == "service/checkout"
-    assert facts[0].data["window_max"] == 96.2
+    assert facts[0].data["maximum"] == 96.2 and facts[0].data["direction"] == "rose"
 
 
 def test_summary_wording_about_the_same(tmp_path, config_data):
     facts, _ = facts_for(tmp_path, config_data, [50.0], [48.0])
-    assert "(about the same)" in facts[0].summary
+    assert facts[0].summary.endswith("; about the same as one week earlier")
+    assert facts[0].data["direction"] == "unchanged" and facts[0].data["notable"] is False
 
 
 def test_summary_wording_lower(tmp_path, config_data):
     facts, _ = facts_for(tmp_path, config_data, [10.0], [40.0])
-    assert "(4 times lower)" in facts[0].summary
+    assert "fell below the range of one week earlier at 2026-10-04T10:40:00Z" in facts[0].summary
 
 
 def test_summary_wording_no_baseline(tmp_path, config_data):
     facts, _ = facts_for(tmp_path, config_data, [10.0], [])
-    assert "no comparable baseline" in facts[0].summary
+    assert facts[0].summary.endswith("10 during the incident; no comparable baseline")
     assert "one week earlier" not in facts[0].summary
-    assert "no baseline" not in facts[0].summary.replace("no comparable baseline", "")
 
 
 def test_no_data_adds_a_derived_fact(tmp_path, config_data):
@@ -176,21 +177,22 @@ def test_one_fact_per_metric(tmp_path, config_data):
 def test_window_average_zero_with_baseline_does_not_crash(tmp_path, config_data):
     facts, summaries = facts_for(tmp_path, config_data, [0.0, 0.0], [5.0])
     assert summaries[0].change_ratio == 0.0
-    assert "down to zero" in facts[0].summary
-    assert "against 5 one week earlier" in facts[0].summary
+    assert "lowest 0 from 2026-10-04T10:40:00Z to 2026-10-04T10:41:00Z" in facts[0].summary
+    assert "0 during the incident against 5 in the same hours one week earlier" in facts[0].summary
+    assert "fell below" in facts[0].summary
 
 
 def test_zero_baseline_with_activity(tmp_path, config_data):
     facts, summaries = facts_for(tmp_path, config_data, [7.0], [0.0])
     assert summaries[0].change_ratio is None
-    assert "no comparable baseline" in facts[0].summary
-    assert "no baseline data" not in facts[0].summary
-    assert "from zero" in facts[0].summary or "zero one week earlier" in facts[0].summary
+    assert "against 0 in the same hours one week earlier" in facts[0].summary
+    assert "rose above the range of one week earlier" in facts[0].summary
 
 
 def test_zero_in_both_periods(tmp_path, config_data):
     facts, _ = facts_for(tmp_path, config_data, [0.0], [0.0])
-    assert "zero in both periods" in facts[0].summary
+    assert facts[0].summary.endswith("; zero in both periods")
+    assert facts[0].data["notable"] is False
 
 
 def test_fact_command_is_the_window_call(tmp_path, config_data):
@@ -223,10 +225,10 @@ def test_failed_read_says_so(tmp_path, config_data):
 
 def test_numbers_have_three_significant_figures(tmp_path, config_data):
     facts, _ = facts_for(tmp_path, config_data, [0.000000001], [5.0])
-    assert "window average 1e-09" in facts[0].summary
-    assert "5000000000" not in facts[0].summary or "times lower" in facts[0].summary
+    assert "1e-09 during the incident" in facts[0].summary
+    assert "5000000000" not in facts[0].summary
     facts, _ = facts_for(tmp_path, config_data, [12345.6], [100.0])
-    assert "peak 12300 at" in facts[0].summary
+    assert "highest 12300 at" in facts[0].summary
     assert "e+" not in facts[0].summary
 
 
@@ -262,27 +264,28 @@ def test_the_same_points_in_either_order_give_the_same_fact(tmp_path, config_dat
     newest_first = _peak_fact(tmp_path, config_data, TIES_TIMES[::-1], values[::-1], "b")
     assert oldest_first.summary == newest_first.summary
     assert oldest_first.time == newest_first.time == "2026-10-04T10:05:00Z"
-    assert "peak 85 at 2026-10-04T10:05:00Z" in oldest_first.summary
+    assert "highest 85 at 2026-10-04T10:05:00Z" in oldest_first.summary
 
 
 def test_a_peak_held_over_three_points_says_from_and_to(tmp_path, config_data):
     values = [40.0, 85.0, 85.0, 85.0]
     for name, times, ordered in (("a", TIES_TIMES, values), ("b", TIES_TIMES[::-1], values[::-1])):
         fact = _peak_fact(tmp_path, config_data, times, ordered, name)
-        assert "peak 85 from 2026-10-04T10:05:00Z to 2026-10-04T10:15:00Z" in fact.summary
-        assert fact.time == "2026-10-04T10:05:00Z"
+        assert "highest 85 from 2026-10-04T10:05:00Z to 2026-10-04T10:15:00Z" in fact.summary
+        assert fact.data["maximum_time"] == "2026-10-04T10:05:00Z"
         assert fact.data["peak_time"] == "2026-10-04T10:05:00Z"
         assert fact.data["peak_end"] == "2026-10-04T10:15:00Z"
 
 
 def test_a_flat_series_holds_its_peak_for_the_whole_window(tmp_path, config_data):
     fact = _peak_fact(tmp_path, config_data, TIES_TIMES[::-1], [12.0] * 4, "a")
-    assert "peak 12 from 2026-10-04T10:00:00Z to 2026-10-04T10:15:00Z" in fact.summary
+    assert "highest 12 from 2026-10-04T10:00:00Z to 2026-10-04T10:15:00Z" in fact.summary
+    assert "lowest 12 from 2026-10-04T10:00:00Z to 2026-10-04T10:15:00Z" in fact.summary
 
 
 def test_a_single_point_peak_has_no_end(tmp_path, config_data):
     fact = _peak_fact(tmp_path, config_data, TIES_TIMES[::-1], [1.0, 2.0, 9.0, 3.0], "a")
-    assert "peak 9 at 2026-10-04T10:05:00Z" in fact.summary
+    assert "highest 9 at 2026-10-04T10:05:00Z" in fact.summary
     assert fact.data["peak_end"] is None
 
 
@@ -301,11 +304,11 @@ def _fact_for(tmp_path, config_data, name, window_values, baseline_values):
     return ctx.evidence.facts[0]
 
 
-def test_notable_follows_the_wording_of_the_change(tmp_path, config_data):
+def test_notable_follows_the_direction(tmp_path, config_data):
     cases = {
-        "higher": ([80.0, 90.0], [20.0, 20.0], "times higher", True),
-        "lower": ([5.0, 5.0], [40.0, 40.0], "times lower", True),
-        "to-zero": ([0.0, 0.0], [40.0, 40.0], "down to zero", True),
+        "higher": ([80.0, 90.0], [20.0, 20.0], "rose above", True),
+        "lower": ([5.0, 5.0], [40.0, 40.0], "fell below", True),
+        "to-zero": ([0.0, 0.0], [40.0, 40.0], "fell below", True),
         "same": ([20.0, 22.0], [20.0, 21.0], "about the same", False),
         "zero": ([0.0, 0.0], [0.0, 0.0], "zero in both periods", False),
     }
@@ -328,9 +331,92 @@ def test_a_fact_with_no_data_is_not_notable(tmp_path, config_data):
     assert fact.data["notable"] is False
 
 
-def test_notable_does_not_change_the_summary(tmp_path, config_data):
-    fact = _fact_for(tmp_path, config_data, "text", [80.0, 90.0], [20.0, 20.0])
-    assert fact.summary == (
-        "CPUUtilization (Average): peak 90 at 2026-10-04T10:05:00Z; window average 85 against 20 one week earlier "
-        "(4.25 times higher)"
-    )
+def test_data_carries_the_contract_keys(tmp_path, config_data):
+    fact = _fact_for(tmp_path, config_data, "keys", [80.0, 90.0], [20.0, 20.0])
+    for key in ("minimum", "minimum_time", "maximum", "maximum_time", "incident_average", "baseline_average",
+                "first_departure_time", "direction", "notable"):
+        assert key in fact.data, key
+
+
+# Final review I-1: the reviewer's three cases
+
+def _window_ctx(tmp_path, config_data, start, end, window_reply, baseline_reply):
+    config = parse_config(config_data)
+    window = make_window(start, end, 12)
+    evidence = Evidence("ecs", "prod-main", "eu-west-1", window)
+    ctx = CollectContext(config, config.accounts["prod-main"], "eu-west-1", window, evidence, tmp_path, runner=FakeAws({}))
+    ctx.runner = Sequenced(window_reply, baseline_reply)
+    return ctx
+
+
+def _every(start_hour, start_minute, count, step_minutes, week_earlier=False):
+    from datetime import datetime, timedelta, timezone
+    first = datetime(2026, 10, 4, start_hour, start_minute, tzinfo=timezone.utc) - timedelta(days=7 if week_earlier else 0)
+    return [(first + timedelta(minutes=step_minutes * n)).strftime("%Y-%m-%dT%H:%M:%SZ") for n in range(count)]
+
+
+def test_a_short_rise_before_the_incident_is_notable_and_says_when(tmp_path, config_data):
+    times = _every(10, 0, 18, 5)  # a 90-minute window; the incident starts at 11:00
+    values = [4000.0] * 18
+    values[10] = values[11] = 8300.0  # 10:50 and 10:55
+    spec = MetricSpec("RequestCount", "AWS/ApplicationELB", "RequestCount", {"LoadBalancer": "app/x/1"}, stat="Sum")
+    ctx = _window_ctx(tmp_path, config_data, "2026-10-04T10:00:00Z", "2026-10-04T11:30:00Z",
+                      reply(series(0, times, values)), reply(series(0, _every(10, 0, 18, 5, week_earlier=True), [4000.0] * 18)))
+    add_metric_facts(ctx, "lb/x", [spec])
+    fact = ctx.evidence.facts[0]
+    assert fact.data["notable"] is True and fact.data["direction"] == "rose"
+    assert fact.data["first_departure_time"] == "2026-10-04T10:50:00Z"
+    assert fact.time == "2026-10-04T10:50:00Z"
+    assert "highest 8300 from 2026-10-04T10:50:00Z to 2026-10-04T10:55:00Z" in fact.summary
+    assert "rose above the range of one week earlier at 2026-10-04T10:50:00Z" in fact.summary
+    assert "about the same" not in fact.summary
+
+
+def test_free_storage_falling_to_zero_states_zero_and_its_time(tmp_path, config_data):
+    times = _every(10, 0, 24, 5)
+    values = [21.5e9 - n * 1.0e9 for n in range(22)] + [0.0, 0.0]
+    spec = MetricSpec("FreeStorageSpace", "AWS/RDS", "FreeStorageSpace", {"DBInstanceIdentifier": "db"}, stat="Minimum")
+    ctx = _window_ctx(tmp_path, config_data, "2026-10-04T10:00:00Z", "2026-10-04T12:00:00Z",
+                      reply(series(0, times, values)), reply(series(0, _every(10, 0, 24, 5, week_earlier=True), [22.5e9] * 24)))
+    add_metric_facts(ctx, "db/db", [spec])
+    fact = ctx.evidence.facts[0]
+    assert "lowest 0 from 2026-10-04T11:50:00Z to 2026-10-04T11:55:00Z" in fact.summary
+    assert fact.data["minimum"] == 0.0 and fact.data["minimum_time"] == "2026-10-04T11:50:00Z"
+    assert fact.data["direction"] == "fell" and fact.data["notable"] is True
+    assert "fell below the range of one week earlier at" in fact.summary
+
+
+def test_a_one_period_cpu_spike_in_six_hours_is_notable(tmp_path, config_data):
+    times = _every(6, 0, 72, 5)  # 06:00 to 11:55
+    values = [25.0] * 72
+    values[40] = 100.0  # 09:20
+    ctx = _window_ctx(tmp_path, config_data, "2026-10-04T06:00:00Z", "2026-10-04T12:00:00Z",
+                      reply(series(0, times, values)), reply(series(0, _every(6, 0, 72, 5, week_earlier=True), [24.0, 26.0] * 36)))
+    add_metric_facts(ctx, "service/checkout", [CPU])
+    fact = ctx.evidence.facts[0]
+    assert fact.data["notable"] is True
+    assert fact.data["first_departure_time"] == "2026-10-04T09:20:00Z"
+    assert "highest 100 at 2026-10-04T09:20:00Z" in fact.summary
+
+
+def test_an_unchanged_metric_is_still_written_and_not_notable(tmp_path, config_data):
+    times = _every(10, 0, 24, 5)
+    ctx = _window_ctx(tmp_path, config_data, "2026-10-04T10:00:00Z", "2026-10-04T12:00:00Z",
+                      reply(series(0, times, [24.0, 26.0] * 12)), reply(series(0, _every(10, 0, 24, 5, week_earlier=True), [25.0] * 24)))
+    add_metric_facts(ctx, "service/checkout", [CPU])
+    fact = ctx.evidence.facts[0]
+    assert fact.data["notable"] is False and fact.data["direction"] == "unchanged"
+    assert fact.data["first_departure_time"] is None
+    assert fact.summary.endswith("about the same as one week earlier")
+
+
+def test_the_incident_part_is_compared_with_the_same_hours_one_week_earlier(tmp_path, config_data):
+    times = _every(10, 0, 24, 5)  # incident part: 11:00 onwards
+    window_values = [10.0] * 12 + [30.0] * 12
+    baseline_values = [10.0] * 12 + [20.0] * 12
+    ctx = _window_ctx(tmp_path, config_data, "2026-10-04T10:00:00Z", "2026-10-04T12:00:00Z",
+                      reply(series(0, times, window_values)), reply(series(0, _every(10, 0, 24, 5, week_earlier=True), baseline_values)))
+    add_metric_facts(ctx, "service/checkout", [CPU])
+    fact = ctx.evidence.facts[0]
+    assert fact.data["incident_average"] == 30.0 and fact.data["baseline_average"] == 20.0
+    assert "30 during the incident against 20 in the same hours one week earlier" in fact.summary

@@ -238,8 +238,8 @@ def test_metrics_are_added(config_data, tmp_path):
         {"Id": "m1", "Timestamps": ["2026-10-04T10:41:00+00:00"], "Values": [50.0]},
     ]}
     ctx, aws, _ = run(config_data, tmp_path, healthy_answers(**{"cloudwatch get-metric-data": results}))
-    assert by_summary(ctx, "CPUUtilization (Average): peak 96.2")
-    assert by_summary(ctx, "MemoryUtilization (Average): peak 50 at")
+    assert by_summary(ctx, "CPUUtilization (Average): lowest 96.2 at")
+    assert by_summary(ctx, "MemoryUtilization (Average): lowest 50 at")
     queries = json.loads(aws.called("cloudwatch", "get-metric-data")[0][
         aws.called("cloudwatch", "get-metric-data")[0].index("--metric-data-queries") + 1])
     dims = queries[0]["MetricStat"]["Metric"]["Dimensions"]

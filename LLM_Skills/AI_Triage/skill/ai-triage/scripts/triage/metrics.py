@@ -5,7 +5,7 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from decimal import Decimal
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Sequence
 
 from triage.context import CollectContext
@@ -13,6 +13,8 @@ from triage.evidence import DERIVED, INCIDENT_TIME
 from triage.window import Window, format_time, parse_time
 
 BASELINE_SHIFT = timedelta(days=-7)
+# The incident starts this long after the window start (window_around's default lead).
+INCIDENT_LEAD = timedelta(minutes=60)
 SAME_RANGE = (0.8, 1.25)
 
 
@@ -39,6 +41,18 @@ class MetricSummary:
     datapoints: int
     # When the peak value held over consecutive points, the time of the last of them; else None.
     peak_end: str | None = None
+    # Contract 6: what a metric fact states and carries in its data.
+    minimum: float | None = None
+    minimum_time: str | None = None
+    minimum_end: str | None = None
+    maximum: float | None = None
+    maximum_time: str | None = None
+    incident_average: float | None = None
+    baseline_average: float | None = None
+    first_departure_time: str | None = None
+    direction: str | None = None  # rose, fell, unchanged; None without data
+    notable: bool = False
+    fact_time: str | None = None
 
 
 def _queries(specs: Sequence[MetricSpec], period: int) -> str:
@@ -80,21 +94,63 @@ def _points(
     return points
 
 
-def _summarise(spec: MetricSpec, window_points: list[tuple[str, float]], baseline_points: list[tuple[str, float]]) -> MetricSummary:
-    baseline_values = [value for _, value in baseline_points]
-    baseline_avg = sum(baseline_values) / len(baseline_values) if baseline_values else None
+def _baseline_range(values: list[float]) -> tuple[float, float]:
+    """The range of last week's values, widened by the factors that already word "about the same"."""
+    low, high = min(values), max(values)
+    low = low * SAME_RANGE[0] if low >= 0 else low * SAME_RANGE[1]
+    high = high * SAME_RANGE[1] if high >= 0 else high * SAME_RANGE[0]
+    return low, high
+
+
+def _from(points: list[tuple[str, float]], moment: datetime | None, shift: timedelta = timedelta(0)) -> list[tuple[str, float]]:
+    """The points at or after moment (shifted); all points when there is no moment or none are that late."""
+    if moment is None:
+        return points
+    later = [point for point in points if parse_time(point[0]) >= moment + shift]
+    return later or points
+
+
+def _average(points: list[tuple[str, float]]) -> float | None:
+    return sum(value for _, value in points) / len(points) if points else None
+
+
+def _summarise(
+    spec: MetricSpec,
+    window_points: list[tuple[str, float]],
+    baseline_points: list[tuple[str, float]],
+    incident_start: datetime | None = None,
+) -> MetricSummary:
+    baseline = sorted(baseline_points, key=lambda point: parse_time(point[0]))
+    baseline_values = [value for _, value in baseline]
+    baseline_avg = _average(baseline)
     baseline_max = max(baseline_values) if baseline_values else None
     if not window_points:
         return MetricSummary(spec.label, spec.stat, None, None, None, None, baseline_avg, baseline_max, None, 0)
     ordered = sorted(window_points, key=lambda point: parse_time(point[0]))
     values = [value for _, value in ordered]
     window_avg = sum(values) / len(values)
-    window_max = max(values)
+    window_max, window_min = max(values), min(values)
     peak_time, peak_end = _peak_span(ordered, window_max)
-    ratio = window_avg / baseline_avg if baseline_avg else None
+    minimum_time, minimum_end = _peak_span(ordered, window_min)
+    incident_average = _average(_from(ordered, incident_start))
+    same_hours = _average(_from(baseline, incident_start, BASELINE_SHIFT)) if baseline else None
+    departure, direction = None, "unchanged"
+    if baseline_values:
+        low, high = _baseline_range(baseline_values)
+        departure = next(((time, value) for time, value in ordered if value > high or value < low), None)
+        if departure:
+            direction = "rose" if departure[1] > high else "fell"
+        notable = departure is not None
+    else:
+        notable = window_max != window_min
+    extreme = {"rose": peak_time, "fell": minimum_time}.get(direction, peak_time)
     return MetricSummary(
-        spec.label, spec.stat, window_avg, window_max, min(values), peak_time,
-        baseline_avg, baseline_max, ratio, len(values), peak_end,
+        spec.label, spec.stat, window_avg, window_max, window_min, peak_time,
+        baseline_avg, baseline_max, window_avg / baseline_avg if baseline_avg else None, len(values), peak_end,
+        minimum=window_min, minimum_time=minimum_time, minimum_end=minimum_end,
+        maximum=window_max, maximum_time=peak_time, incident_average=incident_average, baseline_average=same_hours,
+        first_departure_time=departure[0] if departure else None, direction=direction, notable=notable,
+        fact_time=departure[0] if departure else extreme,
     )
 
 
@@ -115,8 +171,9 @@ def _fetch(
     now_points = _points(ctx, queries, ctx.window, region)
     window_command = ctx.last_command
     before_points = _points(ctx, queries, ctx.window.shifted(BASELINE_SHIFT), region)
+    incident_start = min(ctx.window.start + INCIDENT_LEAD, ctx.window.end)
     summaries = [
-        _summarise(spec, (now_points or {}).get(f"m{index}", []), (before_points or {}).get(f"m{index}", []))
+        _summarise(spec, (now_points or {}).get(f"m{index}", []), (before_points or {}).get(f"m{index}", []), incident_start)
         for index, spec in enumerate(specs)
     ]
     return summaries, window_command, now_points is not None
@@ -139,39 +196,31 @@ def _num(value: float) -> str:
     return format(Decimal(f"{value:.3g}"), "f")
 
 
-def _ratio_words(summary: MetricSummary) -> str:
-    ratio = summary.change_ratio
-    if ratio is None:
-        return "zero in both periods" if summary.baseline_avg == 0 and summary.window_avg == 0 else "no comparable baseline"
-    if SAME_RANGE[0] <= ratio <= SAME_RANGE[1]:
-        return "about the same"
-    if ratio > SAME_RANGE[1]:
-        return f"{_num(ratio)} times higher"
-    if summary.window_avg == 0:
-        return "down to zero"
-    return f"{_num(1 / ratio)} times lower"
+def _at(time: str | None, end: str | None) -> str:
+    return f"from {time} to {end}" if end else f"at {time}"
 
 
-def _notable(summary: MetricSummary) -> bool:
-    """Worth a line on a timeline: the summary words a change, or there is no comparison and the series moved."""
-    if summary.datapoints == 0:
-        return False
-    if summary.baseline_avg is None or _ratio_words(summary) == "no comparable baseline":
-        return summary.window_max != summary.window_min
-    return _ratio_words(summary) not in ("about the same", "zero in both periods")
+def _movement(summary: MetricSummary) -> str:
+    if summary.direction == "rose":
+        return f"rose above the range of one week earlier at {summary.first_departure_time}"
+    if summary.direction == "fell":
+        return f"fell below the range of one week earlier at {summary.first_departure_time}"
+    if summary.baseline_max == 0 and summary.maximum == 0 and summary.minimum == 0:
+        return "zero in both periods"
+    return "about the same as one week earlier"
 
 
 def _summary_text(summary: MetricSummary) -> str:
-    when = f"from {summary.peak_time} to {summary.peak_end}" if summary.peak_end else f"at {summary.peak_time}"
-    head = f"{summary.label} ({summary.stat}): peak {_num(summary.window_max)} {when}; "
-    if summary.baseline_avg is None:
-        return head + f"window average {_num(summary.window_avg)}; no comparable baseline"
-    earlier = "zero" if summary.baseline_avg == 0 else _num(summary.baseline_avg)
-    return (
-        head
-        + f"window average {_num(summary.window_avg)} against {earlier} one week earlier "
-        + f"({_ratio_words(summary)})"
+    """Contract 6: statistic, lowest and highest with their times, the incident part against the same hours
+    one week earlier, and when the series first left last week's range."""
+    head = (
+        f"{summary.label} ({summary.stat}): lowest {_num(summary.minimum)} {_at(summary.minimum_time, summary.minimum_end)}, "
+        f"highest {_num(summary.maximum)} {_at(summary.maximum_time, summary.peak_end)}; "
+        f"{_num(summary.incident_average)} during the incident"
     )
+    if summary.baseline_average is None:
+        return head + "; no comparable baseline"
+    return head + f" against {_num(summary.baseline_average)} in the same hours one week earlier; {_movement(summary)}"
 
 
 def add_metric_facts(
@@ -182,12 +231,12 @@ def add_metric_facts(
         if summary.datapoints == 0:
             outcome = "no data was returned for the window" if read_ok else "the metric could not be read (see errors)"
             ctx.evidence.add(
-                kind=DERIVED, resource=resource, command=command, data={**asdict(summary), "notable": False},
+                kind=DERIVED, resource=resource, command=command, data=asdict(summary),
                 summary=f"{summary.label} ({summary.stat}): {outcome}",
             )
             continue
         ctx.evidence.add(
-            kind=INCIDENT_TIME, resource=resource, time=summary.peak_time, command=command,
-            summary=_summary_text(summary), data={**asdict(summary), "notable": _notable(summary)},
+            kind=INCIDENT_TIME, resource=resource, time=summary.fact_time, command=command,
+            summary=_summary_text(summary), data=asdict(summary),
         )
     return summaries
