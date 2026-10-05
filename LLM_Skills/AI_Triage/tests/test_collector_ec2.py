@@ -103,9 +103,9 @@ def test_unhealthy_instance_with_event_and_console_tail(config_data, tmp_path):
     assert_read_only(ctx, aws, kube)
 
 
-def test_healthy_status_adds_no_status_fact(config_data, tmp_path):
+def test_healthy_status_adds_no_detailed_status_fact(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, answers())
-    assert with_text(ctx, "impaired") == [] and with_text(ctx, "status checks") == []
+    assert with_text(ctx, "impaired") == [] and with_text(ctx, "status checks:") == []
 
 
 def test_missing_instance(config_data, tmp_path):
@@ -242,3 +242,63 @@ def test_an_empty_latest_answer_is_retried_without_latest(config_data, tmp_path)
     COLLECTOR.run(ctx, {"instance_ids": "i-0aaa"})
     assert len(fake.called("ec2", "get-console-output")) == 2
     assert any(f.excerpt == "older tail" for f in ctx.evidence.facts)
+
+
+def stopped_status(system="not-applicable", instance_status="not-applicable"):
+    entry = status(system=system, instance_status=instance_status)
+    entry["InstanceState"] = {"Name": "stopped"}
+    return entry
+
+
+def test_a_healthy_instance_states_its_checks_in_one_fact(config_data, tmp_path):
+    ctx, aws, _ = run(config_data, tmp_path, answers())
+    facts = [f for f in ctx.evidence.facts if f.resource == "instance/i-0aaa" and f.kind == "current"]
+    assert len(facts) == 1
+    fact = facts[0]
+    assert "is running" in fact.summary
+    assert "system status ok, instance status ok" in fact.summary
+    assert "2026-09-01T08:00:00Z" in fact.summary
+    assert fact.data["system_status"] == "ok" and fact.data["instance_status"] == "ok"
+    assert "describe-instances" in fact.command and "describe-instance-status" in fact.command
+    assert len(aws.called("ec2", "describe-instances")) == 1
+    assert len(aws.called("ec2", "describe-instance-status")) == 1
+
+
+def test_a_stopped_instance_states_state_and_checks_without_metrics(config_data, tmp_path):
+    reason = {"Code": "Client.UserInitiatedShutdown", "Message": "Client.UserInitiatedShutdown: stopped"}
+    stopped = instance(state="stopped", reason=reason)
+    stopped["StateTransitionReason"] = "User initiated (2026-10-04 10:15:00 GMT)"
+    ctx, aws, kube = run(config_data, tmp_path, answers(**{
+        "ec2 describe-instances": described(stopped),
+        "ec2 describe-instance-status": {"InstanceStatuses": [stopped_status()]}}))
+    fact = with_text(ctx, "Instance i-0aaa is stopped")[0]
+    assert "system status not-applicable, instance status not-applicable" in fact.summary
+    assert "Client.UserInitiatedShutdown" in fact.summary
+    transition = [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+    assert len(transition) == 1 and transition[0].time == "2026-10-04T10:15:00Z"
+    assert "stopped" in transition[0].summary and "inside the incident window" in transition[0].summary
+    assert_read_only(ctx, aws, kube)
+
+
+def test_a_state_change_outside_the_window_has_no_timed_fact(config_data, tmp_path):
+    stopped = instance(state="stopped")
+    stopped["StateTransitionReason"] = "User initiated (2026-09-30 09:00:00 GMT)"
+    ctx, _, _ = run(config_data, tmp_path, answers(**{
+        "ec2 describe-instances": described(stopped),
+        "ec2 describe-instance-status": {"InstanceStatuses": [stopped_status()]}}))
+    assert [f for f in ctx.evidence.facts if f.kind == "incident_time"] == []
+
+
+def test_an_instance_launched_inside_the_window_has_a_timed_fact(config_data, tmp_path):
+    launched = instance()
+    launched["LaunchTime"] = IN_WINDOW
+    ctx, _, _ = run(config_data, tmp_path, answers(**{"ec2 describe-instances": described(launched)}))
+    timed = [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+    assert len(timed) == 1 and timed[0].time == "2026-10-04T10:42:10Z"
+    assert "launched" in timed[0].summary and "inside the incident window" in timed[0].summary
+    assert "2026-10-04T10:42:10Z" in with_text(ctx, "Instance i-0aaa is running")[0].summary
+
+
+def test_an_instance_without_a_status_entry_says_unknown(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, answers(**{"ec2 describe-instance-status": {"InstanceStatuses": []}}))
+    assert "system status unknown, instance status unknown" in with_text(ctx, "Instance i-0aaa is running")[0].summary

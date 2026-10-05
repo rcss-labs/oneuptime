@@ -1,14 +1,18 @@
 """EC2 collector: instance state, status checks, scheduled events, console output tail, CPU and status-check metrics."""
 from __future__ import annotations
 
+import re
+
 from triage.collectors import Collector
-from triage.collectors.common import parse_iso, split_csv, was_not_found
+from triage.collectors.common import in_window, parse_iso, split_csv, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME, MAX_EXCERPT
 from triage.metrics import MetricSpec, add_metric_facts
 from triage.window import format_time
 
 MAX_INSTANCES = 10
+# describe-instances states the time of the last state change only inside this free text.
+TRANSITION_TIME_RE = re.compile(r"\((\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) GMT\)")
 LATEST_RETRY_CODES = ("UnsupportedOperation", "IncorrectInstanceState")
 
 
@@ -21,20 +25,39 @@ def _instances(reply: dict) -> list[dict]:
     return [i for reservation in reply.get("Reservations", []) for i in reservation.get("Instances", [])]
 
 
-def _add_instance(ctx: CollectContext, instance: dict) -> None:
+def _add_instance(ctx: CollectContext, instance: dict, entry: dict | None, command: str) -> None:
+    """One current fact per instance: state, both status checks, and launch time."""
     instance_id = instance.get("InstanceId")
+    resource = f"instance/{instance_id}"
     state = (instance.get("State") or {}).get("Name")
+    system, instance_status = _check_status(entry or {}, "SystemStatus"), _check_status(entry or {}, "InstanceStatus")
     reason = instance.get("StateReason") or {}
     reason_text = f"; state reason {reason.get('Code')}: {reason.get('Message')}" if reason.get("Code") else ""
     ctx.evidence.add(
-        kind=CURRENT, resource=f"instance/{instance_id}", command=ctx.last_command,
+        kind=CURRENT, resource=resource, command=command,
         summary=(
-            f"Instance {instance_id} is {state}: type {instance.get('InstanceType')}, "
-            f"launched {_time_text(instance.get('LaunchTime'))}, "
+            f"Instance {instance_id} is {state}: system status {system}, instance status {instance_status}, "
+            f"type {instance.get('InstanceType')}, launched {_time_text(instance.get('LaunchTime'))}, "
             f"zone {(instance.get('Placement') or {}).get('AvailabilityZone')}{reason_text}"
         ),
-        data={"state": state, "instance_type": instance.get("InstanceType")},
+        data={"state": state, "instance_type": instance.get("InstanceType"),
+              "system_status": system, "instance_status": instance_status},
     )
+    if in_window(ctx.window, instance.get("LaunchTime")):
+        ctx.evidence.add(
+            kind=INCIDENT_TIME, resource=resource, command=command, time=instance.get("LaunchTime"),
+            summary=(f"Instance {instance_id} was launched at {_time_text(instance.get('LaunchTime'))}, "
+                     "inside the incident window"),
+        )
+    match = TRANSITION_TIME_RE.search(instance.get("StateTransitionReason") or "")
+    if match:
+        moment = f"{match.group(1)}T{match.group(2)}Z"
+        if in_window(ctx.window, moment):
+            ctx.evidence.add(
+                kind=INCIDENT_TIME, resource=resource, command=command, time=moment,
+                summary=(f"Instance {instance_id} changed state to {state} at {moment}, inside the incident window "
+                         f"({instance.get('StateTransitionReason')})"),
+            )
 
 
 def _check_status(entry: dict, key: str) -> str:
@@ -108,22 +131,26 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     reply = ctx.aws("ec2", "describe-instances", ["--filters", f"Name=instance-id,Values={','.join(ids)}"])
     if reply is None:
         return
+    describe_command = ctx.last_command
     found = _instances(reply)
     found_ids = {instance.get("InstanceId") for instance in found}
     for instance_id in ids:
         if instance_id not in found_ids:
             ctx.evidence.add(
-                kind=CURRENT, resource=f"instance/{instance_id}", command=ctx.last_command,
+                kind=CURRENT, resource=f"instance/{instance_id}", command=describe_command,
                 summary=f"Instance {instance_id} was not found in {ctx.region}",
             )
     if not found:
         return
-    for instance in found:
-        _add_instance(ctx, instance)
     existing = [instance_id for instance_id in ids if instance_id in found_ids]
     unhealthy = {i["InstanceId"] for i in found if (i.get("State") or {}).get("Name") != "running"}
     status = ctx.aws("ec2", "describe-instance-status", ["--instance-ids", *existing, "--include-all-instances"])
-    for entry in (status or {}).get("InstanceStatuses", []):
+    status_command = ctx.last_command if status is not None else ""
+    entries = {entry.get("InstanceId"): entry for entry in (status or {}).get("InstanceStatuses", [])}
+    for instance in found:
+        command = f"{describe_command} ; {status_command}" if status_command else describe_command
+        _add_instance(ctx, instance, entries.get(instance["InstanceId"]), command)
+    for entry in entries.values():
         if _add_status(ctx, entry):
             unhealthy.add(entry.get("InstanceId"))
     for instance in found:
