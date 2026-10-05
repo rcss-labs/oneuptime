@@ -192,6 +192,8 @@ def _secret_part(parts: tuple[str, ...], raw: tuple[str, ...], index: int) -> bo
     part = parts[index]
     if _holds_secret_stem(part):
         return True
+    if part in ("license", "licence") and index == len(parts) - 1:
+        return True  # NEW_RELIC_LICENSE; LicenseModel never gets here (its ending wins)
     if part == "code":
         return index > 0 and parts[index - 1] in SECRET_CODE_QUALIFIERS
     if part in KEY_WORDS:  # a bare "key" is a lookup key (S3 Key=, a tag Key)

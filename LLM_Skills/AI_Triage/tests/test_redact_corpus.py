@@ -317,6 +317,7 @@ LEAKS = [
     ("html-escaped-json", "&quot;password&quot;:&quot;" + PWP + "&quot;", PWP),
     ("multipart-password", 'Content-Disposition: form-data; name="password"\r\n\r\n' + PWP + "\r\n--b", PWP),
     ("add-mask", "::add-mask::" + PWP, PWP),
+    ("license-env", "NEW_RELIC_LICENSE=" + PWP, PWP),
 ]
 
 assert len(LEAKS) >= 150, len(LEAKS)
@@ -413,6 +414,8 @@ HARMLESS = [
     ("private-subnets", "private_subnets: subnet-0123456789abcdef0"),
     ("license-model", "LicenseModel: license-included"),
     ("key-manager", "KeyManager: CUSTOMER"),
+    ("license-type", "license_type: BYOL"),
+    ("license-count", "LicenseCount: 4"),
     # round 5 ruling 6: labelled commits and AWS request ids
     ("git-commit", "deployed commit " + _hex(60, 40) + " to prod"),
     ("image-tag-sha", "image tag " + _hex(61, 40)),

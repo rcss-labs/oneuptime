@@ -1800,7 +1800,9 @@ def test_safety_net_never_swallows_base_exceptions(monkeypatch):
         ("auth", True), ("authorization", True), ("authentication", True), ("authtoken", True), ("x-auth-token", True),
         ("author", False), ("authority", False), ("authorize", False), ("authorized", False), ("unauthorized", False),
         ("Authenticated", False), ("authenticator", False),
-        ("license", False), ("licence", False), ("LicenseModel", False), ("license_key", True), ("licenceKey", True),
+        # coordinator correction: license is secret as the last part of a name or before key
+        ("license", True), ("licence", True), ("LicenseModel", False), ("license_key", True), ("licenceKey", True),
+        ("NEW_RELIC_LICENSE", True), ("LICENSE", True), ("license_type", False), ("LicenseCount", False),
         ("passive", False), ("passed", False), ("passing", False), ("bypass", False), ("passenger", False),
         ("passthrough", False),
         ("KeyManager", False), ("LicenseModel", False), ("TokenSize", False), ("KeyPairs", False),
