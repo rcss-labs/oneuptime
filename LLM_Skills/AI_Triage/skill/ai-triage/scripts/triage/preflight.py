@@ -196,8 +196,11 @@ def run_preflight(
         for alias, account in config.accounts.items():
             if accounts and alias not in accounts:
                 continue
-            identity, _ = check_identity(account, config.permission_set, runner)
             name = f"Sign-in: {alias}"
+            if replay:
+                checks.append(Check(name, SKIPPED, "replay mode: no sign-in is checked"))
+                continue
+            identity, _ = check_identity(account, config.permission_set, runner)
             if identity.status == PASSED:
                 checks.append(Check(name, OK, identity.detail))
             elif identity.status == EXPIRED:

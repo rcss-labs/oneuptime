@@ -203,7 +203,9 @@ def test_preflight_command_in_replay_mode_uses_fixtures_and_treats_tools_as_pres
     assert checks["AWS CLI"]["status"] == OK
     assert checks["kubectl"]["status"] == "skipped"
     assert "replay" in checks["kubectl"]["detail"]
-    assert checks["Sign-in: prod-main"]["status"] == OK
+    assert checks["Sign-in: prod-main"]["status"] == "skipped"
+    assert checks["Sign-in: staging"]["status"] == "skipped"
+    assert "replay" in checks["Sign-in: prod-main"]["detail"]
     assert captured.err.count("REPLAY MODE") == 1
     assert f"REPLAY MODE: answers come from {replay}; nothing is called." in captured.err
 
@@ -367,3 +369,26 @@ def test_other_spellings_of_shadows_and_options_fail(skill_dir, extra, named):
 )
 def test_other_harmless_spellings_pass(skill_dir, extra):
     assert shell_check(skill_dir, extra).status == OK, extra
+
+
+def test_replay_makes_no_sign_in_call_and_reports_it_skipped(skill_dir):
+    fake = FakeAws({})
+    checks = run_preflight(skill_dir, runner=fake, env={"TYPESAFE_API_KEY": "set"},
+                           which=lambda name: f"replay/{name}", replay=True)
+    assert fake.calls == []
+    named = by_name(checks)
+    assert named["Sign-in: prod-main"].status == "skipped" and named["Sign-in: staging"].status == "skipped"
+    assert named["Config"].status == OK and named["TypeSafe key"].status == OK
+    assert exit_code(checks) == 0
+
+
+def test_replay_sign_in_skip_respects_the_account_filter(skill_dir):
+    checks = run_preflight(skill_dir, ["staging"], runner=FakeAws({}), env={"TYPESAFE_API_KEY": "set"},
+                           which=lambda name: f"replay/{name}", replay=True)
+    assert "Sign-in: prod-main" not in by_name(checks) and by_name(checks)["Sign-in: staging"].status == "skipped"
+
+
+def test_outside_replay_the_sign_in_check_still_runs(skill_dir):
+    fake = signed_in()
+    checks = run(skill_dir, runner=fake)
+    assert fake.calls and by_name(checks)["Sign-in: prod-main"].status == OK
