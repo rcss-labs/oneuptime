@@ -5,6 +5,7 @@ import pytest
 
 from triage.case import (
     CaseError,
+    check_replay,
     create_case,
     incident_keys,
     load_case,
@@ -571,3 +572,49 @@ def test_a_file_is_refused(cases_config, service_map, skill_dir):
     case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
     with pytest.raises(CaseError):
         resolve_case_dir(case_dir / "case.json", cases_config)
+
+
+# replay is visible in the case
+
+def test_a_live_case_has_replay_false_and_no_banner(cases_config, service_map, skill_dir, monkeypatch):
+    monkeypatch.delenv("AI_TRIAGE_FIXTURES", raising=False)
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    case = load_case(case_dir)
+    assert case["replay"] is False
+    assert "REPLAY" not in (case_dir / "case.md").read_text()
+    check_replay(case)
+
+
+def test_a_case_made_with_fixtures_set_records_replay_and_says_so_in_the_first_line(
+        cases_config, service_map, skill_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path))
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    case = load_case(case_dir)
+    assert case["replay"] is True
+    first = (case_dir / "case.md").read_text().splitlines()[0]
+    assert first.startswith("# Case: INC-123") and "REPLAY" in first
+    check_replay(case)
+
+
+def test_check_replay_refuses_when_the_environment_and_the_case_disagree(
+        cases_config, service_map, skill_dir, monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path))
+    replay_case = load_case(make_case(FULL_INCIDENT, cases_config, service_map, skill_dir))
+    monkeypatch.delenv("AI_TRIAGE_FIXTURES")
+    with pytest.raises(CaseError) as caught:
+        check_replay(replay_case)
+    assert "replay" in str(caught.value).lower() and "\n" not in str(caught.value)
+    live_case = load_case(make_case({**FULL_INCIDENT, "number": "INC-2"}, cases_config, service_map, skill_dir))
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path))
+    with pytest.raises(CaseError):
+        check_replay(live_case)
+
+
+def test_an_old_case_without_the_key_counts_as_live(monkeypatch):
+    monkeypatch.delenv("AI_TRIAGE_FIXTURES", raising=False)
+    check_replay({})
+
+
+def test_an_empty_fixtures_variable_is_not_replay(cases_config, service_map, skill_dir, monkeypatch):
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", "  ")
+    assert load_case(make_case(FULL_INCIDENT, cases_config, service_map, skill_dir))["replay"] is False

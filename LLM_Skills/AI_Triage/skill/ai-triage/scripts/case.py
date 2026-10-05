@@ -14,6 +14,8 @@ from pathlib import Path
 
 from triage.case import (
     CaseError,
+    REPLAY_NOTICE,
+    check_replay,
     create_case,
     load_case,
     parse_incident,
@@ -77,6 +79,12 @@ def _service_map(skill_dir: Path, config, required: bool) -> ServiceMap:
     return load_map(path, config)
 
 
+def _load_checked(case_dir: Path) -> dict:
+    case = load_case(case_dir)
+    check_replay(case)
+    return case
+
+
 def _init(args: argparse.Namespace, config) -> int:
     incident = parse_incident(_read_json(args.incident))
     now = parse_time(args.now) if args.now else datetime.now(timezone.utc)
@@ -104,7 +112,7 @@ def _target(args: argparse.Namespace, config) -> int:
 
 
 def _plan(args: argparse.Namespace, config) -> int:
-    commands = plan_collection(load_case(args.case_dir), config, args.skill_dir)
+    commands = plan_collection(_load_checked(args.case_dir), config, args.skill_dir)
     print(json.dumps([
         {"domain": c.domain, "tool": c.tool, "name": c.name, "command": shlex.join(c.argv), "reason": c.reason}
         for c in commands
@@ -113,14 +121,17 @@ def _plan(args: argparse.Namespace, config) -> int:
 
 
 def _collect(args: argparse.Namespace, config) -> int:
-    commands = plan_collection(load_case(args.case_dir), config, args.skill_dir)
+    commands = plan_collection(_load_checked(args.case_dir), config, args.skill_dir)
     results = run_collection(commands, args.case_dir)
     print(json.dumps({"commands": results}, indent=2))
     return 1 if any(result["status"] in ("not started", "timed out") for result in results) else 0
 
 
 def _show(args: argparse.Namespace, config) -> int:
-    print(json.dumps(load_case(args.case_dir), indent=2))
+    case = _load_checked(args.case_dir)
+    if case.get("replay"):
+        print(REPLAY_NOTICE)
+    print(json.dumps(case, indent=2))
     return 0
 
 
@@ -131,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(default_config_path(args.skill_dir))
         if getattr(args, "case_dir", None) is not None:
             args.case_dir = resolve_case_dir(args.case_dir, config)
+            if args.subcommand == "target":
+                check_replay(load_case(args.case_dir))
         return handler(args, config)
     except (ConfigError, MapError, CaseError) as error:
         return _fail("; ".join(error.errors))

@@ -1,4 +1,4 @@
-# Case: {{number}}
+# Case: {{number}}{{replay_mark}}
 
 Folder: {{case_dir}}
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from triage.config import TriageConfig
+from triage.fixtures import FIXTURE_ENV
 from triage.redact import Redactor
 from triage.service_map import MatchKeys, ServiceMap, _check_resources, match_incident
 from triage.window import WindowError, format_time, parse_time, window_around
@@ -130,6 +132,25 @@ def incident_keys(incident: dict) -> MatchKeys:
     return MatchKeys(keys.monitors, keys.labels, tuple(dict.fromkeys(keys.hostnames)))
 
 
+REPLAY_NOTICE = "REPLAY: the evidence in this case comes from recordings, not from live systems."
+
+
+def replay_active() -> bool:
+    """True when this session answers from recordings (AI_TRIAGE_FIXTURES is set)."""
+    return bool(os.environ.get(FIXTURE_ENV, "").strip())
+
+
+def check_replay(case: dict) -> None:
+    """Refuse a case whose replay state differs from the environment's: a recorded case must never be extended
+    with live evidence, and a live case never with recorded answers."""
+    was_replay = bool(case.get("replay", False))
+    if was_replay != replay_active():
+        raise CaseError([
+            "this case was made in replay mode, but " + FIXTURE_ENV + " is not set now" if was_replay
+            else "this case was made from live systems, but " + FIXTURE_ENV + " is set now (replay mode)"
+        ])
+
+
 def skill_version(skill_dir: Path) -> str:
     path = skill_dir / "VERSION"
     return path.read_text().strip() if path.is_file() else "unknown"
@@ -180,6 +201,7 @@ def create_case(incident: dict, config: TriageConfig, service_map: ServiceMap, n
     case = {
         "skill_version": skill_version(skill_dir),
         "created_at": format_time(now),
+        "replay": replay_active(),
         "case_dir": str(case_dir),
         "incident": {**{key: safe_incident.get(key) for key in INCIDENT_SUMMARY_KEYS}, "hostnames": list(keys.hostnames)},
         "incident_start": incident_start,
@@ -328,6 +350,7 @@ def render_case(case: dict) -> str:
     incident = case["incident"]
     values = {
         "number": _line(incident["number"]),
+        "replay_mark": " (REPLAY: recorded, not live)" if case.get("replay") else "",
         "case_dir": _line(case["case_dir"]),
         "incident": _bullets([
             ("Title", incident["title"]), ("URL", incident["url"]), ("Severity", incident["severity"]),

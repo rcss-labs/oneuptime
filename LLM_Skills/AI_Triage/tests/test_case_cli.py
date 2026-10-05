@@ -359,3 +359,31 @@ def test_a_run_folder_given_through_a_link_still_works(skill_dir, case_dir, tmp_
     link = tmp_path / "link"
     link.symlink_to(case_dir)
     assert run(skill_dir, "show", "--case-dir", str(link)).returncode == 0
+
+
+# replay
+
+def run_with_env(skill_dir, env, *args):
+    return subprocess.run([sys.executable, str(COMMAND), *args, "--skill-dir", str(skill_dir)],
+                          capture_output=True, text=True, env={**os.environ, **env})
+
+
+def test_init_in_replay_marks_the_case_and_later_commands_refuse_without_it(skill_dir, tmp_path):
+    fixtures = {"AI_TRIAGE_FIXTURES": str(tmp_path)}
+    made = run_with_env(skill_dir, fixtures, "init", "--incident", write(tmp_path, "i.json", INCIDENT), "--now", NOW)
+    assert made.returncode == 0, made.stderr
+    case_dir = json.loads(made.stdout)["case_dir"]
+    shown = run_with_env(skill_dir, fixtures, "show", "--case-dir", case_dir)
+    assert shown.returncode == 0
+    lines = shown.stdout.splitlines()
+    assert lines[0].startswith("REPLAY") and json.loads("\n".join(lines[1:]))["replay"] is True
+    env = {key: "" for key in fixtures}
+    for subcommand in ("show", "plan", "collect"):
+        refused = run_with_env(skill_dir, env, subcommand, "--case-dir", case_dir)
+        assert_clean_exit_2(refused)
+        assert "replay" in refused.stderr.lower()
+
+
+def test_a_live_case_refuses_a_session_in_replay(skill_dir, case_dir, tmp_path):
+    result = run_with_env(skill_dir, {"AI_TRIAGE_FIXTURES": str(tmp_path)}, "show", "--case-dir", case_dir)
+    assert_clean_exit_2(result)
