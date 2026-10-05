@@ -517,7 +517,7 @@ def test_ordinary_text_across_a_line_wrap_is_not_a_token():
 
 @pytest.mark.parametrize("length", [24, 32, 40])
 def test_random_lowercase_tokens_are_caught_at_eighty_percent_or_better(length):
-    caught = sum("entropy" in kinds(f"key {plain(length, seed, LOWER_DIGITS)} end") for seed in range(500))
+    caught = sum("entropy" in kinds(f"val {plain(length, seed, LOWER_DIGITS)} end") for seed in range(500))
     assert caught / 500 >= 0.8
 
 
@@ -707,8 +707,6 @@ ROUND2_NEGATIVES = [
     "password: none,",
     "token: 512;",
     "password: 2026-09-01.",
-    "secret: prod/db/credentials",
-    "secret_name: prod/orders/db-credentials",
     "oauth: enabled",
     "tokenizer: bert",
     "author: jane",
@@ -728,11 +726,11 @@ def test_round2_negative_shapes_give_no_hit(sample):
 
 
 def test_hits_on_a_secret_word_line_name_the_right_kind():
-    assert kinds("GitHub token " + HEX40) == ["entropy"]
+    assert kinds("GitHub token " + HEX40) == ["secret_word_value"]
 
 
 def _random_keys(count: int, make) -> int:
-    return sum("entropy" in kinds("key " + make(seed) + " end") for seed in range(count))
+    return sum("entropy" in kinds("val " + make(seed) + " end") for seed in range(count))
 
 
 WORDS = ["correct", "horse", "battery", "staple", "orange", "purple", "monkey", "castle", "forest", "winter"]
@@ -779,7 +777,8 @@ EKS_REPORT = """# Incident: ingress 502 after node rotation
 - Event FailedCreatePodSandBox: failed to create sandbox for containerd://{container}
 - containerID: docker://{container}
 - imageID: registry.example.com/checkout@sha256:{digest}
-- serviceAccount spec (automountServiceAccountToken: false) and tokenExpirationSeconds: 3600
+- serviceAccount spec (automountServiceAccountToken: false)
+- projected volume tokenExpirationSeconds: 3600
 - cri-o://{container} was restarted twice
 """
 
@@ -952,6 +951,117 @@ def test_one_megabyte_of_round3_shapes_is_scanned_in_under_two_seconds():
 
 def test_one_megabyte_line_of_table_cells_is_scanned_in_under_two_seconds():
     text = "| a | " * 150_000
+    start = time.perf_counter()
+    scan(text)
+    assert time.perf_counter() - start < 2.0
+
+
+# ---------------------------------------------------------------- final review fixes (C2)
+def _shape_values(count: int = 60):
+    uuid = lambda seed: uuid_text(seed)  # noqa: E731
+    return {
+        "hex32": lambda seed: plain(32, seed, HEX),
+        "uuid": uuid,
+        "lower20": lambda seed: plain(20, seed, string.ascii_lowercase),
+        "mixed20": lambda seed: plain(20, seed, ALNUM),
+        "lowerdigit20": lambda seed: plain(20, seed, LOWER_DIGITS),
+        "lowerdigit32": lambda seed: plain(32, seed, LOWER_DIGITS),
+        "hex40": lambda seed: plain(40, seed, HEX),
+        "hex64": lambda seed: plain(64, seed, HEX),
+        "mixed32": lambda seed: plain(32, seed, ALNUM),
+    }
+
+
+PHRASINGS = [
+    "the gateway key {v}.",
+    "token {v}",
+    "api key: {v}",
+    "key={v}",
+    "secret {v} was rejected",
+    "X-Api-Key: {v}",
+    "api_key={v}",
+    "token={v}",
+    "client_secret: {v}",
+    "vault lease {v} expired",
+    "gateway rejected credential {v}",
+    "the passphrase is {v}",
+    "access key id {v}",
+    "| Key | {v} |",
+]
+
+
+@pytest.mark.parametrize("shape", list(_shape_values()))
+def test_every_shape_after_a_secret_word_is_flagged_in_every_phrasing(shape):
+    make = _shape_values()[shape]
+    missed = []
+    for index, phrasing in enumerate(PHRASINGS):
+        for seed in range(60):
+            text = phrasing.format(v=make(1000 + index * 100 + seed))
+            if not scan(text):
+                missed.append((index, seed))
+    assert missed == []
+
+
+@pytest.mark.parametrize("word", ["key", "KEY", "Token", "SECRET", "credentials", "Passphrase", "lease", "tokens", "keys"])
+def test_secret_words_in_any_case_and_plural_flag_a_long_token(word):
+    value = plain(24, 400, LOWER_DIGITS)
+    assert [h.kind for h in scan(f"{word} {value}")] == ["secret_word_value"]
+
+
+def test_the_token_may_be_up_to_three_words_after_the_secret_word_but_not_four():
+    value = plain(18, 401, ALNUM)
+    assert scan("key one two " + value) != []
+    assert scan("key one two three " + value) == []
+    assert scan("key: 'one' | two | " + value) != []
+
+
+def test_tokens_under_sixteen_characters_are_not_flagged():
+    assert scan("key " + plain(15, 402, ALNUM)) == []
+    assert scan("key " + plain(16, 403, ALNUM)) != []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "key <SECRET-12>",
+        "token <REDACTED-ACCOUNT-12>",
+        "api key: <TOKEN-3>",
+        "secret arn:aws:secretsmanager:eu-west-1:<ACCOUNT>:secret:orders/prod/db-AbCdEf",
+        "key arn:aws:kms:eu-west-1:<ACCOUNT>:key/" + "4266" + "14174000" * 2,
+        "arn:aws:secretsmanager:eu-west-1:<ACCOUNT>:secret:orders/prod/database-credentials-AbCdEf",
+        "secretsmanager:GetSecretValue was denied for the application role",
+        "secret_name: " + "prod-orders-database-credentials",
+        "tokenExpirationSeconds: 3600 for the projected service account volume",
+    ],
+)
+def test_masks_arns_and_glued_names_after_a_secret_word_are_not_flagged(line):
+    assert scan(line) == [], describe(scan(line))
+
+
+def test_a_configured_account_alias_after_a_secret_word_is_allowed():
+    alias = "prod-payments-account"
+    assert scan("key " + alias) != []
+    assert scan("key " + alias, frozenset({alias})) == []
+
+
+def test_the_description_names_the_word_and_never_the_value():
+    value = plain(32, 404, HEX)
+    hits = scan("vault lease " + value + " expired")
+    assert hits[0].word == "lease"
+    line = describe(hits)[0]
+    assert "value after the word 'lease'" in line
+    assert value[:6] not in line and value[-6:] not in line
+    assert all(value[start : start + 4] not in repr(hits[0]) for start in range(0, len(value) - 3))
+
+
+def test_the_position_points_at_the_value():
+    value = plain(24, 405, ALNUM)
+    hit = scan("first\nthe gateway key " + value)[0]
+    assert (hit.line, hit.column, hit.length) == (2, 17, 24)
+
+
+def test_one_megabyte_of_secret_words_is_scanned_in_under_two_seconds():
+    text = "key a b token c d lease " * 45_000
     start = time.perf_counter()
     scan(text)
     assert time.perf_counter() - start < 2.0

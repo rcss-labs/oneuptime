@@ -21,6 +21,7 @@ class Hit:
     line: int  # 1-based
     column: int  # 1-based, in the original text
     length: int
+    word: str = ""  # the secret word a "secret_word_value" hit follows; never the value
 
 
 # Entropy threshold in bits per character. Random base64 of 24 characters averages about 4.3
@@ -521,7 +522,37 @@ def _wrapped_vendor_candidates(text: str):
                 yield 1, to_text(match.start()), to_text(match.end() - 1) + 1, "vendor_token"
 
 
-def _candidates(text: str, allowed: frozenset[str]):
+_SECRET_WORD_RE = re.compile(
+    r"(?:api[ _-]?key|access[ _-]?key|key|token|secret|credential|passphrase|lease)s?"
+    r"(?=$|[\s|,;\"'`()\[\]{}:=<>*.!?])",
+    re.IGNORECASE,
+)
+_AFTER_WORD_RE = re.compile(r"<[A-Z][A-Z0-9_]*(?:-[A-Z0-9_]+)*>|[^\s|,;\"'`()\[\]{}:=<>*]+")
+MIN_VALUE_AFTER_WORD = 16
+
+
+def _secret_word_values(text: str, allowed: frozenset[str], words: dict):
+    """Any token of 16 or more characters within three words after a secret word, whatever its shape."""
+    for word in _SECRET_WORD_RE.finditer(text):
+        line_end = text.find("\n", word.end(), word.end() + LINE_WINDOW)
+        stop = word.end() + LINE_WINDOW if line_end < 0 else line_end
+        floor = max(0, word.start() - LINE_WINDOW)
+        chunk_start = max(text.rfind(" ", floor, word.start()), text.rfind("\n", floor, word.start()), floor - 1) + 1
+        if text[chunk_start : chunk_start + 4].lower() == "arn:":
+            continue  # the word is a part of an ARN
+        for count, token in enumerate(_AFTER_WORD_RE.finditer(text, word.end(), stop)):
+            if count == 3:
+                break
+            value = token.group()
+            if value.lower() == "arn" and text[token.end() : token.end() + 1] == ":":
+                break  # an ARN follows; its pieces are not secrets
+            if value.startswith("<") or len(value) < MIN_VALUE_AFTER_WORD or value in allowed:
+                continue  # a mask, a short word or a configured alias
+            words[(token.start(), token.end())] = re.sub(r"s$", "", word.group().lower())
+            yield token.start(), token.end()
+
+
+def _candidates(text: str, allowed: frozenset[str], words: dict | None = None):
     """Yield (priority, start, end, kind) in the normalised text; lower priority wins an overlap."""
     for match in _PEM_RE.finditer(text):
         if not any(word in match.group() for word in _PUBLIC_PEM):
@@ -541,6 +572,8 @@ def _candidates(text: str, allowed: frozenset[str]):
     for start, end in _named_values(text):
         yield 2, start, end, "named_value"
     yield from _wrapped_vendor_candidates(text)
+    for start, end in _secret_word_values(text, allowed, words if words is not None else {}):
+        yield 2, start, end, "secret_word_value"
     for match in _EMAIL_RE.finditer(text):
         yield 3, match.start(), match.end(), "email"
     for match in _PHONE_RE.finditer(text):
@@ -565,7 +598,8 @@ def scan(text: str, allowed_account_aliases: frozenset[str] = frozenset()) -> li
         body = normalised.text
         taken = bytearray(len(body))
         accepted: list[tuple[int, int, str]] = []
-        for _, start, end, kind in sorted(_candidates(body, allowed_account_aliases)):
+        words: dict[tuple[int, int], str] = {}
+        for _, start, end, kind in sorted(_candidates(body, allowed_account_aliases, words)):
             if end <= start or any(taken[start:end]):
                 continue
             taken[start:end] = b"\x01" * (end - start)
@@ -574,7 +608,7 @@ def scan(text: str, allowed_account_aliases: frozenset[str] = frozenset()) -> li
         for start, end, kind in accepted:
             origin, origin_end = normalised.original_span(start, end)
             line, column = normalised.line_column(origin)
-            hits.append(Hit(kind, line, column, origin_end - origin))
+            hits.append(Hit(kind, line, column, origin_end - origin, words.get((start, end), "")))
         return sorted(hits, key=lambda hit: (hit.line, hit.column))
     except Exception:  # noqa: BLE001 - the audit must fail closed, never crash the publish
         return [Hit("unreadable", 1, 1, len(text) if isinstance(text, str) else 0)]
@@ -582,4 +616,8 @@ def scan(text: str, allowed_account_aliases: frozenset[str] = frozenset()) -> li
 
 def describe(hits: list[Hit]) -> list[str]:
     """One line per hit: kind, line, column, length. No matched text."""
-    return [f"{hit.kind} at line {hit.line}, column {hit.column}, length {hit.length}" for hit in hits]
+    return [
+        f"{hit.kind} at line {hit.line}, column {hit.column}, length {hit.length}"
+        + (f", value after the word '{hit.word}'" if hit.word else "")
+        for hit in hits
+    ]
