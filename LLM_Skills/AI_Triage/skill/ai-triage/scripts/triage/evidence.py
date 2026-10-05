@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -22,6 +23,9 @@ MAX_SUMMARY = 500
 MAX_DATA_STRING = 500
 MAX_DATA_KEYS = 50
 MAX_KEY_LENGTH = 100
+MAX_NESTED_ENTRIES = 50
+NOT_A_NUMBER = "not a number"
+OMITTED_SUFFIX = "_omitted"
 SUMMARY_CUT_MARKER = "… [summary cut]"
 _SUFFIX_CLEANER = re.compile(r"[^A-Za-z0-9-]")
 
@@ -49,24 +53,68 @@ def _cut_summary(text: str) -> str:
     return text[: MAX_SUMMARY - len(SUMMARY_CUT_MARKER)] + SUMMARY_CUT_MARKER
 
 
-def _cut_strings(value: Any) -> Any:
-    """Cut every string inside value, and every key, at any depth."""
+def _first_entries(collection: list | dict) -> list | dict:
+    if isinstance(collection, list):
+        return collection[:MAX_NESTED_ENTRIES]
+    return dict(list(collection.items())[:MAX_NESTED_ENTRIES])
+
+
+def _bound_dict(value: dict) -> dict:
+    """Keys cut to MAX_KEY_LENGTH; a key equal to an earlier one after the cut is dropped and counted in
+    keys_omitted. A nested list or dict longer than MAX_NESTED_ENTRIES is cut, and its count of dropped
+    entries is put beside it as "<key>_omitted"."""
+    bounded: dict[str, Any] = {}
+    collisions = 0
+    for key, item in value.items():
+        cut_key = str(key)[:MAX_KEY_LENGTH]
+        if cut_key in bounded:
+            collisions += 1
+            continue
+        if isinstance(item, (list, dict)) and len(item) > MAX_NESTED_ENTRIES:
+            bounded[cut_key] = _bound(_first_entries(item))
+            omitted_key = cut_key[: MAX_KEY_LENGTH - len(OMITTED_SUFFIX)] + OMITTED_SUFFIX
+            bounded.setdefault(omitted_key, len(item) - MAX_NESTED_ENTRIES)
+        else:
+            bounded[cut_key] = _bound(item)
+    if collisions:
+        earlier = bounded.get("keys_omitted")
+        bounded["keys_omitted"] = collisions + (earlier if isinstance(earlier, int) else 0)
+    return bounded
+
+
+def _bound_list_entry(item: Any) -> Any:
+    """A list inside a list has no key to put a count beside: a long one ends with a marker entry,
+    and a long dict counts its dropped entries in keys_omitted."""
+    if isinstance(item, list) and len(item) > MAX_NESTED_ENTRIES:
+        return _bound(_first_entries(item)) + [f"{len(item) - MAX_NESTED_ENTRIES} more entries omitted"]
+    if isinstance(item, dict) and len(item) > MAX_NESTED_ENTRIES:
+        kept = _bound(_first_entries(item))
+        kept["keys_omitted"] = kept.get("keys_omitted", 0) + len(item) - MAX_NESTED_ENTRIES
+        return kept
+    return _bound(item)
+
+
+def _bound(value: Any) -> Any:
+    """Cut every string, key, and nested collection inside value, at any depth; non-finite numbers become text."""
     if isinstance(value, str):
         return _cut(value, MAX_DATA_STRING)
+    if isinstance(value, float) and not math.isfinite(value):
+        return NOT_A_NUMBER
     if isinstance(value, dict):
-        return {str(key)[:MAX_KEY_LENGTH]: _cut_strings(item) for key, item in value.items()}
+        return _bound_dict(value)
     if isinstance(value, list):
-        return [_cut_strings(item) for item in value]
+        return [_bound_list_entry(item) for item in value]
     return value
 
 
 def _limit_data(data: dict) -> dict:
     """At most MAX_DATA_KEYS keys; extra keys are dropped and counted in keys_omitted."""
-    cut = _cut_strings(data)
+    cut = _bound(data)
     if len(cut) <= MAX_DATA_KEYS:
         return cut
+    omitted = cut.pop("keys_omitted", 0)
     kept = dict(list(cut.items())[: MAX_DATA_KEYS - 1])
-    kept["keys_omitted"] = len(cut) - len(kept)
+    kept["keys_omitted"] = len(cut) - len(kept) + (omitted if isinstance(omitted, int) else 0)
     return kept
 
 
@@ -82,6 +130,7 @@ class Evidence:
         self.facts: list[Fact] = []
         self.errors: list[dict] = []
         self.truncated = False
+        self.asked: dict | None = None
 
     def add(
         self,
@@ -114,13 +163,17 @@ class Evidence:
         self.facts.append(fact)
         return fact
 
+    def set_asked(self, targets: dict[str, Any], window: dict[str, str]) -> None:
+        """Record what was asked (targets as given, window arguments), so a finding that only quotes it can be refused."""
+        self.asked = _bound(self.redactor.value({"targets": dict(targets), "window": dict(window)}))
+
     def add_error(self, command: str, code: str, message: str) -> None:
         self.errors.append(
             {"command": self.redactor.text(command), "code": code, "message": _cut(self.redactor.text(message), MAX_ERROR_MESSAGE)}
         )
 
     def to_dict(self) -> dict:
-        return {
+        document = {
             "collector": self.collector,
             "account": self.account,
             "region": self.region,
@@ -129,9 +182,12 @@ class Evidence:
             "errors": list(self.errors),
             "truncated": self.truncated,
         }
+        if self.asked is not None:
+            document["asked"] = self.asked
+        return document
 
     def to_json(self) -> str:
-        return json.dumps(self.to_dict(), indent=2)
+        return json.dumps(self.to_dict(), indent=2, allow_nan=False)
 
     def write(self, case_dir: Path, suffix: str = "") -> Path:
         name = "-".join(_SUFFIX_CLEANER.sub("", part) for part in (self.collector, self.account, self.region))
@@ -141,7 +197,12 @@ class Evidence:
         directory = case_dir / "evidence"
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{name}.json"
-        path.write_text(self.to_json() + "\n")
+        text = self.to_json() + "\n"
+        try:
+            with path.open("x") as handle:
+                handle.write(text)
+        except FileExistsError:
+            raise FileExistsError(f"{path} already exists; pass another --suffix to keep both") from None
         return path
 
 

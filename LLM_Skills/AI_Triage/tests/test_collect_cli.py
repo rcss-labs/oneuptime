@@ -313,3 +313,40 @@ def test_one_of_comma_only_value_counts_as_missing(skill_dir, one_of_collector, 
 
 def test_one_of_value_with_a_real_item_passes(skill_dir, one_of_collector):
     assert collect.main(args(skill_dir, "--target", "a= , x", name="pick"), runner=FakeAws({})) == 0
+
+
+# Fix round 4
+
+def test_existing_evidence_file_is_not_overwritten(skill_dir, fake_collector, tmp_path, capsys):
+    case = tmp_path / "case"
+    argv = args(skill_dir, "--target", "thing=x", "--case-dir", str(case))
+    assert collect.main(argv, runner=FakeAws({})) == 0
+    capsys.readouterr()
+    assert collect.main(argv, runner=FakeAws({})) == 2
+    assert "--suffix" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", [",", " , ", ",,  ,"])
+def test_comma_only_required_target_exits_4(skill_dir, fake_collector, value):
+    assert collect.main(args(skill_dir, "--target", f"thing={value}")) == 4
+
+
+def test_asked_holds_every_target_as_given(skill_dir, fake_collector, tmp_path):
+    case = tmp_path / "case"
+    argv = args(skill_dir, "--target", "thing=x", "--target", "extra=a, b", "--case-dir", str(case))
+    assert collect.main(argv, runner=FakeAws({})) == 0
+    document = json.loads(next((case / "evidence").iterdir()).read_text())
+    assert document["asked"]["targets"] == {"thing": "x", "extra": ["a", "b"]}
+    assert document["asked"]["window"] == {"start": WINDOW_START, "end": WINDOW_END}
+
+
+def test_asked_is_written_when_the_collector_fails(skill_dir, monkeypatch, tmp_path):
+    def run(ctx, targets):
+        raise KeyError("nope")
+
+    monkeypatch.setattr(collect, "all_collectors", lambda: {"boom": Collector("boom", "d", ("thing",), (), run)})
+    case = tmp_path / "case"
+    assert collect.main(args(skill_dir, "--target", "thing=y", "--case-dir", str(case), name="boom"), runner=FakeAws({})) == 0
+    document = json.loads(next((case / "evidence").iterdir()).read_text())
+    assert document["asked"]["targets"] == {"thing": "y"}
+    assert document["errors"][0]["code"] == "CollectorError"

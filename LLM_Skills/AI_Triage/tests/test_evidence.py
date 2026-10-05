@@ -182,3 +182,62 @@ def test_data_with_few_keys_has_no_omission_note():
 def test_nested_keys_are_cut():
     fact = add_simple(make_evidence(), data={"a": {"k" * 300: 1}})
     assert all(len(key) <= 100 for key in fact.data["a"])
+
+
+# Fix round 4
+
+def test_keys_equal_after_the_cut_do_not_merge_silently():
+    fact = add_simple(make_evidence(), data={"a" * 100 + "1": "first", "a" * 100 + "2": "second"})
+    assert fact.data == {"a" * 100: "first", "keys_omitted": 1}
+
+
+def test_nested_keys_equal_after_the_cut_are_counted():
+    fact = add_simple(make_evidence(), data={"inner": {"b" * 100 + "1": 1, "b" * 100 + "2": 2}})
+    assert fact.data["inner"] == {"b" * 100: 1, "keys_omitted": 1}
+
+
+def test_nested_lists_and_dicts_are_capped_at_50_with_a_count_beside_them():
+    fact = add_simple(make_evidence(), data={"items": list(range(5000)), "table": {f"k{n}": n for n in range(300)}, "few": [1, 2]})
+    assert fact.data["items"] == list(range(50))
+    assert fact.data["items_omitted"] == 4950
+    assert len(fact.data["table"]) == 50 and fact.data["table_omitted"] == 250
+    assert fact.data["few"] == [1, 2] and "few_omitted" not in fact.data
+
+
+def test_lists_inside_lists_are_capped_with_a_marker_entry():
+    fact = add_simple(make_evidence(), data={"rows": [list(range(60))]})
+    assert fact.data["rows"][0] == list(range(50)) + ["10 more entries omitted"]
+
+
+def test_non_finite_numbers_become_text_and_json_is_strict():
+    evidence = make_evidence()
+    add_simple(evidence, data={"a": float("nan"), "b": [float("inf")], "c": {"d": float("-inf")}, "e": 1.5})
+    document = json.loads(evidence.to_json(), parse_constant=lambda name: pytest.fail(f"non-standard JSON {name}"))
+    data = document["facts"][0]["data"]
+    assert data == {"a": "not a number", "b": ["not a number"], "c": {"d": "not a number"}, "e": 1.5}
+
+
+def test_write_refuses_to_overwrite_an_existing_file(tmp_path):
+    first = make_evidence().write(tmp_path)
+    before = first.read_text()
+    with pytest.raises(FileExistsError) as raised:
+        make_evidence().write(tmp_path)
+    assert "--suffix" in str(raised.value)
+    assert first.read_text() == before
+
+
+def test_asked_is_recorded_redacted_and_is_not_a_fact():
+    evidence = make_evidence()
+    secret_query = "password=" + "sun" + "flower"
+    evidence.set_asked({"cluster": "checkout", "log_groups": ["/a", "/b"], "pattern": secret_query},
+                       {"start": "2026-10-04T10:00:00Z", "end": "2026-10-04T12:00:00Z"})
+    document = evidence.to_dict()
+    assert document["asked"]["targets"]["cluster"] == "checkout"
+    assert document["asked"]["targets"]["log_groups"] == ["/a", "/b"]
+    assert document["asked"]["window"] == {"start": "2026-10-04T10:00:00Z", "end": "2026-10-04T12:00:00Z"}
+    assert "sunflower" not in json.dumps(document)
+    assert document["facts"] == []
+
+
+def test_asked_is_absent_until_set():
+    assert "asked" not in make_evidence().to_dict()

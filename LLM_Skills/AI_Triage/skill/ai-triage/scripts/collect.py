@@ -50,7 +50,7 @@ def _target_problem(collector: Collector, targets: dict[str, str]) -> str | None
     unknown = [key for key in targets if key not in collector.required + collector.optional]
     if missing:
         return f"{collector.name} needs target {', '.join(missing)} ({keys})"
-    empty = [key for key in collector.required if not targets[key].strip()]
+    empty = [key for key in collector.required if not split_csv(targets[key])]
     if empty:
         return f"{collector.name} target {', '.join(empty)} must not be empty ({keys})"
     if collector.one_of and not any(split_csv(targets.get(key)) for key in collector.one_of):
@@ -58,6 +58,11 @@ def _target_problem(collector: Collector, targets: dict[str, str]) -> str | None
     if unknown:
         return f"{collector.name} has no target {', '.join(unknown)} ({keys})"
     return None
+
+
+def _asked_targets(targets: dict[str, str]) -> dict[str, str | list[str]]:
+    """Every target as given; a value with a comma is a list target and is recorded as its list of items."""
+    return {key: split_csv(value) if "," in value else value for key, value in targets.items()}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -124,6 +129,7 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     if region not in allowed_regions:
         return _fail(f"region {region} is not allowed for {account.alias}; use one of: {', '.join(allowed_regions)}", 2)
     evidence = Evidence(collector.name, account.alias, region, window)
+    evidence.set_asked(_asked_targets(targets), {"start": args.start, "end": args.end})
     ctx = CollectContext(
         config, account, region, window, evidence, args.skill_dir,
         runner=runner or subprocess_runner, kube_runner=kube_runner or subprocess_runner,
@@ -136,7 +142,10 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     except Exception as error:  # noqa: BLE001 - one bad field must not cost the evidence already collected
         evidence.add_error("", "CollectorError", f"{type(error).__name__}: {error}")
     if args.case_dir:
-        path = evidence.write(args.case_dir, args.suffix)
+        try:
+            path = evidence.write(args.case_dir, args.suffix)
+        except FileExistsError as error:
+            return _fail(str(error), 2)
         print(f"{path} facts={len(evidence.facts)} errors={len(evidence.errors)} truncated={evidence.truncated}")
     else:
         print(evidence.to_json())
