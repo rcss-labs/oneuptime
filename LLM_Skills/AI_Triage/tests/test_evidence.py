@@ -241,3 +241,20 @@ def test_asked_is_recorded_redacted_and_is_not_a_fact():
 
 def test_asked_is_absent_until_set():
     assert "asked" not in make_evidence().to_dict()
+
+
+@pytest.mark.parametrize("key", ["secret", "token", "password_policy", "key_id"])
+def test_asked_is_redacted_by_content_not_by_target_name(key):
+    evidence = make_evidence()
+    evidence.set_asked({key: "orders-db-credentials", "names": ["a-one", "b-two"]}, {"start": "s", "end": "e"})
+    assert evidence.to_dict()["asked"]["targets"] == {key: "orders-db-credentials", "names": ["a-one", "b-two"]}
+
+
+def test_key_like_target_is_masked_in_asked_and_in_the_summary_alike():
+    token = "ghp_" + "Ab3xY7qK" * 5
+    evidence = make_evidence()
+    evidence.set_asked({"secret": token}, {"start": "s", "end": "e"})
+    fact = add_simple(evidence, summary=f"Secret {token}: not found")
+    stored = evidence.to_dict()["asked"]["targets"]["secret"]
+    assert token not in json.dumps(evidence.to_dict())
+    assert fact.summary == f"Secret {stored}: not found"

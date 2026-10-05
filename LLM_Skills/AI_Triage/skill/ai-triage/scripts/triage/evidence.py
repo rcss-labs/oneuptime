@@ -165,7 +165,18 @@ class Evidence:
 
     def set_asked(self, targets: dict[str, Any], window: dict[str, str]) -> None:
         """Record what was asked (targets as given, window arguments), so a finding that only quotes it can be refused."""
-        self.asked = _bound(self.redactor.value({"targets": dict(targets), "window": dict(window)}))
+        self.asked = _bound({"targets": self._redact_content(dict(targets)), "window": self._redact_content(dict(window))})
+
+    def _redact_content(self, value: Any) -> Any:
+        """Text redaction of every string, never the name-based rule: a target named "secret" holds a
+        secret's name, and must stay equal to what summaries echo through the same text rules."""
+        if isinstance(value, str):
+            return self.redactor.text(value)
+        if isinstance(value, dict):
+            return {key: self._redact_content(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._redact_content(item) for item in value]
+        return value
 
     def add_error(self, command: str, code: str, message: str) -> None:
         self.errors.append(
