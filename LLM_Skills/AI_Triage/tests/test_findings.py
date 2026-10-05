@@ -643,3 +643,26 @@ def test_an_asked_value_plus_twelve_found_characters_is_accepted_and_eleven_refu
 def test_a_short_whole_value_that_holds_no_asked_string_is_still_accepted(tmp_path):
     case = _asked_fact(tmp_path, "Task stopped", data={"reason": "OOMKilled"}, file_asked={"service": "checkout-api"})
     assert check(case, [finding(fact_ids=["changes-0001"], excerpt="OOMKilled", provenance="inferred")])["rejected"] == []
+
+
+def _killer_fact(tmp_path):
+    return _asked_fact(tmp_path, "Function OutOfMemoryError-killer was not found in the region today",
+                       file_asked={"function": "OutOfMemoryError-killer"})
+
+
+def test_part_of_an_asked_value_cut_at_the_end_of_the_excerpt_counts_as_asked(tmp_path):
+    reasons = reasons_of(check(_killer_fact(tmp_path), [finding(fact_ids=["changes-0001"], excerpt="Function OutOfMemoryError",
+                                                                provenance="inferred")]))
+    assert any(REPEATS in reason for reason in reasons)
+
+
+def test_part_of_an_asked_value_cut_at_the_start_of_the_excerpt_counts_as_asked(tmp_path):
+    reasons = reasons_of(check(_killer_fact(tmp_path), [finding(fact_ids=["changes-0001"], excerpt="Error-killer was not found",
+                                                                provenance="inferred")]))
+    assert any(REPEATS in reason for reason in reasons)
+
+
+def test_part_of_an_asked_value_with_enough_found_text_is_accepted(tmp_path):
+    result = check(_killer_fact(tmp_path), [finding(fact_ids=["changes-0001"], excerpt="Error-killer was not found in the region",
+                                                    provenance="inferred")])
+    assert result["rejected"] == []

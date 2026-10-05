@@ -192,12 +192,35 @@ def _repeats_request(needle: str, asked: list[str], asked_values: list[str]) -> 
     comparable = _comparable(needle)
     if any(comparable in text for text in asked):
         return True
-    remainder = comparable
-    for text in sorted((text for text in asked_values if len(text) >= MIN_WHOLE_VALUE), key=len, reverse=True):
-        remainder = remainder.replace(text, " ")
-    if remainder == comparable:
+    covered = _asked_coverage(comparable, [text for text in asked_values if len(text) >= MIN_WHOLE_VALUE])
+    if not any(covered):
         return False
-    return len("".join(remainder.split())) < MIN_FOUND_TEXT
+    found = sum(1 for char, is_asked in zip(comparable, covered) if not is_asked and not char.isspace())
+    return found < MIN_FOUND_TEXT
+
+
+def _asked_coverage(text: str, asked_values: list[str]) -> list[bool]:
+    """Which characters of text belong to an asked value: every whole occurrence, plus an asked value cut off
+    at either edge of the excerpt (its end opening the excerpt, or its start closing it)."""
+    covered = [False] * len(text)
+
+    def mark(start: int, end: int) -> None:
+        covered[start:end] = [True] * (end - start)
+
+    for value in asked_values:
+        position = text.find(value)
+        while position >= 0:
+            mark(position, position + len(value))
+            position = text.find(value, position + 1)
+        for length in range(min(len(value), len(text)), MIN_WHOLE_VALUE - 1, -1):
+            if value.endswith(text[:length]):
+                mark(0, length)
+                break
+        for length in range(min(len(value), len(text)), MIN_WHOLE_VALUE - 1, -1):
+            if value.startswith(text[-length:]):
+                mark(len(text) - length, len(text))
+                break
+    return covered
 
 
 def _matched_string(fact: dict, needle: str) -> str | None:

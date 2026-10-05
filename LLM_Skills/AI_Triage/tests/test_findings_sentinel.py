@@ -305,3 +305,82 @@ def test_alarms_sentinel_is_refused_for_every_fact(skill_dir, case_dir, variant)
     assert_refused_for_every_fact(case_dir, [SENTINEL, *ALARM_TARGETS["alarm_names"].split(","), ALARM_TARGETS["name_prefix"]])
     if found:
         assert_found_text_accepted(case_dir, found)
+
+
+# Every registered collector: a sentinel in every declared target, fake answers that are empty or errors
+
+from fakes import access_denied  # noqa: E402
+from triage.collectors import all_collectors  # noqa: E402
+
+# Collectors whose own target checks refuse a sentinel value, with the reason. Listed, never skipped silently.
+CANNOT_RUN_WITH_SENTINEL: dict[str, str] = {}
+# Targets whose sentinel run shows a gap outside findings.py. The sweep gives them a plain value, and a strict
+# xfail test below keeps the gap visible until its owner closes it.
+KNOWN_GAPS: dict[tuple[str, str], str] = {
+    ("access", "secret"): (
+        "Evidence.set_asked redacts the value of a target named like a secret, so the asked record holds "
+        "<SECRET-1> instead of the secret name, while the access summary 'Secret <name>: ...' keeps the name; "
+        "an excerpt of the name plus a few words is then accepted (evidence.py owner)"
+    ),
+}
+EXTRA_QUOTE = 11
+
+
+def sentinel_value(key):
+    """A sentinel value in the form the target takes: list targets (plural names) get a comma list."""
+    if key.endswith("s"):
+        return f"{SENTINEL}-{key}-a,{SENTINEL}-{key}-b"
+    return f"{SENTINEL}-{key}"
+
+
+def sentinel_quotes(summary):
+    """The sentinel alone, and the sentinel with up to 11 other characters of the summary on either side."""
+    quotes = [SENTINEL]
+    position = summary.find(SENTINEL)
+    if position < 0:
+        return quotes + [SENTINEL + summary[:EXTRA_QUOTE]]
+    end = position + len(SENTINEL)
+    quotes.append(summary[position:end + EXTRA_QUOTE])
+    quotes.append(summary[max(position - EXTRA_QUOTE, 0):end])
+    return quotes
+
+
+def test_every_collector_is_in_the_sweep_or_listed_with_a_reason():
+    assert set(CANNOT_RUN_WITH_SENTINEL) <= set(all_collectors())
+
+
+@pytest.mark.parametrize("answers", ["empty", "errors"])
+@pytest.mark.parametrize("name", sorted(all_collectors()))
+def test_registry_sentinel_is_refused_for_every_fact(skill_dir, case_dir, name, answers):
+    if name in CANNOT_RUN_WITH_SENTINEL:
+        pytest.skip(CANNOT_RUN_WITH_SENTINEL[name])
+    collector = all_collectors()[name]
+    targets = {key: f"plain-{key}" if (name, key) in KNOWN_GAPS else sentinel_value(key)
+               for key in (*collector.required, *collector.optional)}
+    assert_sentinel_refused(skill_dir, case_dir, name, targets, answers)
+
+
+@pytest.mark.parametrize("gap", sorted(KNOWN_GAPS))
+def test_known_gap_sentinel_is_refused(skill_dir, case_dir, gap):
+    name, key = gap
+    collector = all_collectors()[name]
+    targets = {other: f"plain-{other}" for other in (*collector.required, *collector.optional)}
+    targets[key] = sentinel_value(key)
+    try:
+        assert_sentinel_refused(skill_dir, case_dir, name, targets, "empty")
+    except AssertionError:
+        pytest.xfail(KNOWN_GAPS[gap])
+    pytest.fail(f"the known gap {gap} is closed; remove it from KNOWN_GAPS")
+
+
+def assert_sentinel_refused(skill_dir, case_dir, name, targets, answers):
+    runner = FakeAws({}) if answers == "empty" else FakeAws({}, default=access_denied("Describe"))
+    run_collector(skill_dir, case_dir, name, targets, runner)
+    facts = load_facts(case_dir)
+    findings = [probe(n, fact_id, quote) for n, (fact_id, quote) in enumerate(
+        ((fact_id, quote) for fact_id, fact in facts.items() for quote in sentinel_quotes(fact.get("summary") or "")),
+        start=1)]
+    if not findings:
+        return
+    result = write_probe(case_dir, findings)
+    assert result["valid"] == [], [(item["fact_ids"], item["excerpt"]) for item in result["valid"]]
