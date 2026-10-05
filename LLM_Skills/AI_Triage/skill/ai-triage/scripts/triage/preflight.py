@@ -24,11 +24,15 @@ SKIPPED = "skipped"
 # zsh options that change how an argv the guard accepted is split or expanded (names without _ and in lower case).
 UNSAFE_OPTIONS = ("magicequalsubst", "rcquotes", "cshjunkiequotes", "shwordsplit", "globsubst", "ksharrays",
                   "ignorebraces")
-FUNCTION_HEADER_RES = (re.compile(r"^([^\s(){}=#]+)\s*\(\s*\)\s*\{?\s*$"),
-                       re.compile(r"^function\s+([^\s(){}]+)\s*(?:\(\s*\))?\s*\{?\s*$"))
-ALIAS_RE = re.compile(r"^alias\s+((?:-[A-Za-z]+\s+)*)(?:--\s+)?([^=\s]+)=")
-SETOPT_RE = re.compile(r"^(?:setopt|set\s+-o)\s+(.*)$")
-IFS_RE = re.compile(r"^(?:export\s+|typeset\s+(?:-\w+\s+)*|local\s+)?IFS=")
+# Single-letter `set` flags for the options above.
+OPTION_LETTERS = {"y": "shwordsplit", "I": "ignorebraces"}
+UNSAFE_EMULATIONS = ("sh", "ksh", "csh")
+# `name () {`, `name() { body; }`, possibly indented; `function a b {` defines several names at once.
+FUNCTION_HEADER_RES = (re.compile(r"^\s*([^\s(){}=#'\"]+)\s*\(\s*\)\s*(\{.*)?$"),
+                       re.compile(r"^\s*function\s+((?:[^\s(){}]+\s+)*?[^\s(){}]+)\s*(?:\(\s*\))?\s*(\{.*)?$"))
+ALIAS_RE = re.compile(r"^\s*alias\s+((?:-[A-Za-z]+\s+)*)(?:--\s+)?(['\"]?)([^='\"\s]+)\2?=")
+TABLE_RE = re.compile(r"^\s*(aliases|galiases|functions|options)\[['\"]?([^\]'\"]+)['\"]?\]=['\"]?(\S*?)['\"]?\s*$")
+IFS_RE = re.compile(r"^\s*(?:export\s+|typeset\s+(?:-\w+\s+)*|local\s+)?IFS=")
 SHELL_FIX = ("Remove it from your shell startup files, then start a new Claude Code session: the guard checks the "
              "command as written, and this would make zsh run something else.")
 
@@ -61,38 +65,90 @@ def guarded_command_words(skill_dir: Path) -> set[str]:
     return {"aws", "kubectl", str(venv / "python"), str(venv / "python3")} | set(FILTER_RULES)
 
 
-def _option_names(text: str) -> list[str]:
-    return [word.lower().replace("_", "").replace("-", "") for word in text.split() if not word.startswith("#")]
+def _option_turned_on(name: str, on: bool) -> str:
+    """The unsafe option a setopt/unsetopt of this name turns on, or "". Each leading "no" inverts it."""
+    name = name.lower().replace("_", "").replace("-", "")
+    while name not in UNSAFE_OPTIONS and name.startswith("no"):
+        name, on = name[2:], not on
+    return name if on and name in UNSAFE_OPTIONS else ""
+
+
+def _option_problems(words: list[str]) -> list[str]:
+    command, args = words[0], [word for word in words[1:] if not word.startswith("#")]
+    turned_on: list[str] = []
+    if command in ("setopt", "unsetopt"):
+        turned_on = [_option_turned_on(arg, command == "setopt") for arg in args if not arg.startswith(("-", "+"))]
+    elif command == "set":
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg in ("-o", "+o") and index + 1 < len(args):
+                turned_on.append(_option_turned_on(args[index + 1], arg == "-o"))
+                index += 2
+                continue
+            if arg[:1] in "-+" and len(arg) > 1:
+                turned_on += [_option_turned_on(OPTION_LETTERS[letter], arg[0] == "-")
+                              for letter in arg[1:] if letter in OPTION_LETTERS]
+            index += 1
+    elif command == "emulate":
+        modes = [arg for arg in args if not arg.startswith("-")]
+        if modes and modes[0] in UNSAFE_EMULATIONS:
+            return [f"emulate {modes[0]}"]
+    return [f"option {name}" for name in turned_on if name]
+
+
+def _function_names(line: str) -> tuple[list[str], bool] | None:
+    """The names a function header defines, and whether its body continues on later lines."""
+    for index, regex in enumerate(FUNCTION_HEADER_RES):
+        match = regex.match(line)
+        if match:
+            names = match.group(1).split() if index == 1 else [match.group(1)]
+            body = match.group(2) or ""
+            return names, not (body and body.count("{") <= body.count("}"))
+    return None
 
 
 def shell_snapshot_problems(text: str, guarded_words: set[str]) -> list[str]:
     """What in a Claude Code shell snapshot would make zsh run something other than the guarded command.
 
     Reads top-level lines only; option and IFS changes inside a function body are local to that function.
+    A body ends at a "}" line indented like its header.
     """
     problems: list[str] = []
-    in_function = False
+    function_end: str | None = None
     for line in text.splitlines():
-        if in_function:
-            in_function = line != "}"
+        if function_end is not None:
+            if line.rstrip() == function_end:
+                function_end = None
             continue
-        header = next((match for regex in FUNCTION_HEADER_RES if (match := regex.match(line))), None)
+        header = _function_names(line)
         if header:
-            if header.group(1) in guarded_words:
-                problems.append(f"function {header.group(1)}")
-            in_function = not line.rstrip().endswith("}")
+            names, continues = header
+            problems += [f"function {name}" for name in names if name in guarded_words]
+            if continues:
+                function_end = line[: len(line) - len(line.lstrip())] + "}"
             continue
         alias = ALIAS_RE.match(line)
         if alias:
-            flags, name = alias.group(1), alias.group(2)
+            flags, name = alias.group(1), alias.group(3)
             if "g" in flags.replace("-", ""):
                 problems.append(f"global alias {name}")  # rewrites the word anywhere on a command line
             elif name in guarded_words:
                 problems.append(f"alias {name}")
             continue
-        setopt = SETOPT_RE.match(line)
-        if setopt:
-            problems.extend(f"option {name}" for name in _option_names(setopt.group(1)) if name in UNSAFE_OPTIONS)
+        table = TABLE_RE.match(line)
+        if table:
+            kind, name, value = table.groups()
+            if kind == "galiases":
+                problems.append(f"global alias {name}")
+            elif kind in ("aliases", "functions") and name in guarded_words:
+                problems.append(f"{'alias' if kind == 'aliases' else 'function'} {name}")
+            elif kind == "options" and value.lower() == "on":
+                problems += [f"option {option}" for option in [_option_turned_on(name, True)] if option]
+            continue
+        words = line.split()
+        if words and words[0] in ("setopt", "unsetopt", "set", "emulate"):
+            problems += _option_problems(words)
             continue
         if IFS_RE.match(line):
             problems.append("an IFS assignment")

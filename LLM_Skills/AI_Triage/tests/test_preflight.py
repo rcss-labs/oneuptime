@@ -262,6 +262,7 @@ def test_a_clean_snapshot_passes_and_grep_is_expected(skill_dir):
         ("setopt ksharrays\n", "ksharrays"),
         ("setopt ignorebraces\n", "ignorebraces"),
         ("setopt nohashdirs globsubst\n", "globsubst"),
+        ("\tsetopt globsubst\n", "globsubst"),  # an indented top-level line still applies
         ("IFS=/\n", "IFS"),
         ("export IFS=:\n", "IFS"),
         ("typeset -g IFS=:\n", "IFS"),
@@ -283,7 +284,7 @@ def test_a_function_on_the_skill_python_fails(skill_dir):
 @pytest.mark.parametrize(
     "extra",
     ["setopt nomagicequalsubst\n", "unsetopt shwordsplit\n", "alias -- grepx=grep\n", "function rg {\n  rg\n}\n",
-     "\tsetopt globsubst\n", "f () {\n\tsetopt globsubst\n\tIFS=:\n}\n", "# setopt globsubst\n"],
+     "f () {\n\tsetopt globsubst\n\tIFS=:\n}\n", "# setopt globsubst\n"],
 )
 def test_harmless_lines_do_not_fail(skill_dir, extra):
     assert shell_check(skill_dir, extra).status == OK
@@ -321,3 +322,48 @@ def test_the_default_snapshot_folder_is_under_home(skill_dir, tmp_path):
     checks = run_preflight(skill_dir, runner=signed_in(), env={"TYPESAFE_API_KEY": "set", "HOME": str(home)},
                            which=lambda name: f"/usr/bin/{name}")
     assert by_name(checks)[SHELL].status == FAIL
+
+
+# ---- round 5 minor follow-up, N2: more snapshot spellings ------------------------
+
+
+@pytest.mark.parametrize(
+    "extra, named",
+    [
+        ("jq() { echo hi; }\n", "jq"),
+        ("aws () { echo hi; }\n", "aws"),
+        ("function kubectl { echo hi; }\n", "kubectl"),
+        ("function sort() { echo; }\n", "sort"),
+        ("  head () {\n    echo\n  }\n", "head"),
+        ("function sort uniq {\n  echo\n}\n", "uniq"),
+        ("alias -- 'wc'='rm'\n", "wc"),
+        ('alias "tail=tail -f"\n', "tail"),
+        ("alias 'cut'=x\n", "cut"),
+        ("unsetopt norcquotes\n", "rcquotes"),
+        ("setopt nonomagicequalsubst\n", "magicequalsubst"),
+        ("set -o globsubst\n", "globsubst"),
+        ("set -o KSH_ARRAYS\n", "ksharrays"),
+        ("set -y\n", "shwordsplit"),
+        ("set -ey\n", "shwordsplit"),
+        ("emulate sh\n", "emulate sh"),
+        ("emulate -R ksh\n", "emulate ksh"),
+        ("options[shwordsplit]=on\n", "shwordsplit"),
+        ("options[GLOB_SUBST]=on\n", "globsubst"),
+        ("aliases[jq]='rm'\n", "jq"),
+        ("galiases[pods]=delete\n", "pods"),
+        ("functions[aws]='echo'\n", "aws"),
+    ],
+)
+def test_other_spellings_of_shadows_and_options_fail(skill_dir, extra, named):
+    check = shell_check(skill_dir, extra)
+    assert check.status == FAIL, extra
+    assert named in check.detail
+
+
+@pytest.mark.parametrize(
+    "extra",
+    ["unsetopt shwordsplit\n", "set +o globsubst\n", "set -e\n", "options[shwordsplit]=off\n", "emulate zsh\n",
+     "setopt nonomatch\n", "rg() { command rg; }\n", "alias 'gs'='git status'\n", "set -o vi\n"],
+)
+def test_other_harmless_spellings_pass(skill_dir, extra):
+    assert shell_check(skill_dir, extra).status == OK, extra
