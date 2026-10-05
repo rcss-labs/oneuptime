@@ -7,15 +7,15 @@ The target has an `ecs_service`, or evidence names an ECS cluster, service, or t
 ## Collect
 
 The plan already runs `ecs` for the mapped service. Add these when they apply; take
-the account, region, window, and case folder from the plan's own lines.
+the account, region, and window from the plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| The service scales by policy, or tasks were replaced | `run collect autoscaling ... --target group=<Auto Scaling group of the capacity provider>` |
-| A task could not pull its image, or the image changed | `run collect ecr ... --target repository=<repository name>` |
-| Tasks run on EC2 instances and several stopped together | `run collect ec2 ... --target instance_ids=<ids from the stopped tasks>` |
-| Tasks cannot reach a dependency | `run collect vpc ... --target security_group_ids=<the service's groups>` |
-| The task role was denied something | `run collect access ... --target role=<task role name>` |
+| The service scales by policy, or tasks were replaced | `run collect autoscaling ... --case-dir <case> --target group=<Auto Scaling group of the capacity provider>` |
+| A task could not pull its image, or the image changed | `run collect ecr ... --case-dir <case> --target repository=<repository name>` |
+| Tasks run on EC2 instances and several stopped together | `run collect ec2 ... --case-dir <case> --target instance_ids=<ids from the stopped tasks>` |
+| Tasks cannot reach a dependency | `run collect vpc ... --case-dir <case> --target security_group_ids=<the service's groups>` |
+| The task role was denied something | `run collect access ... --case-dir <case> --target role=<task role name>` |
 
 ## What the facts mean
 
@@ -74,9 +74,9 @@ metric facts state.
 When the collector's facts are not enough, read directly by `reference/reading.md`:
 
 ```bash
-aws ecs describe-tasks --cluster <cluster> --tasks <task id> --profile <triage profile> --region <region> --query 'tasks[0].{stopped:stoppedReason,containers:containers[].{name:name,exit:exitCode,reason:reason}}' 2>/dev/null
-aws ecs list-tasks --cluster <cluster> --service-name <service> --desired-status STOPPED --profile <triage profile> --region <region> --max-items 20 2>/dev/null
-aws ecs describe-task-definition --task-definition <family>:<revision> --profile <triage profile> --region <region> --query 'taskDefinition.containerDefinitions[].{name:name,image:image,memory:memory,health:healthCheck}' 2>/dev/null
+aws ecs describe-tasks --cluster <cluster> --tasks <task id> --profile <triage profile> --region <region> --query 'tasks[0].{stopped:stoppedReason,containers:containers[].{name:name,exit:exitCode,reason:reason}}'
+aws ecs list-tasks --cluster <cluster> --service-name <service> --desired-status STOPPED --profile <triage profile> --region <region> --max-items 20
+aws ecs describe-task-definition --task-definition <family>:<revision> --profile <triage profile> --region <region> --query 'taskDefinition.containerDefinitions[].{name:name,image:image,memory:memory,health:healthCheck}'
 ```
 
 Never print a task definition's environment or secrets with your own command; the

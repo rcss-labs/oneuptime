@@ -2,24 +2,24 @@
 
 ## When to open
 
-The target has an `eks_cluster`, or evidence names a cluster, a node, a namespace, a
+The target has an `eks` resource, or evidence names a cluster, a node, a namespace, a
 pod, or a Kubernetes workload.
 
 ## Collect
 
 The plan already runs `eks` for the mapped cluster. The collector reads pods, warning
 events, workloads, and logs only when it gets a `namespace`; add it when the plan did
-not. Take the account, region, window, and case folder from the plan's own lines.
+not. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| The namespace is known and pods are involved | `run collect eks ... --target cluster=<cluster> --target namespace=<namespace> --target workloads=deployment/<name>` |
+| The namespace is known and pods are involved | `run collect eks ... --case-dir <case> --target cluster=<cluster> --target namespace=<namespace> --target workloads=deployment/<name>` |
 | A second namespace is involved | the same command with another `namespace` and `--suffix <namespace>` |
-| Nodes are unhealthy or missing | `run collect ec2 ... --target instance_ids=<node instance ids>` |
-| The nodegroup did not scale or replace nodes | `run collect autoscaling ... --target group=<Auto Scaling group of the nodegroup>` |
-| Pods cannot pull an image | `run collect ecr ... --target repository=<repository name>` |
-| Pods cannot reach a dependency | `run collect vpc ... --target security_group_ids=<node or pod groups>` |
-| The control plane logs are enabled | `run collect logs ... --target log_groups=/aws/eks/<cluster>/cluster` |
+| Nodes are unhealthy or missing | `run collect ec2 ... --case-dir <case> --target instance_ids=<node instance ids>` |
+| The nodegroup did not scale or replace nodes | `run collect autoscaling ... --case-dir <case> --target group=<Auto Scaling group of the nodegroup>` |
+| Pods cannot pull an image | `run collect ecr ... --case-dir <case> --target repository=<repository name>` |
+| Pods cannot reach a dependency | `run collect vpc ... --case-dir <case> --target security_group_ids=<node or pod groups>` |
+| The control plane logs are enabled | `run collect logs ... --case-dir <case> --target log_groups=/aws/eks/<cluster>/cluster` |
 
 ## What the facts mean
 
@@ -47,7 +47,7 @@ and namespace, and the containers' limits and requests. A work order names those
 Changes made inside the cluster (`kubectl set resources`, an edited ConfigMap, a
 scale) are not in CloudTrail, so `changes` shows nothing for them. Look at the
 ReplicaSet creation times and the `kubernetes.io/change-cause` annotation (lead
-below), and, when control-plane logging is on, the audit log: `run collect logs ...
+below), and, when control-plane logging is on, the audit log: `run collect logs ... --case-dir <case>
 --target log_groups=/aws/eks/<cluster>/cluster --target pattern=<resource name>`.
 
 ## Common causes
@@ -87,5 +87,5 @@ kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --contex
 kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context <triage context> -n <namespace> describe pod <pod>
 kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context <triage context> -n <namespace> logs <pod> --previous --tail 100
 kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context <triage context> -n <namespace> get events --sort-by .lastTimestamp
-aws eks describe-nodegroup --cluster-name <cluster> --nodegroup-name <nodegroup> --profile <triage profile> --region <region> --query 'nodegroup.{status:status,issues:health.issues,scaling:scalingConfig,ami:amiType,version:version}' 2>/dev/null
+aws eks describe-nodegroup --cluster-name <cluster> --nodegroup-name <nodegroup> --profile <triage profile> --region <region> --query 'nodegroup.{status:status,issues:health.issues,scaling:scalingConfig,ami:amiType,version:version}'
 ```

@@ -2,7 +2,7 @@
 
 ## When to open
 
-The target has a `dynamodb` resource, or evidence names a DynamoDB table: throttling
+The target has `dynamodb_tables`, or evidence names a DynamoDB table: throttling
 errors (`ProvisionedThroughputExceededException`), slow reads or writes, or a capacity
 change. No item is ever read.
 
@@ -10,15 +10,15 @@ change. No item is ever read.
 
 The plan already runs `dynamodb` for the mapped table. It reads table state, scaling
 activity, four table-level metrics, and three per-operation metrics for nine operations.
-Add these when they apply.
+Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| The table's clients are a compute service | `run collect ecs ... --target cluster=<c> --target service=<s>` (or `lambda` with `function=<name>`, `eks` with `cluster=<name>`); read `ecs.md`, `lambda.md`, or `eks.md` |
-| Calls are denied rather than throttled | `run collect access ... --target role=<role that calls the table>` and read `access.md` |
-| A capacity or scaling setting change is suspected | `run collect changes ...` and read `cloudtrail.md` |
-| The application's own errors are needed | `run collect logs ... --target log_groups=<application log group>` |
-| A second table is involved (a stream consumer, a replica) | `run collect dynamodb ... --suffix <name> --target table=<other table>` |
+| The table's clients are a compute service | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s>` (or `lambda` with `function=<name>`, `eks` with `cluster=<name>`); read `ecs.md`, `lambda.md`, or `eks.md` |
+| Calls are denied rather than throttled | `run collect access ... --case-dir <case> --target role=<role that calls the table>` and read `access.md` |
+| A capacity or scaling setting change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name>` and read `cloudtrail.md` |
+| The application's own errors are needed | `run collect logs ... --case-dir <case> --target log_groups=<application log group>` |
+| A second table is involved (a stream consumer, a replica) | `run collect dynamodb ... --case-dir <case> --suffix <name> --target table=<other table>` |
 
 ## What the facts mean
 
@@ -26,9 +26,9 @@ Add these when they apply.
 |---|---|---|
 | "Table X is ACTIVE: billing mode PROVISIONED, read capacity N, write capacity M, K items, global secondary indexes: idx ACTIVE" (`current`) | the limits and state now | an index not `ACTIVE`; on-demand tables show capacity 0 |
 | "Scaling activity Successful: ..." or "Failed: ..." (times, the cause in the excerpt) | autoscaling changed or tried to change capacity | the time against the first throttle; a failed one means capacity stayed low |
-| "ReadThrottleEvents (Sum)" / "WriteThrottleEvents (Sum): peak N at T" | requests refused for the table in a 5-minute period; absent or "no data" means none was emitted | the consumed capacity facts and the per-operation lines |
+| "ReadThrottleEvents (Sum)" / "WriteThrottleEvents (Sum): highest N at T" | requests refused for the table in a 5-minute period; absent or "no data" means none was emitted | the consumed capacity facts and the per-operation lines |
 | "ConsumedReadCapacityUnits (Sum)" / "ConsumedWriteCapacityUnits (Sum)" | capacity used in 5 minutes; divide by 300 for units per second | against the provisioned units: near them is a capacity limit; far below them while throttling is a hot partition |
-| "ThrottledRequests PutItem (Sum): peak N ..." (one fact per operation with data) | which operation was throttled | the operation's caller in the logs |
+| "ThrottledRequests PutItem (Sum): highest N at T ..." (one fact per operation with data) | which operation was throttled | the operation's caller in the logs |
 | "SystemErrors Query (Sum)" above zero | the service returned a 5xx | AWS Health in `platform.md`; throttling is not this |
 | "SuccessfulRequestLatency GetItem (Maximum)" | slowest successful call | high with no throttling points at large items, scans, or the client |
 | "No throttling or system error was recorded in the window for any of the 9 operations queried (...); other operations exist and were not queried" | no throttling for GetItem, PutItem, UpdateItem, DeleteItem, Query, Scan, BatchGetItem, BatchWriteItem, TransactWriteItems | it does not cover other operations (PartiQL statements, TransactGetItems, and the like), indexes on their own, streams, or the client's own limits; do not write "the table was not throttled" without that scope |
@@ -76,7 +76,7 @@ environment, and a table with the same access pattern that is not throttled.
 When the collector's facts are not enough, read directly by `reference/reading.md`:
 
 ```bash
-aws dynamodb describe-table --table-name <table> --profile <triage profile> --region <region> --query 'Table.{mode:BillingModeSummary.BillingMode,throughput:ProvisionedThroughput,indexes:GlobalSecondaryIndexes[].{name:IndexName,status:IndexStatus,throughput:ProvisionedThroughput}}' 2>/dev/null
-aws application-autoscaling describe-scaling-policies --service-namespace dynamodb --resource-id table/<table> --profile <triage profile> --region <region> --max-items 20 --query 'ScalingPolicies[].{dimension:ScalableDimension,target:TargetTrackingScalingPolicyConfiguration.TargetValue}' 2>/dev/null
-aws application-autoscaling describe-scalable-targets --service-namespace dynamodb --resource-ids table/<table> --profile <triage profile> --region <region> --max-items 20 --query 'ScalableTargets[].{dimension:ScalableDimension,min:MinCapacity,max:MaxCapacity}' 2>/dev/null
+aws dynamodb describe-table --table-name <table> --profile <triage profile> --region <region> --query 'Table.{mode:BillingModeSummary.BillingMode,throughput:ProvisionedThroughput,indexes:GlobalSecondaryIndexes[].{name:IndexName,status:IndexStatus,throughput:ProvisionedThroughput}}'
+aws application-autoscaling describe-scaling-policies --service-namespace dynamodb --resource-id table/<table> --profile <triage profile> --region <region> --max-items 20 --query 'ScalingPolicies[].{dimension:ScalableDimension,target:TargetTrackingScalingPolicyConfiguration.TargetValue}'
+aws application-autoscaling describe-scalable-targets --service-namespace dynamodb --resource-ids table/<table> --profile <triage profile> --region <region> --max-items 20 --query 'ScalableTargets[].{dimension:ScalableDimension,min:MinCapacity,max:MaxCapacity}'
 ```

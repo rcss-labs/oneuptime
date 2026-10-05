@@ -8,16 +8,16 @@ The target has a CloudFront distribution or a web ACL, or evidence shows 403, 50
 ## Collect
 
 The plan already runs `cloudfront_waf` for the mapped distribution or web ACL. Add
-these when they apply; take the account, region, window, and case folder from the
-plan's own lines.
+these when they apply; take the account, region, and window from the
+plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| The web ACL is known but not the distribution | `run collect cloudfront_waf ... --target web_acl_arn=<web ACL ARN>` |
-| The web ACL guards a load balancer or API stage | `run collect cloudfront_waf ... --target resource_arn=<load balancer ARN or stage ARN>` |
-| The origin is a load balancer | `run collect edge ... --target load_balancer=<name>` |
-| The origin is an API | `run collect apigateway ... --target api_id=<api id>` |
-| A distribution or rule change is suspected | `run collect changes ... --target resource_names=<distribution id or web ACL name>` |
+| The web ACL is known but not the distribution | `run collect cloudfront_waf ... --case-dir <case> --target web_acl_arn=<web ACL ARN>` |
+| The web ACL guards a load balancer or API stage | `run collect cloudfront_waf ... --case-dir <case> --target resource_arn=<load balancer ARN or stage ARN>` |
+| The origin is a load balancer | `run collect edge ... --case-dir <case> --target load_balancer=<name>` |
+| The origin is an API | `run collect apigateway ... --case-dir <case> --target api_id=<api id>` |
+| A distribution or rule change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<distribution id or web ACL name>` |
 
 ## What the facts mean
 
@@ -75,7 +75,8 @@ the web ACL's blocked share for paths the same clients called before the inciden
 When the collector's facts are not enough, read directly by `reference/reading.md`:
 
 ```bash
-aws cloudfront get-distribution-config --id <distribution id> --profile <triage profile> --region us-east-1 --query 'DistributionConfig.Origins.Items[].{id:Id,domain:DomainName,readTimeout:CustomOriginConfig.OriginReadTimeout,protocol:CustomOriginConfig.OriginProtocolPolicy}' 2>/dev/null
-aws wafv2 list-web-acls --scope CLOUDFRONT --profile <triage profile> --region us-east-1 --query 'WebACLs[].{name:Name,id:Id,arn:ARN}' 2>/dev/null
-aws wafv2 get-web-acl --name <web ACL name> --scope CLOUDFRONT --id <web ACL id> --profile <triage profile> --region us-east-1 --query 'WebACL.Rules[].{name:Name,priority:Priority,group:Statement.ManagedRuleGroupStatement.Name,overrides:Statement.ManagedRuleGroupStatement.RuleActionOverrides[].Name}' 2>/dev/null
+aws cloudfront get-distribution-config --id <distribution id> --profile <triage profile> --region us-east-1 --query 'DistributionConfig.Origins.Items[].{id:Id,domain:DomainName,readTimeout:CustomOriginConfig.OriginReadTimeout,protocol:CustomOriginConfig.OriginProtocolPolicy}'
+aws cloudfront get-distribution-config --id <distribution id> --profile <triage profile> --region us-east-1 --query 'DistributionConfig.WebACLId'
+# the web ACL name and id are the last two parts of the WebACLId above (.../webacl/<name>/<id>)
+aws wafv2 get-web-acl --name <web ACL name> --scope CLOUDFRONT --id <web ACL id> --profile <triage profile> --region us-east-1 --query 'WebACL.Rules[].{name:Name,priority:Priority,group:Statement.ManagedRuleGroupStatement.Name,overrides:Statement.ManagedRuleGroupStatement.RuleActionOverrides[].Name}'
 ```

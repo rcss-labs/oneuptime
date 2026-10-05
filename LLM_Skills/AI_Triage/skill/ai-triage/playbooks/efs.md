@@ -9,15 +9,15 @@ a task or pod that cannot mount, slow file operations, or a stalled mount.
 
 The plan already runs `efs` for the mapped file system. It lists mount targets (up to
 20), whether their security groups allow NFS, access points that are not available,
-and five metrics. Add these when they apply.
+and five metrics. Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| A mount target's security groups need reading in full | `run collect vpc ... --target security_group_ids=<groups of the mount target>` |
-| The client is in a subnet with no mount target, or routes are suspected | `run collect vpc ... --target subnet_ids=<client subnets and mount target subnets>` |
-| The client is a task, instance, or pod | `run collect ecs ... --target cluster=<c> --target service=<s>` (or `ec2` with `instance_ids=<ids>`, `eks` with `cluster=<name>`); read `ecs.md`, `ec2.md`, or `eks.md` |
-| The file system is encrypted and the mount fails | `run collect access ... --target kms_key=<key id>` |
-| A throughput mode or mount target change is suspected | `run collect changes ...` and read `cloudtrail.md` |
+| A mount target's security groups need reading in full | `run collect vpc ... --case-dir <case> --target security_group_ids=<groups of the mount target>` |
+| The client is in a subnet with no mount target, or routes are suspected | `run collect vpc ... --case-dir <case> --target subnet_ids=<client subnets and mount target subnets>` |
+| The client is a task, instance, or pod | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s>` (or `ec2` with `instance_ids=<ids>`, `eks` with `cluster=<name>`); read `ecs.md`, `ec2.md`, or `eks.md` |
+| The file system is encrypted and the mount fails | `run collect access ... --case-dir <case> --target kms_key=<key id>` |
+| A throughput mode or mount target change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name>` and read `cloudtrail.md` |
 
 ## What the facts mean
 
@@ -31,12 +31,12 @@ and five metrics. Add these when they apply.
 | "Mount target M: nothing allows TCP 2049 in its security groups (...)" | NFS is blocked at the mount target | the groups named; the rule to add, stated in the work order |
 | "Mount target M: whether it allows NFS ... could not be determined" | no verdict | say so; read the groups with `vpc` |
 | "Access point A (name) is creating, deleting, or error" | clients using that access point fail | the access point's state and the change evidence |
-| "BurstCreditBalance (Minimum): peak N" (bytes; the number shown is the lowest point) | burst credits left; only meaningful in `bursting` mode | near zero with a drop in `PermittedThroughput` means exhaustion |
+| "BurstCreditBalance (Minimum): lowest A at T, highest B at T ...; fell below the range of one week earlier at T1" (bytes) | burst credits left; only meaningful in `bursting` mode | the lowest value A near zero with a drop in `PermittedThroughput` means exhaustion |
 | "PermittedThroughput (Minimum)", "MeteredIOBytes (Sum)" | the allowed rate and the bytes counted against it | metered I/O at or above the permitted rate means a throughput limit |
-| "PercentIOLimit (Maximum): peak N" | I/O against the general purpose limit | near 100 means the I/O limit, which more throughput does not raise |
+| "PercentIOLimit (Maximum): lowest A at T, highest B at T ..." | I/O against the general purpose limit | a highest value B near 100 means the I/O limit, which more throughput does not raise |
 | "ClientConnections (Sum)" | connected clients | a fall to zero at the incident start means clients lost the mount |
 
-A `current` fact is the state now. Metric facts carry the time of their peak.
+A `current` fact is the state now. A metric fact carries the time the series first left last week's range, else the time of its extreme.
 
 ## Common causes
 
@@ -48,7 +48,7 @@ A `current` fact is the state now. Metric facts carry the time of their peak.
    permanent fix is the mode and size chosen from the workload's real rate.
 2. **A throughput or I/O limit.** Evidence: `MeteredIOBytes` at `PermittedThroughput`
    in provisioned mode, or `PercentIOLimit` near 100 in general purpose. Work order: the
-   mode, the limit, the peak; name which limit, since the fixes differ.
+   mode, the limit, the highest value; name which limit, since the fixes differ.
 3. **A security group blocks NFS.** Evidence: "nothing allows TCP 2049" for a mount
    target, mount timeouts on clients in that AZ. Rule out: every mount target allows
    NFS from the client's range. Work order: the mount target, its groups, and the missing
@@ -75,7 +75,7 @@ fine against one that does not, and the metric facts against one week earlier.
 When the collector's facts are not enough, read directly by `reference/reading.md`:
 
 ```bash
-aws efs describe-file-systems --file-system-id <file system> --profile <triage profile> --region <region> --query 'FileSystems[0].{mode:ThroughputMode,provisioned:ProvisionedThroughputInMibps,performance:PerformanceMode,encrypted:Encrypted,state:LifeCycleState}' 2>/dev/null
-aws efs describe-mount-targets --file-system-id <file system> --profile <triage profile> --region <region> --max-items 20 --query 'MountTargets[].{id:MountTargetId,az:AvailabilityZoneName,subnet:SubnetId,state:LifeCycleState}' 2>/dev/null
-aws efs describe-file-system-policy --file-system-id <file system> --profile <triage profile> --region <region> --query 'Policy' 2>/dev/null | jq -r '.'
+aws efs describe-file-systems --file-system-id <file system> --profile <triage profile> --region <region> --query 'FileSystems[0].{mode:ThroughputMode,provisioned:ProvisionedThroughputInMibps,performance:PerformanceMode,encrypted:Encrypted,state:LifeCycleState}'
+aws efs describe-mount-targets --file-system-id <file system> --profile <triage profile> --region <region> --max-items 20 --query 'MountTargets[].{id:MountTargetId,az:AvailabilityZoneName,subnet:SubnetId,state:LifeCycleState}'
+aws efs describe-file-system-policy --file-system-id <file system> --profile <triage profile> --region <region> --query 'Policy' | jq -r '.'
 ```

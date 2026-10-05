@@ -7,15 +7,18 @@ read a metric comparison that any collector wrote (CPU, errors, latency, depth).
 
 ## Collect
 
-The plan runs `alarms` for the mapped alarms and `logs` for the mapped log groups. The
-metric facts come with every service collector. Add these when they apply.
+The plan runs `alarms` only when the service map lists alarm names (`alarms`), and
+`logs` for the mapped log groups (`log_groups`). With no alarm names mapped the plan
+prints a skipped `alarms` line: find names with the first lead below, then run the
+command here. The metric facts come with every service collector. Take the account,
+region, and window from the plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| Alarm names are known | `run collect alarms ... --target alarm_names=<name1>,<name2>` |
-| An alarm family shares a prefix | `run collect alarms ... --target name_prefix=<prefix>` |
-| Log lines should show when the problem began | `run collect logs ... --target log_groups=<group1>,<group2>` |
-| The default pattern is too broad or too narrow | `run collect logs ... --target log_groups=<group> --target pattern=<regular expression> --suffix <word>` |
+| Alarm names are known | `run collect alarms ... --case-dir <case> --target alarm_names=<name1>,<name2>` |
+| An alarm family shares a prefix | `run collect alarms ... --case-dir <case> --target name_prefix=<prefix>` |
+| Log lines should show when the problem began | `run collect logs ... --case-dir <case> --target log_groups=<group1>,<group2>` |
+| The default pattern is too broad or too narrow | `run collect logs ... --case-dir <case> --target log_groups=<group> --target pattern=<regular expression> --suffix <word>` |
 | The first alarm points at a service | the playbook of that service; its collector writes the metric facts |
 
 `logs` matches case-insensitively on error, exception, fatal, panic, time out,
@@ -37,17 +40,22 @@ in the config and says which groups it skipped.
 | "N matching log lines in the 5 minutes starting T" | the count per 5-minute bucket | the first and the peak bucket |
 | "Peak bucket starts T with N ...; the first bucket with matches starts T0" | T0 is when matching lines began, T the worst moment | T0 against the incident start and the change times |
 | "Message pattern seen N times" with a pattern excerpt | a repeated message shape; `<*>` stands for a varying part | the most frequent shape first |
-| "Matching log line in stream S" | the earliest matching lines of the window, oldest first | the very first line |
+| "Log line matching <pattern> in stream S" | the earliest matching lines of the window, oldest first | the very first line |
 | "No log lines matched the pattern in the window" | none, or the pattern or group is wrong | the group name, the pattern, a wider one |
-| "CPUUtilization (Average): peak X at T; window average Y against Z one week earlier (N times higher)" | the comparison reads as load against its normal | the ratio and the peak time |
-| "... (about the same)" | within 0.8 to 1.25 of last week; this is usual, not the cause | look elsewhere |
+| "CPUUtilization (Average): lowest A at T, highest B at T; C during the incident against D in the same hours one week earlier; rose above the range of one week earlier at T1" | the series left last week's range at T1; the fact's time is T1 | T1 against the incident start; B and its time |
+| "... fell below the range of one week earlier at T1" | a drop: free space, healthy hosts, credits, connections; read the lowest value A and its time | A against zero or a limit |
+| "... about the same as one week earlier" | neither the incident-part average nor an extreme left last week's range (widened by 0.8 and 1.25); a spike that stayed inside last week's range is not shown | look elsewhere, or a metric with a tighter statistic |
+| "... zero in both periods" | nothing in either period | the request or invocation metric, to see that the thing ran |
 | "... no comparable baseline" | nothing one week earlier: a new resource, or an idle week | do not call it normal or abnormal |
 | "... no data was returned for the window" | nothing recorded; for counts this can mean none | the invocation or request metric |
 | "... the metric could not be read (see errors)" | the read failed | the collector's errors; permission |
 
 Alarm and log facts with times are incident-time facts; the "Alarm A is ..." line is
-`current`. The peak is of 5-minute values, so its time is the start of that period.
-For an average statistic it is the highest average, not the highest instant.
+`current`. "During the incident" is the average from the incident start to the window
+end, not the whole window, so the hour before the incident does not dilute it.
+Lowest and highest are of 5-minute values; their time is the start of that period, and
+"from T to T2" means the value held over those periods. For an average statistic they
+are the lowest and highest averages, not instants.
 
 ## Common causes
 
@@ -72,13 +80,13 @@ Here the cause is usually a misreading of the facts. Most frequent first.
 ## Compare with
 
 The same metric one week earlier (the fact states it), the alarm's threshold against
-the peak, and the log count before the first bucket with matches.
+the highest (or lowest) value, and the log count before the first bucket with matches.
 
 ## Follow a lead
 
 ```bash
-aws cloudwatch describe-alarm-history --alarm-name <alarm> --history-item-type StateUpdate --max-records 50 --profile <triage profile> --region <region> --query 'AlarmHistoryItems[].{t:Timestamp,summary:HistorySummary}' 2>/dev/null
-aws cloudwatch describe-alarms --alarm-names <alarm> --profile <triage profile> --region <region> --query 'MetricAlarms[].{period:Period,evaluations:EvaluationPeriods,datapoints:DatapointsToAlarm,missing:TreatMissingData}' 2>/dev/null
-aws logs describe-log-streams --log-group-name <log group> --order-by LastEventTime --descending --limit 5 --profile <triage profile> --region <region> --query 'logStreams[].{name:logStreamName,last:lastEventTimestamp}' 2>/dev/null
-aws logs describe-log-groups --log-group-name-prefix <log group> --profile <triage profile> --region <region> --query 'logGroups[].{name:logGroupName,retention:retentionInDays}' 2>/dev/null
+aws cloudwatch describe-alarms --state-value ALARM --max-items 20 --profile <triage profile> --region <region> --query 'MetricAlarms[].{name:AlarmName,since:StateUpdatedTimestamp,metric:MetricName}'
+aws cloudwatch describe-alarm-history --alarm-name <alarm> --history-item-type StateUpdate --max-records 50 --profile <triage profile> --region <region> --query 'AlarmHistoryItems[].{t:Timestamp,summary:HistorySummary}'
+aws cloudwatch describe-alarms --alarm-names <alarm> --profile <triage profile> --region <region> --query 'MetricAlarms[].{period:Period,evaluations:EvaluationPeriods,datapoints:DatapointsToAlarm,missing:TreatMissingData}'
+aws logs describe-log-groups --log-group-name-prefix <log group> --profile <triage profile> --region <region> --query 'logGroups[].{name:logGroupName,retention:retentionInDays}'
 ```

@@ -8,17 +8,20 @@ credential that stopped working. The collector reads metadata only.
 
 ## Collect
 
-The plan already runs `access` for the role, key, or secret it mapped. To get a
+The plan does not run this: no service-map key feeds `access`. Run it when evidence
+names a role, a key, or a secret, for example
+`run collect access ... --case-dir <case> --target role=<role name>`. Take the account,
+region, and window from the plan's own lines; `<case>` is the case folder. To get a
 simulation, give it both an `action` and the role; `resource_arn` is optional.
 
 | When | Command |
 |---|---|
-| An error names a role and an action | `run collect access ... --target role=<role name> --target action=<service:Action> --target resource_arn=<arn from the error>` |
-| An error names a key, or an encrypted resource cannot be used | `run collect access ... --target kms_key=<key id or alias>` |
-| Credentials stopped working, or a rotation is involved | `run collect access ... --target secret=<secret name>` |
-| Who changed the policy, key, or secret, and when | `run collect changes ...` and read `cloudtrail.md` |
-| The role belongs to a task, function, or pod that failed | `run collect ecs ... --target cluster=<c> --target service=<s>` (or `lambda` with `function=<name>`, `eks` with `cluster=<name>`) for it |
-| The error text is needed | `run collect logs ... --target log_groups=<log group with the error>` |
+| An error names a role and an action | `run collect access ... --case-dir <case> --target role=<role name> --target action=<service:Action> --target resource_arn=<arn from the error>` |
+| An error names a key, or an encrypted resource cannot be used | `run collect access ... --case-dir <case> --target kms_key=<key id or alias>` |
+| Credentials stopped working, or a rotation is involved | `run collect access ... --case-dir <case> --target secret=<secret name>` |
+| Who changed the policy, key, or secret, and when | `run collect changes ... --case-dir <case> --target resource_names=<name>` and read `cloudtrail.md` |
+| The role belongs to a task, function, or pod that failed | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s>` (or `lambda` with `function=<name>`, `eks` with `cluster=<name>`) for it |
+| The error text is needed | `run collect logs ... --case-dir <case> --target log_groups=<log group with the error>` |
 
 Never read a secret's value, a parameter with decryption, or decrypt anything. The
 evidence needed (state, times, policy names, a decision) is in the metadata.
@@ -84,8 +87,8 @@ before the incident (the change evidence), and the key or secret in another envi
 When the collector's facts are not enough, read directly by `reference/reading.md`:
 
 ```bash
-aws iam get-role-policy --role-name <role> --policy-name <inline policy> --profile <triage profile> --region <region> --query 'PolicyDocument' 2>/dev/null | jq -c '.Statement[]'
-aws iam get-policy-version --policy-arn <policy arn> --version-id <version> --profile <triage profile> --region <region> --query 'PolicyVersion.Document' 2>/dev/null | jq -c '.Statement[]'
-aws kms get-key-policy --key-id <key id> --policy-name default --profile <triage profile> --region <region> --query 'Policy' 2>/dev/null | jq -r '.'
-aws secretsmanager describe-secret --secret-id <secret name> --profile <triage profile> --region <region> --query '{rotation:RotationEnabled,rules:RotationRules,lastRotated:LastRotatedDate,lastChanged:LastChangedDate}' 2>/dev/null
+aws iam get-role-policy --role-name <role> --policy-name <inline policy> --profile <triage profile> --region <region> --query 'PolicyDocument' | jq -c '.Statement[]'
+aws iam get-policy-version --policy-arn <policy arn> --version-id <version> --profile <triage profile> --region <region> --query 'PolicyVersion.Document' | jq -c '.Statement[]'
+aws kms get-key-policy --key-id <key id> --policy-name default --profile <triage profile> --region <region> --query 'Policy' | jq -r '.'
+aws secretsmanager describe-secret --secret-id <secret name> --profile <triage profile> --region <region> --query '{rotation:RotationEnabled,rules:RotationRules,lastRotated:LastRotatedDate,lastChanged:LastChangedDate}'
 ```

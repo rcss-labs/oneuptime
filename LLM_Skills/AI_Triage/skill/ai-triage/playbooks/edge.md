@@ -8,16 +8,16 @@ target group, listener, certificate, or a host name served through one.
 ## Collect
 
 The plan already runs `edge` for the mapped load balancer. Add these when they apply;
-take the account, region, window, and case folder from the plan's own lines.
+take the account, region, and window from the plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| You know the public host name and need to know whether DNS points at this balancer | `run collect edge ... --target load_balancer=<name> --target hostname=<host name>` (use a `--suffix` for the second run) |
-| Targets are ECS tasks that fail health checks | `run collect ecs ... --target cluster=<cluster> --target service=<service>` |
-| Targets are instances that are unhealthy or were replaced | `run collect ec2 ... --target instance_ids=<target ids>` |
-| Targets cannot be reached on the health check port | `run collect vpc ... --target security_group_ids=<balancer and target groups>` |
-| The balancer sits behind CloudFront or a web ACL | `run collect cloudfront_waf ... --target resource_arn=<load balancer ARN>` |
-| A listener, rule, or certificate may have been changed | `run collect changes ... --target resource_names=<load balancer name>` |
+| You know the public host name and need to know whether DNS points at this balancer | `run collect edge ... --case-dir <case> --target load_balancer=<name> --target hostname=<host name>` (use a `--suffix` for the second run) |
+| Targets are ECS tasks that fail health checks | `run collect ecs ... --case-dir <case> --target cluster=<cluster> --target service=<service>` |
+| Targets are instances that are unhealthy or were replaced | `run collect ec2 ... --case-dir <case> --target instance_ids=<target ids>` |
+| Targets cannot be reached on the health check port | `run collect vpc ... --case-dir <case> --target security_group_ids=<balancer and target groups>` |
+| The balancer sits behind CloudFront or a web ACL | `run collect cloudfront_waf ... --case-dir <case> --target resource_arn=<load balancer ARN>` |
+| A listener, rule, or certificate may have been changed | `run collect changes ... --case-dir <case> --target resource_names=<load balancer name>` |
 
 ## What the facts mean
 
@@ -81,7 +81,7 @@ of the same balancer that is healthy, and the same host in another environment.
 When the collector's facts are not enough, read directly by `reference/reading.md`:
 
 ```bash
-aws elbv2 describe-target-health --target-group-arn <target group ARN> --profile <triage profile> --region <region> --query 'TargetHealthDescriptions[?TargetHealth.State!=`healthy`].{target:Target.Id,port:Target.Port,state:TargetHealth.State,reason:TargetHealth.Reason}' 2>/dev/null
-aws elbv2 describe-rules --listener-arn <listener ARN> --profile <triage profile> --region <region> --query 'Rules[].{priority:Priority,conditions:Conditions[].Field,actions:Actions[].Type}' 2>/dev/null
-aws acm describe-certificate --certificate-arn <certificate ARN> --profile <triage profile> --region <region> --query 'Certificate.{status:Status,notAfter:NotAfter,renewal:RenewalEligibility,inUse:InUseBy}' 2>/dev/null
+aws elbv2 describe-target-health --target-group-arn <target group ARN> --profile <triage profile> --region <region> --query 'TargetHealthDescriptions[?TargetHealth.State!=`healthy`].{target:Target.Id,port:Target.Port,state:TargetHealth.State,reason:TargetHealth.Reason}'
+aws elbv2 describe-rules --listener-arn <listener ARN> --profile <triage profile> --region <region> --query 'Rules[].{priority:Priority,conditions:Conditions[].Field,actions:Actions[].Type}'
+aws acm describe-certificate --certificate-arn <certificate ARN> --profile <triage profile> --region <region> --query 'Certificate.{status:Status,notAfter:NotAfter,renewal:RenewalEligibility,inUse:InUseBy}'
 ```

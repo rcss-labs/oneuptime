@@ -2,21 +2,21 @@
 
 ## When to open
 
-The target has an `ec2_instance`, or evidence names an instance id, a failed status
+The target has `ec2_instances`, or evidence names an instance id, a failed status
 check, a scheduled event, or an unreachable host.
 
 ## Collect
 
 The plan already runs `ec2` for the mapped instances. Add these when they apply; take
-the account, region, window, and case folder from the plan's own lines.
+the account, region, and window from the plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| The instance belongs to a group and was replaced or is missing | `run collect autoscaling ... --target group=<Auto Scaling group name>` |
-| The instance cannot be reached or reach a dependency | `run collect vpc ... --target security_group_ids=<the instance's groups>` |
-| The application on the host logs to CloudWatch | `run collect logs ... --target log_groups=<log group of the host>` |
-| The instance profile was denied something | `run collect access ... --target role=<instance profile role name>` |
-| A change to the instance or its group is suspected | `run collect changes ... --target resource_names=<instance id> --target incident_start=<time>` |
+| The instance belongs to a group and was replaced or is missing | `run collect autoscaling ... --case-dir <case> --target group=<Auto Scaling group name>` |
+| The instance cannot be reached or reach a dependency | `run collect vpc ... --case-dir <case> --target security_group_ids=<the instance's groups>` |
+| The application on the host logs to CloudWatch | `run collect logs ... --case-dir <case> --target log_groups=<log group of the host>` |
+| The instance profile was denied something | `run collect access ... --case-dir <case> --target role=<instance profile role name>` |
+| A change to the instance or its group is suspected | `run collect changes ... --case-dir <case> --target resource_names=<instance id> --target incident_start=<time>` |
 
 ## What the facts mean
 
@@ -31,8 +31,8 @@ the account, region, window, and case folder from the plan's own lines.
 | "status checks: instance status impaired" | the operating system does not answer: crash, full disk, failed network setup | the console output fact, last lines first |
 | "has a scheduled event" with `NotBefore` | AWS plans a retirement, reboot, or maintenance at that time | the times in the fact against the incident start |
 | "Last console output of unhealthy instance" | boot messages: kernel panic, fsck failure, failed mount, cloud-init error | the excerpt; a cut-off tail may hide the start of the problem |
-| `CPUUtilization` peak near 100 and several times higher than a week earlier | resource exhaustion or a runaway process | the peak time against the incident start |
-| `StatusCheckFailed` peak 1 | at least one check failed in that 5-minute period | its time, against the status check fact |
+| `CPUUtilization (Average)`: highest value near 100, "rose above the range of one week earlier at T" | resource exhaustion or a runaway process | T against the incident start |
+| `StatusCheckFailed (Maximum)`: highest 1 | at least one check failed in that 5-minute period | its time, against the status check fact |
 | "no data was returned for the window" | the instance was stopped, or reports no data | the instance state fact |
 
 The instance line and the status-check line are `current` facts: the state now. An
@@ -53,9 +53,9 @@ their own times.
    `system-reboot`. Work order: instance id, event code and `NotBefore`; mitigation is
    a stop and start (a reboot keeps the host) or a replacement; permanent fix is a
    group that replaces failed instances.
-3. **Memory, disk, or CPU exhausted.** Evidence: CPU peak far above a week earlier,
+3. **Memory, disk, or CPU exhausted.** Evidence: CPU that rose far above last week's range,
    console output with out-of-memory kills or "No space left on device", application
-   log lines at the same time. Rule out: a CPU peak that ended before the incident.
+   log lines at the same time. Rule out: a CPU rise that ended before the incident.
    Work order: the instance type and the peak seen; mitigation is a bigger type or
    more volume space; permanent fix is the leak or the growth in the workload.
 4. **Burstable credits used up.** Evidence: instance type of a `t` family, CPU
@@ -77,8 +77,8 @@ earlier, which the metric facts state.
 ## Follow a lead
 
 ```bash
-aws ec2 describe-instances --instance-ids <instance id> --profile <triage profile> --region <region> --query 'Reservations[].Instances[].{state:State.Name,transition:StateTransitionReason,code:StateReason.Code,profile:IamInstanceProfile.Arn,image:ImageId}' 2>/dev/null
-aws ec2 describe-instance-status --instance-ids <instance id> --include-all-instances --profile <triage profile> --region <region> --query 'InstanceStatuses[].{system:SystemStatus.Details,instance:InstanceStatus.Details,events:Events[].{code:Code,before:NotBefore}}' 2>/dev/null
-aws ec2 describe-volumes --filters Name=attachment.instance-id,Values=<instance id> --profile <triage profile> --region <region> --query 'Volumes[].{id:VolumeId,state:State,type:VolumeType,size:Size,iops:Iops}' 2>/dev/null
-aws cloudwatch get-metric-statistics --namespace AWS/EC2 --metric-name CPUCreditBalance --dimensions Name=InstanceId,Value=<instance id> --start-time <window start> --end-time <window end> --period 300 --statistics Minimum --profile <triage profile> --region <region> --query 'sort_by(Datapoints,&Timestamp)[].{t:Timestamp,min:Minimum}' 2>/dev/null
+aws ec2 describe-instances --instance-ids <instance id> --profile <triage profile> --region <region> --query 'Reservations[].Instances[].{state:State.Name,transition:StateTransitionReason,code:StateReason.Code,profile:IamInstanceProfile.Arn,image:ImageId}'
+aws ec2 describe-instance-status --instance-ids <instance id> --include-all-instances --profile <triage profile> --region <region> --query 'InstanceStatuses[].{system:SystemStatus.Details,instance:InstanceStatus.Details,events:Events[].{code:Code,before:NotBefore}}'
+aws ec2 describe-volumes --filters Name=attachment.instance-id,Values=<instance id> --profile <triage profile> --region <region> --query 'Volumes[].{id:VolumeId,state:State,type:VolumeType,size:Size,iops:Iops}'
+aws cloudwatch get-metric-data --metric-data-queries 'Id=m1,MetricStat={Metric={Namespace=AWS/EC2,MetricName=CPUCreditBalance,Dimensions=[{Name=InstanceId,Value=<instance id>}]},Period=300,Stat=Minimum}' --start-time <window start> --end-time <window end> --profile <triage profile> --region <region> --query 'MetricDataResults[].{times:Timestamps,values:Values}'
 ```

@@ -2,22 +2,22 @@
 
 ## When to open
 
-The target has an `api_id`, or evidence names an API Gateway REST or HTTP API, a
+The target has an `api_gateway`, or evidence names an API Gateway REST or HTTP API, a
 stage, or 429, 502, 503, or 504 responses from an API URL.
 
 ## Collect
 
 The plan already runs `apigateway` for the mapped API. Add these when they apply; take
-the account, region, window, and case folder from the plan's own lines.
+the account, region, and window from the plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| The API is an HTTP API | `run collect apigateway ... --target api_id=<api id> --target kind=http` (REST is the default) |
-| Only one stage matters | `run collect apigateway ... --target api_id=<api id> --target stage=<stage name>` |
-| The integration is a Lambda function | `run collect lambda ... --target function=<function name>` |
-| The integration is a load balancer or service behind a VPC link | `run collect edge ... --target load_balancer=<name>` |
-| The API sits behind CloudFront or a web ACL | `run collect cloudfront_waf ... --target resource_arn=<stage ARN or distribution ARN>` |
-| A stage or route changed outside a deployment | `run collect changes ... --target resource_names=<api id>` |
+| The API is an HTTP API | `run collect apigateway ... --case-dir <case> --target api_id=<api id> --target kind=http` (REST is the default) |
+| Only one stage matters | `run collect apigateway ... --case-dir <case> --target api_id=<api id> --target stage=<stage name>` |
+| The integration is a Lambda function | `run collect lambda ... --case-dir <case> --target function=<function name>` |
+| The integration is a load balancer or service behind a VPC link | `run collect edge ... --case-dir <case> --target load_balancer=<name>` |
+| The API sits behind CloudFront or a web ACL | `run collect cloudfront_waf ... --case-dir <case> --target resource_arn=<stage ARN or distribution ARN>` |
+| A stage or route changed outside a deployment | `run collect changes ... --case-dir <case> --target resource_names=<api id>` |
 
 ## What the facts mean
 
@@ -72,9 +72,8 @@ it), and the previous deployment.
 When the collector's facts are not enough, read directly by `reference/reading.md`:
 
 ```bash
-aws apigateway get-stage --rest-api-id <api id> --stage-name <stage> --profile <triage profile> --region <region> --query '{deployment:deploymentId,updated:lastUpdatedDate,throttling:methodSettings,variableNames:keys(variables)}' 2>/dev/null
-aws apigatewayv2 get-integrations --api-id <api id> --profile <triage profile> --region <region> --max-items 20 --query 'Items[].{id:IntegrationId,type:IntegrationType,uri:IntegrationUri,timeoutMs:TimeoutInMillis}' 2>/dev/null
-aws apigateway get-usage-plans --profile <triage profile> --region <region> --max-items 20 --query 'items[].{id:id,name:name,throttle:throttle,quota:quota,stages:apiStages}' 2>/dev/null
+aws apigateway get-stage --rest-api-id <api id> --stage-name <stage> --profile <triage profile> --region <region> --query '{deployment:deploymentId,updated:lastUpdatedDate,throttling:methodSettings,variableNames:keys(variables)}'
+aws apigatewayv2 get-integrations --api-id <api id> --profile <triage profile> --region <region> --max-items 20 --query 'Items[].{id:IntegrationId,type:IntegrationType,uri:IntegrationUri,timeoutMs:TimeoutInMillis}'
 ```
 
 Stage variables can hold secrets: print their names only, as above.

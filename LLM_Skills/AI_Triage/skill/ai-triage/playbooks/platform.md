@@ -10,15 +10,14 @@ incident.
 
 The plan already runs `platform` for the account and region. It reads AWS Health
 events and the service quotas of `ecs`, `lambda`, `ec2`, `rds`, and
-`elasticloadbalancing`. Add these when they apply; take the account, region, window,
-and case folder from the plan's own lines.
+`elasticloadbalancing`. Add these when they apply; take the account, region, and window from the plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| The limit that was hit is of another service | `run collect platform ... --target service_codes=<code1>,<code2>` (for example `dynamodb,sqs`; use a `--suffix`) |
-| A quota is named in an error message | `run collect platform ... --target service_codes=<service code of that quota>` |
+| The limit that was hit is of another service | `run collect platform ... --case-dir <case> --target service_codes=<code1>,<code2>` (for example `dynamodb,sqs`; use a `--suffix`) |
+| A quota is named in an error message | `run collect platform ... --case-dir <case> --target service_codes=<service code of that quota>` |
 | One service fails, others are fine | the playbook of that service, not this one |
-| The limit is Lambda's account concurrency | `run collect lambda ... --target function=<function name>` shows the account limit |
+| The limit is Lambda's account concurrency | `run collect lambda ... --case-dir <case> --target function=<function name>` shows the account limit |
 
 ## What the facts mean
 
@@ -73,8 +72,8 @@ the same workload.
 When the collector's facts are not enough, read directly by `reference/reading.md`:
 
 ```bash
-aws health describe-event-details --event-arns <event ARN> --profile <triage profile> --region us-east-1 --query 'successfulSet[].{type:event.eventTypeCode,start:event.startTime,end:event.endTime,text:eventDescription.latestDescription}' 2>/dev/null
-aws service-quotas list-service-quotas --service-code <service code> --profile <triage profile> --region <region> --max-items 50 --query 'Quotas[?contains(QuotaName,`<name fragment>`)].{name:QuotaName,code:QuotaCode,value:Value,adjustable:Adjustable,usageMetric:UsageMetric}' 2>/dev/null
+aws health describe-event-details --event-arns <event ARN> --profile <triage profile> --region us-east-1 --query 'successfulSet[].{type:event.eventTypeCode,start:event.startTime,end:event.endTime,text:eventDescription.latestDescription}'
+aws service-quotas list-service-quotas --service-code <service code> --profile <triage profile> --region <region> --max-items 50 --query 'Quotas[?contains(QuotaName,`<name fragment>`)].{name:QuotaName,code:QuotaCode,value:Value,adjustable:Adjustable,usageMetric:UsageMetric}'
 ```
 
 The collector gives the quota's name, limit, and usage, but not its code or whether the limit can be raised; the second command reads those.

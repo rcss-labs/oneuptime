@@ -2,7 +2,7 @@
 
 ## When to open
 
-The target has an `autoscaling_group`, or evidence names an Auto Scaling group, an
+The target has an `auto_scaling_group`, or evidence names an Auto Scaling group, an
 instance refresh, instances that keep being replaced, or an ECS service whose scaling
 policy is in question.
 
@@ -10,16 +10,16 @@ policy is in question.
 
 The plan already runs `autoscaling` for the mapped group. For ECS service scaling the
 same collector also needs `ecs_cluster` and `ecs_service`; add them when the plan did
-not. Take the account, region, window, and case folder from the plan's own lines.
+not. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| An ECS service scales by policy | `run collect autoscaling ... --target group=<capacity provider group, or the service name> --target ecs_cluster=<cluster> --target ecs_service=<service>` |
-| Launches fail or instances are unhealthy | `run collect ec2 ... --target instance_ids=<ids from the activities or the group>` |
-| Launches fail on a network error | `run collect vpc ... --target subnet_ids=<the group's subnets>` |
-| A launch failed on a key or role | `run collect access ... --target kms_key=<key id>` or `--target role=<role name>` |
-| A load balancer health check replaces instances | `run collect edge ... --target load_balancer=<load balancer name>`; see `edge.md` |
-| The group, template, or policy was edited | `run collect changes ... --target resource_names=<group name> --target incident_start=<time>` |
+| An ECS service scales by policy | `run collect autoscaling ... --case-dir <case> --target group=<capacity provider group, or the service name> --target ecs_cluster=<cluster> --target ecs_service=<service>` |
+| Launches fail or instances are unhealthy | `run collect ec2 ... --case-dir <case> --target instance_ids=<ids from the activities or the group>` |
+| Launches fail on a network error | `run collect vpc ... --case-dir <case> --target subnet_ids=<the group's subnets>` |
+| A launch failed on a key or role | `run collect access ... --case-dir <case> --target kms_key=<key id>` or `--target role=<role name>` |
+| A load balancer health check replaces instances | `run collect edge ... --case-dir <case> --target load_balancer=<load balancer name>`; see `edge.md` |
+| The group, template, or policy was edited | `run collect changes ... --case-dir <case> --target resource_names=<group name> --target incident_start=<time>` |
 
 ## What the facts mean
 
@@ -74,8 +74,8 @@ which show what a normal week of scaling looks like.
 ## Follow a lead
 
 ```bash
-aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names <group> --profile <triage profile> --region <region> --query 'AutoScalingGroups[].{template:LaunchTemplate,subnets:VPCZoneIdentifier,protected:Instances[?ProtectedFromScaleIn].InstanceId}' 2>/dev/null
-aws autoscaling describe-policies --auto-scaling-group-name <group> --profile <triage profile> --region <region> --query 'ScalingPolicies[].{name:PolicyName,type:PolicyType,adjust:ScalingAdjustment,cooldown:Cooldown}' 2>/dev/null
-aws autoscaling describe-scheduled-actions --auto-scaling-group-name <group> --profile <triage profile> --region <region> --query 'ScheduledUpdateGroupActions[].{name:ScheduledActionName,at:StartTime,recurrence:Recurrence,desired:DesiredCapacity}' 2>/dev/null
-aws application-autoscaling describe-scaling-activities --service-namespace ecs --resource-id service/<cluster>/<service> --max-results 20 --profile <triage profile> --region <region> --query 'ScalingActivities[].{start:StartTime,status:StatusCode,cause:Cause}' 2>/dev/null
+aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names <group> --profile <triage profile> --region <region> --query 'AutoScalingGroups[].{template:LaunchTemplate,subnets:VPCZoneIdentifier,protected:Instances[?ProtectedFromScaleIn].InstanceId}'
+aws autoscaling describe-policies --auto-scaling-group-name <group> --profile <triage profile> --region <region> --query 'ScalingPolicies[].{name:PolicyName,type:PolicyType,adjust:ScalingAdjustment,cooldown:Cooldown}'
+aws autoscaling describe-scheduled-actions --auto-scaling-group-name <group> --profile <triage profile> --region <region> --query 'ScheduledUpdateGroupActions[].{name:ScheduledActionName,at:StartTime,recurrence:Recurrence,desired:DesiredCapacity}'
+aws application-autoscaling describe-scaling-activities --service-namespace ecs --resource-id service/<cluster>/<service> --max-results 20 --profile <triage profile> --region <region> --query 'ScalingActivities[].{start:StartTime,status:StatusCode,cause:Cause}'
 ```

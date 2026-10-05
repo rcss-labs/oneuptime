@@ -10,29 +10,29 @@ message is ever received or read.
 
 The plan already runs `messaging` for the mapped queues and topics. It follows each
 queue's redrive policy to its dead letter queue and reads that too (up to 10 targets).
-A topic must be given as an ARN. Add these when they apply.
+A topic must be given as an ARN. Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
 
 | When | Command |
 |---|---|
-| A consumer is a Lambda function | `run collect lambda ... --target function=<name>` and read `lambda.md` (its event source mapping facts) |
-| A consumer is a service or pod | `run collect ecs ... --target cluster=<c> --target service=<s>` (or `eks` with `cluster=<name>`); read `ecs.md` or `eks.md` |
-| A second queue or a topic's subscribed queue is involved | `run collect messaging ... --suffix <name> --target queues=<queue names, comma separated>` |
-| A topic's failures need a reason | `run collect logs ... --target log_groups=<the topic's delivery status log group>` and read `cloudwatch.md` |
-| A policy or redrive change is suspected | `run collect changes ...` and read `cloudtrail.md` |
+| A consumer is a Lambda function | `run collect lambda ... --case-dir <case> --target function=<name>` and read `lambda.md` (its event source mapping facts) |
+| A consumer is a service or pod | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s>` (or `eks` with `cluster=<name>`); read `ecs.md` or `eks.md` |
+| A second queue or a topic's subscribed queue is involved | `run collect messaging ... --case-dir <case> --suffix <name> --target queues=<queue names, comma separated>` |
+| A topic's failures need a reason | `run collect logs ... --case-dir <case> --target log_groups=<the topic's delivery status log group>` and read `cloudwatch.md` |
+| A policy or redrive change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name>` and read `cloudtrail.md` |
 
 ## What the facts mean
 
 | Fact | Usually means | Read next |
 |---|---|---|
 | "Queue X: N messages visible, M in flight, D delayed, visibility timeout V seconds, retention R, dead letter queue Q after K receives" (`current`, approximate counts) | the backlog now and the redrive setting | the age and the sent and deleted facts; "no dead letter queue" means a failing message returns until retention ends |
-| "ApproximateAgeOfOldestMessage (Maximum): peak N" (seconds, with time) | how long the oldest message has waited | rising for the whole window means consumers are not keeping up or have stopped; near the retention period means messages are about to be dropped |
+| "ApproximateAgeOfOldestMessage (Maximum): highest N at T" (seconds, with time) | how long the oldest message has waited | rising for the whole window means consumers are not keeping up or have stopped; near the retention period means messages are about to be dropped |
 | "ApproximateNumberOfMessagesVisible (Maximum)" | the backlog over time | its peak time against the incident start |
 | "NumberOfMessagesSent (Sum)" against "NumberOfMessagesDeleted (Sum)" | arrival against completed processing | sent above deleted for the window grows the backlog; deleted near zero means no consumer finishes messages |
 | "M in flight" high | consumers receive messages and do not delete them | the visibility timeout against the consumer's processing time; consumer errors |
 | "Queue X is the dead letter queue for: a, b" (`current`) | X is a dead letter queue | the source queues |
 | "Dead letter queue X holds N messages (v visible, f in flight, d delayed)" | messages failed K times | what the consumer's errors say; the count is now, and says nothing about when they arrived |
 | "Topic X: N subscriptions confirmed, P pending, delivery policy N retries" (`current`) | the subscribers; a pending one never confirmed and receives nothing | the subscription list (Follow a lead) |
-| "NumberOfNotificationsFailed (Sum): peak N" | deliveries that failed; it does not say which subscriber or why | the delivery status logs; the subscriber's own evidence |
+| "NumberOfNotificationsFailed (Sum): highest N at T" | deliveries that failed; it does not say which subscriber or why | the delivery status logs; the subscriber's own evidence |
 | "NumberOfMessagesPublished (Sum)" | what the topic received | zero with failed also zero means the publisher stopped |
 | "Queue X was not found" or "Topic X was not found" | the name or region is wrong, or it was deleted | the plan's mapping; the change evidence |
 
@@ -79,7 +79,7 @@ consumer type, and the dead letter queue's count against the time of the last de
 When the collector's facts are not enough, read directly by `reference/reading.md`:
 
 ```bash
-aws sqs get-queue-attributes --queue-url <queue url> --attribute-names RedrivePolicy RedriveAllowPolicy ReceiveMessageWaitTimeSeconds DelaySeconds --profile <triage profile> --region <region> --query 'Attributes' 2>/dev/null
-aws sqs list-dead-letter-source-queues --queue-url <dead letter queue url> --profile <triage profile> --region <region> --max-items 20 2>/dev/null
-aws sns list-subscriptions-by-topic --topic-arn <topic arn> --profile <triage profile> --region <region> --max-items 50 --query 'Subscriptions[].{protocol:Protocol,subscription:SubscriptionArn}' 2>/dev/null
+aws sqs get-queue-attributes --queue-url <queue url> --attribute-names RedrivePolicy RedriveAllowPolicy ReceiveMessageWaitTimeSeconds DelaySeconds --profile <triage profile> --region <region> --query 'Attributes'
+aws sqs list-dead-letter-source-queues --queue-url <dead letter queue url> --profile <triage profile> --region <region> --max-items 20
+aws sns get-topic-attributes --topic-arn <topic arn> --profile <triage profile> --region <region> --query 'Attributes.{confirmed:SubscriptionsConfirmed,pending:SubscriptionsPending,deleted:SubscriptionsDeleted}'
 ```

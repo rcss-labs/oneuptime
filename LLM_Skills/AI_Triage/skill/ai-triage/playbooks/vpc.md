@@ -8,16 +8,19 @@ address, or a NAT or endpoint problem.
 
 ## Collect
 
-The plan already runs `vpc` for the ids it found. Add these when they apply; take the
-account, region, window, and case folder from the plan's own lines.
+The plan does not run this: no service-map key feeds `vpc`. Run it when a lead needs
+it, with the ids that the compute and edge evidence name, for example
+`run collect vpc ... --case-dir <case> --target security_group_ids=<the service's groups>`.
+Take the account, region, and window from the plan's own lines; `<case>` is the case
+folder. More runs, when they apply:
 
 | When | Command |
 |---|---|
-| The ids found are a service's groups and the subnets are not yet checked | `run collect vpc ... --target subnet_ids=<subnets of the service>` |
-| Only a subnet is known and you need the NAT gateways and endpoints | `run collect vpc ... --target vpc_id=<vpc id>` |
-| Another group is the source in a rule you read | `run collect vpc ... --target security_group_ids=<that group>` (use a `--suffix`) |
-| A subnet ran out of addresses and tasks or pods are pending | `run collect ecs ... --target cluster=<cluster> --target service=<service>` or `run collect eks ... --target cluster=<cluster>` |
-| A change to a group, route, or ACL is suspected | `run collect changes ... --target resource_names=<group, route table, or ACL id>` |
+| The ids found are a service's groups and the subnets are not yet checked | `run collect vpc ... --case-dir <case> --target subnet_ids=<subnets of the service>` |
+| Only a subnet is known and you need the NAT gateways and endpoints | `run collect vpc ... --case-dir <case> --target vpc_id=<vpc id>` |
+| Another group is the source in a rule you read | `run collect vpc ... --case-dir <case> --target security_group_ids=<that group>` (use a `--suffix`) |
+| A subnet ran out of addresses and tasks or pods are pending | `run collect ecs ... --case-dir <case> --target cluster=<cluster> --target service=<service>` or `run collect eks ... --case-dir <case> --target cluster=<cluster>` |
+| A change to a group, route, or ACL is suspected | `run collect changes ... --case-dir <case> --target resource_names=<group, route table, or ACL id>` |
 
 ## What the facts mean
 
@@ -76,8 +79,8 @@ or another environment), and the NAT metrics against one week earlier.
 When the collector's facts are not enough, read directly by `reference/reading.md`:
 
 ```bash
-aws ec2 describe-security-groups --group-ids <group id> --profile <triage profile> --region <region> --query 'SecurityGroups[].IpPermissions[].{proto:IpProtocol,from:FromPort,to:ToPort,groups:UserIdGroupPairs[].GroupId,cidrs:IpRanges[].CidrIp}' 2>/dev/null
-aws ec2 describe-network-interfaces --filters Name=group-id,Values=<group id> --profile <triage profile> --region <region> --max-items 20 --query 'NetworkInterfaces[].{id:NetworkInterfaceId,subnet:SubnetId,status:Status,description:Description}' 2>/dev/null
-aws ec2 describe-network-acls --filters Name=association.subnet-id,Values=<subnet id> --profile <triage profile> --region <region> --query 'NetworkAcls[].Entries[].{rule:RuleNumber,egress:Egress,action:RuleAction,protocol:Protocol,cidr:CidrBlock,ports:PortRange}' 2>/dev/null
-aws ec2 describe-vpc-endpoints --filters Name=vpc-id,Values=<vpc id> --profile <triage profile> --region <region> --query 'VpcEndpoints[].{id:VpcEndpointId,service:ServiceName,state:State,groups:Groups[].GroupId}' 2>/dev/null
+aws ec2 describe-security-groups --group-ids <group id> --profile <triage profile> --region <region> --query 'SecurityGroups[].IpPermissions[].{proto:IpProtocol,from:FromPort,to:ToPort,groups:UserIdGroupPairs[].GroupId,cidrs:IpRanges[].CidrIp}'
+aws ec2 describe-network-interfaces --filters Name=group-id,Values=<group id> --profile <triage profile> --region <region> --max-items 20 --query 'NetworkInterfaces[].{id:NetworkInterfaceId,subnet:SubnetId,status:Status,description:Description}'
+aws ec2 describe-network-acls --filters Name=association.subnet-id,Values=<subnet id> --profile <triage profile> --region <region> --query 'NetworkAcls[].Entries[].{rule:RuleNumber,egress:Egress,action:RuleAction,protocol:Protocol,cidr:CidrBlock,ports:PortRange}'
+aws ec2 describe-vpc-endpoints --filters Name=vpc-id,Values=<vpc id> --profile <triage profile> --region <region> --query 'VpcEndpoints[].{id:VpcEndpointId,service:ServiceName,state:State,groups:Groups[].GroupId}'
 ```
