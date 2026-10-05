@@ -215,10 +215,10 @@ def test_classify_denies_a_secret_read_and_value_revealing_flags():
     "command",
     [
         f"aws ecs list-clusters {OK} --no-verify-ssl",
-        f"aws ecs list-clusters {OK} --ca-bundle /tmp/ca.pem",
-        f"aws ecs list-clusters {OK} --ca-bundle=/tmp/ca.pem",
-        f"aws ecs list-clusters {OK} --ca-bun /tmp/ca.pem",
-        f"aws ecs list-clusters {OK} --ca /tmp/ca.pem",
+        f"aws ecs list-clusters {OK} --ca-bundle ca.pem",
+        f"aws ecs list-clusters {OK} --ca-bundle=ca.pem",
+        f"aws ecs list-clusters {OK} --ca-bun ca.pem",
+        f"aws ecs list-clusters {OK} --ca ca.pem",
     ],
 )
 def test_tls_options_ask(command):
@@ -227,3 +227,115 @@ def test_tls_options_ask(command):
 
 def test_tls_options_do_not_hide_a_deny():
     assert verdict(f"aws ecs stop-task {OK} --no-verify-ssl").kind == ASK  # asked, never allowed
+
+
+
+# ---- fix round 5, ruling 1: aws calls that write a local file ------------------
+
+import json
+import sys
+from pathlib import Path
+
+from triage.guard_aws import STREAMING_OUTPUT_OPERATIONS
+
+TOOLS = Path(__file__).resolve().parent.parent / "tools"
+sys.path.insert(0, str(TOOLS))
+import list_streaming_operations  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # re-review round 4, C1: each writes its response body to the last positional
+        f'aws apigateway get-export --rest-api-id abc --stage-name prod --export-type swagger {OK} service-map.yaml',
+        f"aws apigateway get-export --rest-api-id abc --stage-name prod --export-type swagger {OK} settings.json",
+        f"aws apigateway get-sdk --rest-api-id abc --stage-name prod --sdk-type java {OK} sdk.zip",
+        f"aws s3api get-object-torrent --bucket b --key k {OK} t.torrent",
+        f"aws appsync get-introspection-schema --api-id a --format SDL {OK} schema.graphql",
+        f"aws glacier get-job-output --account-id - --vault-name v --job-id j {OK} out.bin",
+        f"aws lakeformation get-work-unit-results --query-id q --work-unit-id 1 --work-unit-token t {OK} r",
+        f"aws kinesis-video-media get-media --start-selector StartSelectorType=NOW {OK} m.mkv",
+        f"aws codeartifact get-package-version-asset --domain d --repository r --format npm --package p "
+        f"--package-version 1 --asset a {OK} a.tgz",
+    ],
+)
+def test_operations_that_write_an_output_file_are_denied(command):
+    result = verdict(command)
+    assert result.kind == DENY
+    assert "output file" in result.reason
+
+
+def test_the_review_reproductions_onto_protected_files_are_denied(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    for target in ("/home/eng/.claude/skills/ai-triage/config/service-map.yaml", "/home/eng/.claude/settings.json"):
+        command = f"aws apigateway get-export --rest-api-id abc --stage-name prod --export-type swagger {OK} {target}"
+        assert verdict(command).kind == DENY
+
+
+def test_streaming_output_set_holds_the_known_writers():
+    for entry in ("apigateway get-export", "apigateway get-sdk", "s3api get-object", "s3api get-object-torrent",
+                  "appsync get-introspection-schema", "glacier get-job-output", "lambda invoke",
+                  "kinesis-video-media get-media", "lakeformation get-work-unit-results"):
+        assert entry in STREAMING_OUTPUT_OPERATIONS
+
+
+def test_the_committed_list_covers_every_streaming_operation_of_the_installed_cli():
+    data_dir = list_streaming_operations.find_data_dir()
+    if data_dir is None:
+        pytest.skip("no AWS CLI service models were found on this machine, so the list cannot be regenerated")
+    missing = set(list_streaming_operations.streaming_operations(data_dir)) - STREAMING_OUTPUT_OPERATIONS
+    assert not missing, f"add these to STREAMING_OUTPUT_OPERATIONS (run tools/list_streaming_operations.py): {sorted(missing)}"
+
+
+def test_the_listing_tool_reads_a_model_folder(tmp_path):
+    model_dir = tmp_path / "s3" / "2006-03-01"
+    model_dir.mkdir(parents=True)
+    (tmp_path / "endpoints.json").write_text("{}")
+    model = {
+        "operations": {"GetObjectTorrent": {"output": {"shape": "Out"}}, "ListBuckets": {"output": {"shape": "List"}},
+                       "PutThing": {}},
+        "shapes": {"Out": {"type": "structure", "payload": "Body", "members": {"Body": {"shape": "Blob"}}},
+                   "Blob": {"type": "blob"}, "List": {"type": "structure", "members": {}}},
+    }
+    (model_dir / "service-2.json").write_text(json.dumps(model))
+    assert list_streaming_operations.streaming_operations(tmp_path) == ["s3api get-object-torrent"]
+    assert list_streaming_operations.cli_operation_name("GetSnapshotBlock") == "get-snapshot-block"
+    assert list_streaming_operations.cli_operation_name("ListAWSAccounts") == "list-aws-accounts"
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/home/eng/x", "/Users/someone/x", "/tmp/x", "/tmp", "/private/tmp/x", "/var/folders/x", "/etc/hosts",
+     "/opt/x", "/Volumes/usb/x", "./x", "../x", "~/x", "~", "file:///tmp/in.json", "fileb://blob.bin",
+     "FILE://x.json", "/users/someone/x"],
+)
+def test_no_aws_argument_may_be_a_local_path(path, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    for command in (f"aws ecs describe-services --cluster {path} {OK}", f"aws ecs describe-services --cluster={path} {OK}",
+                    f"aws logs filter-log-events --log-group-name g {OK} {path}"):
+        result = check_aws(tuple(shlex.split(command)), (), PROFILES)
+        assert result.kind == DENY, command
+        assert "local path" in result.reason
+
+
+def test_the_home_directory_counts_as_a_local_path_wherever_it_is(monkeypatch):
+    monkeypatch.setenv("HOME", "/srv/people/eng")
+    assert verdict(f"aws ecs describe-services --cluster /srv/people/eng/x {OK}").kind == DENY
+    assert verdict(f"aws ecs describe-services --cluster /srv/people/engineer {OK}").kind == ALLOW
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["/aws/ecs/checkout", "/ecs/orders", "/aws/lambda/f", "/app/url", "arn:aws:ecs:eu-west-1:111111111111:cluster/c",
+     "Name=tag:env,Values=prod", "services[0].events[:5]", "/tmpl-like-but-not", "tmp/x"],
+)
+def test_aws_values_that_look_like_paths_stay_allowed(value, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    command = ("aws", "logs", "filter-log-events", "--log-group-name", value, "--profile", "triage-prod-main",
+               "--region", "eu-west-1")
+    expected = DENY if value.startswith("/tmp") else ALLOW
+    assert check_aws(command, (), PROFILES).kind == expected
+
+
+def test_a_tls_bundle_given_as_a_local_path_is_denied():
+    assert verdict(f"aws ecs list-clusters {OK} --ca-bundle /tmp/ca.pem").kind == DENY
