@@ -193,11 +193,11 @@ before = write it before judging; after = set it from `judgments/summary.json` o
 | `actions[].title` | yes | Non-empty text | before |
 | `actions[].target` | yes | Object | before |
 | `actions[].target.account_alias` | yes | Non-empty text; an account alias of the config | before |
-| `actions[].target.account_id` | yes | Text; the key must be present. Fill it from the evidence whenever a fact holds it: the 12 digits inside any ARN, which appear in a fact's `command` (for example after `--listener-arn`). An empty value is accepted. | before |
+| `actions[].target.account_id` | yes | Text; the key must be present. Fill it from the evidence whenever a fact holds it: the 12 digits inside the resource's ARN, which the fact that states the resource's state carries in `data["arn"]`. An empty value is accepted. | before |
 | `actions[].target.region` | yes | Non-empty text | before |
 | `actions[].target.service` | yes | Non-empty text | before |
 | `actions[].target.resource_id` | yes | Non-empty text | before |
-| `actions[].target.arn` | yes | Text; the key must be present. Fill it from the evidence whenever a fact holds it, in its `summary`, `data`, or `command` (`--certificate-arn`, `--listener-arn`, `--load-balancer-arn`). An empty value is accepted. | before |
+| `actions[].target.arn` | yes | Text; the key must be present. Fill it from the evidence whenever a fact holds it: the fact that states a resource's state carries its ARN in `data["arn"]`, and related ARNs under clear names (`task_definition_arn`, `target_group_arns`, `listeners`); where AWS gives only an id, the fact has `data["resource_id"]` and `arn` stays empty. Never construct an ARN. An empty value is accepted. | before |
 | `actions[].current_state` | yes | Non-empty text | before |
 | `actions[].required_state` | yes | Non-empty text | before |
 | `actions[].change` | yes | Non-empty text: the exact change. Judging rates how specific an action is from `title`, `target`, `current_state`, `required_state`, `change` as written, so an empty `account_id` or `arn` leaves that rating less to go on. | before |
