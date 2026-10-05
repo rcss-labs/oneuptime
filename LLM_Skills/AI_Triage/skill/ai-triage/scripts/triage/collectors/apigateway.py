@@ -96,11 +96,12 @@ def _get_api_name(ctx: CollectContext, api_id: str, http: bool) -> tuple[str | N
 def _add_stage(ctx: CollectContext, resource: str, stage: Stage) -> None:
     updated = parse_iso(stage.updated)
     when = f", last updated {format_time(updated)}" if updated else ""
-    inside = " and was updated inside the window" if in_window(ctx.window, stage.updated) else ""
+    inside = in_window(ctx.window, stage.updated)
+    inside_text = " and was updated inside the window" if inside else ""
     ctx.evidence.add(
-        kind=CURRENT, resource=resource, command=ctx.last_command,
+        kind=INCIDENT_TIME if inside else CURRENT, resource=resource, time=updated, command=ctx.last_command,
         summary=(
-            f"Stage {stage.name} runs deployment {stage.deployment_id}{when}{inside}; "
+            f"Stage {stage.name} runs deployment {stage.deployment_id}{when}{inside_text}; "
             f"throttling {stage.throttling}; {stage.cache}"
         ),
     )

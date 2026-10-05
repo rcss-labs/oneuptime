@@ -91,7 +91,7 @@ def test_stage_and_deployment_changed_inside_the_window(config_data, tmp_path):
             {"id": "dep1", "createdDate": OUTSIDE}]}})
     ctx, _, _ = run(config_data, tmp_path, answers, REST)
     assert "was updated inside the window" in by_summary(ctx, "Stage prod")[0].summary
-    deployments = [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+    deployments = [f for f in ctx.evidence.facts if f.kind == "incident_time" and f.summary.startswith("Deployment")]
     assert len(deployments) == 1 and "dep2" in deployments[0].summary
     assert deployments[0].time == "2026-10-04T10:42:10Z" and deployments[0].excerpt == "release 42"
 
@@ -192,3 +192,13 @@ def test_failed_stage_lookup_is_an_error_not_a_missing_stage(config_data, tmp_pa
     ctx, _, _ = run(config_data, tmp_path, answers, {**REST, "stage": "prod"})
     assert not by_summary(ctx, "was not found")
     assert [e["code"] for e in ctx.evidence.errors] == ["AccessDeniedException"]
+
+
+def test_stage_update_time_is_carried_as_the_facts_time(config_data, tmp_path):
+    inside = rest_answers(**{"apigateway get-stages": {"item": [rest_stage(updated=IN_WINDOW)]}})
+    ctx, _, _ = run(config_data, tmp_path, inside, REST)
+    stage = by_summary(ctx, "Stage prod")[0]
+    assert stage.kind == "incident_time" and stage.time == "2026-10-04T10:42:10Z"
+    ctx, _, _ = run(config_data, tmp_path, rest_answers(), REST)
+    stage = by_summary(ctx, "Stage prod")[0]
+    assert stage.kind == "current" and stage.time == "2026-10-01T07:00:00Z"
