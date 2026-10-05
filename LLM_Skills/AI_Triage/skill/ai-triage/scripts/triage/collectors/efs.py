@@ -90,6 +90,7 @@ def _add_mount_targets(ctx: CollectContext, name: str, resource: str) -> None:
     for target in targets:
         ctx.evidence.add(
             kind=CURRENT, resource=resource, command=ctx.last_command,
+            data={"resource_id": target["MountTargetId"]} if target.get("MountTargetId") else None,
             summary=(
                 f"Mount target {target.get('MountTargetId')} in {target.get('AvailabilityZoneName')}, "
                 f"subnet {target.get('SubnetId')}, state {target.get('LifeCycleState')}, address {target.get('IpAddress')}"
@@ -110,6 +111,7 @@ def _add_access_points(ctx: CollectContext, name: str, resource: str) -> None:
             label = f" ({point['Name']})" if point.get("Name") else ""
             ctx.evidence.add(
                 kind=CURRENT, resource=resource, command=ctx.last_command,
+                data={"arn": point["AccessPointArn"]} if point.get("AccessPointArn") else None,
                 summary=f"Access point {point.get('AccessPointId')}{label} is {point.get('LifeCycleState')}",
             )
 
@@ -123,7 +125,11 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         if reply is not None or was_not_found(ctx, FILE_SYSTEM_NOT_FOUND):
             ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=f"File system {name} was not found")
         return
-    ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=_file_system_summary(name, systems[0]))
+    arn = systems[0].get("FileSystemArn")
+    ctx.evidence.add(
+        kind=CURRENT, resource=resource, command=ctx.last_command, summary=_file_system_summary(name, systems[0]),
+        data={"arn": arn} if arn else None,
+    )
     _add_mount_targets(ctx, name, resource)
     _add_access_points(ctx, name, resource)
     dimensions = {"FileSystemId": name}

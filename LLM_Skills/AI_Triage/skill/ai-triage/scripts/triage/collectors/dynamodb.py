@@ -10,6 +10,7 @@ from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
 from triage.metrics import MetricSpec, _fetch, _summary_text, add_metric_facts
 
 MAX_ACTIVITIES = 20
+MAX_ARNS = 20
 TABLE_NOT_FOUND = ("ResourceNotFoundException",)
 TABLE_METRICS = (
     ("ReadThrottleEvents", "Sum"), ("WriteThrottleEvents", "Sum"),
@@ -21,6 +22,19 @@ OPERATIONS = (
     "GetItem", "PutItem", "UpdateItem", "DeleteItem", "Query", "Scan",
     "BatchGetItem", "BatchWriteItem", "TransactWriteItems",
 )
+
+
+def _table_arns(table: dict) -> dict:
+    """The table ARN and its global secondary index ARNs (at most MAX_ARNS), as the describe answer gives them."""
+    data: dict = {}
+    if table.get("TableArn"):
+        data["arn"] = table["TableArn"]
+    index_arns = [i["IndexArn"] for i in table.get("GlobalSecondaryIndexes", []) if i.get("IndexArn")]
+    if index_arns:
+        data["index_arns"] = index_arns[:MAX_ARNS]
+        if len(index_arns) > MAX_ARNS:
+            data["index_arns_omitted"] = len(index_arns) - MAX_ARNS
+    return data
 
 
 def _table_summary(name: str, table: dict) -> str:
@@ -94,7 +108,10 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         if reply is not None or was_not_found(ctx, TABLE_NOT_FOUND):
             ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=f"Table {name} was not found")
         return
-    ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=_table_summary(name, table))
+    ctx.evidence.add(
+        kind=CURRENT, resource=resource, command=ctx.last_command, summary=_table_summary(name, table),
+        data=_table_arns(table),
+    )
     _add_scaling_activities(ctx, name, resource)
     dimensions = {"TableName": name}
     table_summaries = add_metric_facts(

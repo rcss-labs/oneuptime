@@ -188,3 +188,21 @@ def test_secret_in_event_message_never_reaches_the_document(config_data, tmp_pat
     ctx, _ = run(config_data, tmp_path, healthy_answers(**{"elasticache describe-events": events}))
     assert secret not in ctx.evidence.to_json()
     assert "auth failed" in ctx.evidence.to_json()
+
+
+GROUP_ARN = "arn:aws:elasticache:eu-west-1:111111111111:replicationgroup:sessions"
+MEMBER_ARN = "arn:aws:elasticache:eu-west-1:111111111111:cluster:sessions-001"
+
+
+def test_state_facts_carry_the_group_and_member_arns(config_data, tmp_path):
+    answers = healthy_answers(**{"elasticache describe-replication-groups": group(ARN=GROUP_ARN)})
+    arned = {**cluster("sessions-001"), "ARN": MEMBER_ARN}
+    ctx, _ = run(config_data, tmp_path, answers, members(arned, cluster("sessions-002")))
+    assert ctx.evidence.facts[0].data["arn"] == GROUP_ARN
+    first, second = by_summary(ctx, "Member sessions-001")[0], by_summary(ctx, "Member sessions-002")[0]
+    assert first.data["arn"] == MEMBER_ARN and "arn" not in second.data
+
+
+def test_an_answer_without_arns_writes_no_arn_key(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, healthy_answers())
+    assert "arn" not in ctx.evidence.facts[0].data and ctx.evidence.errors == []

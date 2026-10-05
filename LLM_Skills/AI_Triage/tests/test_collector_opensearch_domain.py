@@ -177,3 +177,14 @@ def test_dual_stack_domain_reports_its_vpcv2_endpoint(config_data, tmp_path):
     answers = healthy_answers(**{"opensearch describe-domain": domain(Endpoint=None, Endpoints={"vpcv2": "vpc-v2-logs.eu-west-1.es.example.com"})})
     ctx, _ = run(config_data, tmp_path, answers)
     assert "endpoint vpc-v2-logs.eu-west-1.es.example.com" in ctx.evidence.facts[0].summary
+
+
+def test_state_fact_carries_the_domain_arn(config_data, tmp_path):
+    arn = "arn:aws:es:eu-west-1:111111111111:domain/logs-prod"
+    ctx, _ = run(config_data, tmp_path, healthy_answers(**{"opensearch describe-domain": domain(ARN=arn)}))
+    assert ctx.evidence.facts[0].data["arn"] == arn
+
+
+def test_an_answer_without_an_arn_writes_no_arn_key(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, healthy_answers())
+    assert "arn" not in ctx.evidence.facts[0].data and ctx.evidence.errors == []

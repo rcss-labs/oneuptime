@@ -228,3 +228,22 @@ def test_secret_in_access_point_name_never_reaches_the_document(config_data, tmp
     points = {"AccessPoints": [{"AccessPointId": "fsap-2", "LifeCycleState": "error", "Name": f"token={secret}"}]}
     ctx, _ = run(config_data, tmp_path, healthy_answers(**{"efs describe-access-points": points}))
     assert secret not in ctx.evidence.to_json()
+
+
+def test_state_facts_carry_the_arns_and_ids(config_data, tmp_path):
+    fs_arn = "arn:aws:elasticfilesystem:eu-west-1:111111111111:file-system/fs-0abc123"
+    ap_arn = "arn:aws:elasticfilesystem:eu-west-1:111111111111:access-point/fsap-2"
+    answers = healthy_answers(**{
+        "efs describe-file-systems": file_system(FileSystemArn=fs_arn),
+        "efs describe-access-points": {"AccessPoints": [{"AccessPointId": "fsap-2", "AccessPointArn": ap_arn, "LifeCycleState": "error"}]},
+    })
+    ctx, _ = run(config_data, tmp_path, answers)
+    assert ctx.evidence.facts[0].data["arn"] == fs_arn
+    mounts = [f for f in ctx.evidence.facts if f.kind == "current" and f.summary.startswith("Mount target fsmt-")]
+    assert [f.data["resource_id"] for f in mounts] == ["fsmt-1", "fsmt-2"]
+    assert by_summary(ctx, "Access point fsap-2")[0].data["arn"] == ap_arn
+
+
+def test_an_answer_without_arns_writes_no_arn_key(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, healthy_answers())
+    assert "arn" not in ctx.evidence.facts[0].data and ctx.evidence.errors == []

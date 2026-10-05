@@ -56,6 +56,7 @@ def _add_member(ctx: CollectContext, name: str) -> None:
     nodes = ", ".join(f"{n.get('CacheNodeId')} {n.get('CacheNodeStatus')}" for n in cluster.get("CacheNodes", [])) or "none"
     ctx.evidence.add(
         kind=CURRENT, resource=f"cache-cluster/{name}", command=ctx.last_command,
+        data={"arn": cluster["ARN"]} if cluster.get("ARN") else None,
         summary=(
             f"Member {name} is {cluster.get('CacheClusterStatus')}: engine {cluster.get('Engine')} "
             f"{cluster.get('EngineVersion')}, node type {cluster.get('CacheNodeType')}, nodes {nodes}"
@@ -96,7 +97,10 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
             )
         return
     group = groups[0]
-    ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=_group_summary(group))
+    ctx.evidence.add(
+        kind=CURRENT, resource=resource, command=ctx.last_command, summary=_group_summary(group),
+        data={"arn": group["ARN"]} if group.get("ARN") else None,
+    )
     all_members = group.get("MemberClusters", [])
     members = all_members[:MAX_MEMBERS]
     if len(all_members) > MAX_MEMBERS:

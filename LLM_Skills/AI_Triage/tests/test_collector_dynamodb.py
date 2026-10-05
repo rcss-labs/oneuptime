@@ -271,3 +271,26 @@ def test_a_zero_per_operation_datapoint_does_not_suppress_the_statement(config_d
     for data in ({("ThrottledRequests", "Query"): 0.0}, {("SystemErrors", "PutItem"): 0.0}):
         ctx, _ = run_with_metrics(config_data, tmp_path, data)
         assert len(by_summary(ctx, "throttling or system error was recorded")) == 1
+
+
+TABLE_ARN = "arn:aws:dynamodb:eu-west-1:111111111111:table/orders"
+
+
+def test_state_fact_carries_the_table_and_index_arns(config_data, tmp_path):
+    indexes = [{"IndexName": "by-customer", "IndexStatus": "ACTIVE", "IndexArn": TABLE_ARN + "/index/by-customer"}]
+    ctx, _ = run(config_data, tmp_path, healthy_answers(**{"dynamodb describe-table": table(TableArn=TABLE_ARN, GlobalSecondaryIndexes=indexes)}))
+    data = ctx.evidence.facts[0].data
+    assert data["arn"] == TABLE_ARN and data["index_arns"] == [TABLE_ARN + "/index/by-customer"]
+
+
+def test_index_arns_are_capped_with_an_omitted_count(config_data, tmp_path):
+    indexes = [{"IndexName": f"i{n}", "IndexStatus": "ACTIVE", "IndexArn": f"{TABLE_ARN}/index/i{n}"} for n in range(22)]
+    ctx, _ = run(config_data, tmp_path, healthy_answers(**{"dynamodb describe-table": table(TableArn=TABLE_ARN, GlobalSecondaryIndexes=indexes)}))
+    data = ctx.evidence.facts[0].data
+    assert len(data["index_arns"]) == 20 and data["index_arns_omitted"] == 2
+
+
+def test_an_answer_without_arns_writes_no_arn_key(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, healthy_answers())
+    assert "arn" not in ctx.evidence.facts[0].data and "index_arns" not in ctx.evidence.facts[0].data
+    assert ctx.evidence.errors == []

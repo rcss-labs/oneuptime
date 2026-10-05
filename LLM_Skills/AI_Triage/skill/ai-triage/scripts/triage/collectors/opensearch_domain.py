@@ -77,7 +77,10 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         if reply is not None or was_not_found(ctx, DOMAIN_NOT_FOUND):
             ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=f"Domain {name} was not found")
         return
-    ctx.evidence.add(kind=CURRENT, resource=resource, command=ctx.last_command, summary=_domain_summary(name, status))
+    ctx.evidence.add(
+        kind=CURRENT, resource=resource, command=ctx.last_command, summary=_domain_summary(name, status),
+        data={"arn": status["ARN"]} if status.get("ARN") else None,
+    )
     _add_health(ctx, resource, name)
     _add_change_progress(ctx, resource, name)
     dimensions = {"DomainName": name, "ClientId": ctx.account.account_id}

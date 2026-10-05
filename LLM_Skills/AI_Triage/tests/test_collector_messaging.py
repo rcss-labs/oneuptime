@@ -263,3 +263,31 @@ def test_denied_queue_lookup_is_an_error_not_a_missing_queue(config_data, tmp_pa
     ctx, _ = run(config_data, tmp_path, {"queues": "orders"}, base_answers(**{"sqs get-queue-url": access_denied("GetQueueUrl")}))
     assert ctx.evidence.facts == []
     assert [e["code"] for e in ctx.evidence.errors] == ["AccessDeniedException"]
+
+
+def test_queue_facts_carry_arns_and_urls(config_data, tmp_path):
+    arn = f"arn:aws:sqs:eu-west-1:{ACCOUNT}:orders"
+    url = f"https://sqs.eu-west-1.example.com/{ACCOUNT}/orders"
+    sources = {"queueUrls": [url + "-src"]}
+    answers = base_answers(**{
+        "sqs get-queue-url": {"QueueUrl": url},
+        "sqs get-queue-attributes": attributes(dead_letter=DLQ_ARN, QueueArn=arn),
+        "sqs list-dead-letter-source-queues": sources,
+    })
+    ctx, _ = run(config_data, tmp_path, {"queues": "orders"}, answers)
+    data = ctx.evidence.facts[0].data
+    assert data["arn"] == arn and data["queue_url"] == url and data["dead_letter_queue_arn"] == DLQ_ARN
+    assert by_summary(ctx, "dead letter queue for")[0].data["source_queue_urls"] == [url + "-src"]
+
+
+def test_topic_fact_carries_its_arn(config_data, tmp_path):
+    answers = base_answers(**{"sns get-topic-attributes": {"Attributes": {"TopicArn": TOPIC_ARN, "SubscriptionsConfirmed": "1"}}})
+    ctx, _ = run(config_data, tmp_path, {"topics": TOPIC_ARN}, answers)
+    assert ctx.evidence.facts[0].data["arn"] == TOPIC_ARN
+
+
+def test_answers_without_arns_write_no_arn_key(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, {"queues": "orders", "topics": TOPIC_ARN})
+    for fact in ctx.evidence.facts[:1] + by_summary(ctx, "Topic order-events"):
+        assert "arn" not in fact.data
+    assert ctx.evidence.errors == []

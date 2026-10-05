@@ -53,6 +53,18 @@ def _dead_letter_arn(attributes: dict[str, Any]) -> tuple[str | None, Any]:
     return policy.get("deadLetterTargetArn"), policy.get("maxReceiveCount")
 
 
+def _queue_data(attributes: dict[str, Any], url: str) -> dict[str, Any]:
+    """The whitelisted attributes plus the queue's ARN, URL, and dead letter queue ARN as the answers give them."""
+    data: dict[str, Any] = {"attributes": {key: attributes[key] for key in SHOWN_ATTRIBUTES if key in attributes}}
+    if attributes.get("QueueArn"):
+        data["arn"] = attributes["QueueArn"]
+    data["queue_url"] = url
+    dead_letter, _ = _dead_letter_arn(attributes)
+    if dead_letter:
+        data["dead_letter_queue_arn"] = dead_letter
+    return data
+
+
 def _queue_summary(name: str, attributes: dict[str, Any]) -> str:
     visible, in_flight, delayed = _counts(attributes)
     target, receives = _dead_letter_arn(attributes)
@@ -79,7 +91,7 @@ def _collect_queue(ctx: CollectContext, name: str) -> tuple[dict[str, Any] | Non
         return None, False
     ctx.evidence.add(
         kind=CURRENT, resource=resource, command=ctx.last_command,
-        data={"attributes": {key: attributes[key] for key in SHOWN_ATTRIBUTES if key in attributes}},
+        data=_queue_data(attributes, url),
         summary=_queue_summary(name, attributes),
     )
     sources = ctx.aws("sqs", "list-dead-letter-source-queues", ["--queue-url", url, "--max-items", MAX_SOURCE_QUEUES])
@@ -87,6 +99,7 @@ def _collect_queue(ctx: CollectContext, name: str) -> tuple[dict[str, Any] | Non
     if source_names:
         ctx.evidence.add(
             kind=CURRENT, resource=resource, command=ctx.last_command,
+            data={"source_queue_urls": (sources or {}).get("queueUrls", [])},
             summary=f"Queue {name} is the dead letter queue for: {', '.join(source_names)}",
         )
     dimensions = {"QueueName": name}
@@ -155,6 +168,7 @@ def _collect_topic(ctx: CollectContext, arn: str) -> None:
         return
     ctx.evidence.add(
         kind=CURRENT, resource=resource, command=ctx.last_command,
+        data={"arn": attributes["TopicArn"]} if attributes.get("TopicArn") else None,
         summary=(
             f"Topic {name}: {attributes.get('SubscriptionsConfirmed', 0)} subscriptions confirmed, "
             f"{attributes.get('SubscriptionsPending', 0)} pending, {_delivery_text(attributes)}"
