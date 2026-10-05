@@ -19,6 +19,7 @@ from triage.context import CollectContext, SignInExpired
 from triage.evidence import Evidence
 from triage.fixtures import FixtureError, fixture_dir, kube_runner_from_env, replay_banner, runner_from_env
 from triage.window import WindowError, make_window
+from triage.cli import add_exit_codes, run
 
 GLOBAL_REGION = "us-east-1"  # hosts the global services
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -85,6 +86,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--case-dir", type=Path, help="write the evidence file into this case folder")
     parser.add_argument("--suffix", default="", help="added to the evidence file name")
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
+    add_exit_codes(parser)
     return parser
 
 
@@ -161,4 +163,4 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(main))

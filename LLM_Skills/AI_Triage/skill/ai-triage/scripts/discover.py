@@ -16,6 +16,7 @@ from triage.context import SignInExpired
 from triage.discover import discover_hostname
 from triage.service_map import MapError, parse_map
 from triage.fixtures import FixtureError, fixture_dir, replay_banner, kube_runner_from_env, runner_from_env
+from triage.cli import add_exit_codes, run
 
 INTAKE_DIR_NAME = "intake"
 OUTPUT_KEYS = {"discovery", "service_name", "proposed_entry", "validation"}
@@ -32,6 +33,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save", type=Path, metavar="PATH",
                         help="also write the JSON output here; the path must be under the intake folder next to cases_dir")
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
+    add_exit_codes(parser)
     return parser
 
 
@@ -110,4 +112,4 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(main))

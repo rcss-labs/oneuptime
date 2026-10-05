@@ -25,9 +25,9 @@ def test_invalid_map_exits_one_and_lists_errors(tmp_path):
     assert "at least one environment is required" in result.stderr
 
 
-def test_missing_config_exits_one(tmp_path):
+def test_missing_config_exits_two_like_the_other_scripts(tmp_path):
     result = run("--config", str(tmp_path / "none.yaml"), "--map", str(EXAMPLE_MAP))
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert "Config is invalid:" in result.stderr
 
 

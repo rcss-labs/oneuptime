@@ -21,6 +21,7 @@ from triage.opensearch.client import OpenSearchClient, OpenSearchError, Transpor
 from triage.opensearch.policy import Refused
 from triage.redact import Redactor
 from triage.window import Window, WindowError, make_window
+from triage.cli import add_exit_codes, run
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 INTERVALS = ("1m", "5m", "15m", "1h")
@@ -89,6 +90,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_window_options(found)
     found.add_argument("--size", type=_positive_int, help="number of hits; clamped to the configured limit")
     found.add_argument("--order", choices=("asc", "desc"), default="asc", help="oldest first (asc) or newest first (desc)")
+    add_exit_codes(parser)
     return parser
 
 
@@ -187,4 +189,4 @@ def main(argv: list[str] | None = None, transport: Transport | None = None) -> i
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(main))

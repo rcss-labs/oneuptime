@@ -16,6 +16,7 @@ from pathlib import Path
 from triage.config import ConfigError, default_config_path, load_config
 from triage.fixtures import FixtureError, fixture_dir
 from triage.verify import EXPIRED, exit_code, render_table, verify_all
+from triage.cli import add_exit_codes, run
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
@@ -24,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="verify_access", description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", type=Path, default=default_config_path(SKILL_DIR), help="path to the config file")
     parser.add_argument("--account", action="append", default=[], metavar="ALIAS", help="check only this account; repeatable")
+    add_exit_codes(parser)
     args = parser.parse_args(argv)
     try:
         replaying = fixture_dir() is not None
@@ -54,4 +56,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(main))

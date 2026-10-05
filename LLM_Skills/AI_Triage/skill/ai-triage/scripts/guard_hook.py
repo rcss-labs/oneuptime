@@ -121,7 +121,13 @@ def evaluate(stdin_text: str, skill_dir: Path) -> str:
 
 
 def main() -> int:
-    output = evaluate(sys.stdin.read(), skill_dir_from(os.environ))
+    raw = sys.stdin.buffer.read()
+    try:
+        stdin_text = raw.decode("utf-8")
+    except UnicodeDecodeError:  # fail closed: deny when the bytes mention aws or kubectl, as for unreadable JSON
+        output = _fail_closed(raw.decode("utf-8", errors="replace"), "hook input is not UTF-8")
+    else:
+        output = evaluate(stdin_text, skill_dir_from(os.environ))
     if output:
         print(output)
     return 0

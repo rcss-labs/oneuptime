@@ -35,6 +35,7 @@ from triage.publish import (
 )
 from triage.report import render_is_current
 from triage.window import WindowError, parse_time
+from triage.cli import add_exit_codes, run
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
@@ -76,6 +77,7 @@ def _build_parser() -> argparse.ArgumentParser:
     slack_record = add("record-slack", "record a Slack post")
     slack_record.add_argument("--destination", required=True, help="channel or person the message went to")
     slack_record.add_argument("--now", help="the current time, ISO 8601 with a timezone; defaults to the clock")
+    add_exit_codes(parser)
     return parser
 
 
@@ -207,4 +209,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(main))

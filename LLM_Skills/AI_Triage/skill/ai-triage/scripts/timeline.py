@@ -13,6 +13,7 @@ from pathlib import Path
 from triage.case import REPLAY_NOTICE, CaseError, check_replay, resolve_case_dir
 from triage.config import ConfigError, default_config_path, load_config
 from triage.timeline import build_timeline, render_rows
+from triage.cli import add_exit_codes, run
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
@@ -21,6 +22,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="timeline", description=__doc__.split("\n\n")[0])
     parser.add_argument("--case-dir", type=Path, required=True, help="the case folder")
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
+    add_exit_codes(parser)
     return parser
 
 
@@ -48,4 +50,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(main))

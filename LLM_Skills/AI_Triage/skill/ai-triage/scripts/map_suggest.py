@@ -14,6 +14,7 @@ from triage.case import CaseError
 from triage.config import ConfigError, default_config_path, load_config
 from triage.map_suggest import SuggestError, apply, propose
 from triage.service_map import default_map_path
+from triage.cli import add_exit_codes, run
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
@@ -33,6 +34,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     add("propose", "print the entry that would be added; changes nothing")
     add("apply", "back up the service map, append the entry, and check that the map still loads")
+    add_exit_codes(parser)
     return parser
 
 
@@ -59,4 +61,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(main))

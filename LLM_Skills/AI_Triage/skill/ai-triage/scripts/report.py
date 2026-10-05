@@ -32,6 +32,7 @@ from triage.report import (
 from triage.redact import Redactor
 from triage.timeline import build_timeline
 from triage.window import WindowError, parse_time
+from triage.cli import add_exit_codes, run
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
@@ -52,6 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
         child.add_argument("--case-dir", type=Path, required=True, help="the case folder")
         child.add_argument("--skill-dir", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         child.add_argument("--now", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    add_exit_codes(parser)
     return parser
 
 
@@ -165,4 +167,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(main))

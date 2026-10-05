@@ -27,6 +27,7 @@ from triage.collection_plan import plan_collection, run_collection
 from triage.config import ConfigError, default_config_path, load_config
 from triage.service_map import MapError, ServiceMap, default_map_path, load_map
 from triage.window import WindowError, parse_time
+from triage.cli import add_exit_codes, run
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
@@ -71,6 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--case-dir", type=Path, required=True)
     show = add("show", "print case.json")
     show.add_argument("--case-dir", type=Path, required=True)
+    add_exit_codes(parser)
     return parser
 
 
@@ -170,4 +172,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(main))

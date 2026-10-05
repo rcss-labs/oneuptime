@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate the team config and the service map.
 
-Exit codes: 0 valid, 1 invalid, 2 usage error.
+Exit codes: 0 valid, 1 the service map is invalid, 2 usage error or an invalid config.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 
 from triage.config import ConfigError, default_config_path, load_config
 from triage.service_map import MapError, default_map_path, load_map
+from triage.cli import add_exit_codes, run
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
@@ -21,6 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--config", type=Path, default=default_config_path(SKILL_DIR), help="path to the config file")
     parser.add_argument("--map", type=Path, default=default_map_path(SKILL_DIR), help="path to the service map")
+    add_exit_codes(parser)
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
@@ -28,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Config is invalid:", file=sys.stderr)
         for error in exc.errors:
             print(f"  - {error}", file=sys.stderr)
-        return 1
+        return 2
     try:
         service_map = load_map(args.map, config)
     except MapError as exc:
@@ -41,4 +43,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(main))

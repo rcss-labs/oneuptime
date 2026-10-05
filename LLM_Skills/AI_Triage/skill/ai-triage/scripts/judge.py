@@ -34,6 +34,7 @@ from triage.questions import QuestionError, default_questions_path, load_questio
 from triage.redact import Redactor
 from triage.service_map import MapError, ServiceMap, default_map_path, load_map
 from triage.window import WindowError
+from triage.cli import add_exit_codes, run
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
@@ -53,6 +54,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add("locate", "choose between the service map candidates of the case, or decide to ask the engineer")
     adhoc = add("adhoc", "ask one question that the fixed set does not cover")
     adhoc.add_argument("--question-file", type=Path, required=True, help="JSON with id, reason, state, and question")
+    add_exit_codes(parser)
     return parser
 
 
@@ -134,4 +136,4 @@ def main(argv: list[str] | None = None, judge: Judge | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run(main))
