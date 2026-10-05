@@ -254,7 +254,9 @@ def load_map(path: Path, config: TriageConfig) -> ServiceMap:
     if not path.is_file():
         raise MapError([f"{path}: file not found"])
     try:
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        raise MapError([f"{path}: not UTF-8 text"]) from None
     except yaml.YAMLError as exc:
         raise MapError([f"{path}: not valid YAML ({exc})"]) from exc
     return parse_map(data if data is not None else {"services": {}}, config)

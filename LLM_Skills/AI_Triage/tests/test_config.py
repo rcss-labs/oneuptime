@@ -297,3 +297,11 @@ def test_eks_cluster_name_is_at_most_one_hundred_characters(config_data):
     del config_data["eks_clusters"]["a" * 100]
     config_data["eks_clusters"]["a" * 101] = cluster
     assert any("at most 100 characters" in e for e in errors_for(config_data))
+
+
+def test_a_config_that_is_not_utf8_is_a_config_error(tmp_path):
+    path = tmp_path / "triage-config.yaml"
+    path.write_bytes(b"cases_dir: /tmp/caf\xe9\n")
+    with pytest.raises(ConfigError) as raised:
+        load_config(path)
+    assert raised.value.errors == [f"{path}: not UTF-8 text"]

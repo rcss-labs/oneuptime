@@ -367,7 +367,9 @@ def load_config(path: Path) -> TriageConfig:
     if not path.is_file():
         raise ConfigError([f"{path}: file not found"])
     try:
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        raise ConfigError([f"{path}: not UTF-8 text"]) from None
     except yaml.YAMLError as exc:
         raise ConfigError([f"{path}: not valid YAML ({exc})"]) from exc
     return parse_config(data)

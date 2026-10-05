@@ -164,3 +164,11 @@ def test_a_wrong_shape_for_the_new_keys_is_rejected(map_data, config, resources)
     with pytest.raises(MapError) as excinfo:
         parse_map(map_data, config)
     assert next(iter(resources)) in str(excinfo.value)
+
+
+def test_a_service_map_that_is_not_utf8_is_a_map_error(tmp_path, config_data):
+    path = tmp_path / "service-map.yaml"
+    path.write_bytes(b"services:\n  caf\xe9: {}\n")
+    with pytest.raises(MapError) as raised:
+        load_map(path, parse_config(config_data))
+    assert raised.value.errors == [f"{path}: not UTF-8 text"]
