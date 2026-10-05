@@ -1211,8 +1211,27 @@ def _safe_rows(rows: list[dict]) -> list[dict]:
             "source": _inline(row.get("source", "")),
             "fact_id": _inline(fact_id) if isinstance(fact_id, str) and ID_RE.fullmatch(fact_id) else None,
             "resource": _inline(row.get("resource", "")),
+            "group": row.get("group") if isinstance(row.get("group"), str) else None,
         })
     return safe
+
+
+BEFORE_WINDOW_GROUP = "before the window"
+
+
+def _render_timeline(rows: list[dict], checked: dict) -> str:
+    """The timeline table; rows dated before the collection window follow under their own sub-heading."""
+    from triage.timeline import render_rows
+
+    if not rows:
+        return "\n".join(_none(checked))
+    safe = _safe_rows(rows)
+    inside = [row for row in safe if row["group"] != BEFORE_WINDOW_GROUP]
+    before = [{**row, "group": None} for row in safe if row["group"] == BEFORE_WINDOW_GROUP]
+    text = render_rows(inside)
+    if before:
+        text += "\n\n### Before the window\n\nThese events are dated before the collection window started.\n\n" + render_rows(before)
+    return text
 
 
 def _render_findings(findings: dict[str, dict], facts: dict[str, dict], summary: dict | None, checked: dict) -> list[str]:
@@ -1389,8 +1408,6 @@ def _render_run(report: dict, case: dict, now: datetime) -> list[str]:
 def render_report(report: dict, case: dict, findings: dict[str, dict], timeline_rows: list[dict],
                   evidence_gaps: list[dict], now: datetime) -> str:
     """The fixed-format Markdown report. Facts and rejected findings are read from the case folder."""
-    from triage.timeline import render_rows
-
     incident = case["incident"]
     facts = load_facts(Path(case["case_dir"]))
     raw_summary, _ = load_summary(case)
@@ -1402,7 +1419,7 @@ def render_report(report: dict, case: dict, findings: dict[str, dict], timeline_
         + (["", REPLAY_LINE] if case.get("replay") is True else []),
         _render_summary(report, summary),
         _render_incident(case),
-        ["## 3. Timeline", "", render_rows(_safe_rows(timeline_rows)) if timeline_rows else "\n".join(_none(checked))],
+        ["## 3. Timeline", "", _render_timeline(timeline_rows, checked)],
         _render_findings(findings, facts, summary, checked),
         _render_causes(report, summary, checked),
         _render_actions(report, summary, checked),

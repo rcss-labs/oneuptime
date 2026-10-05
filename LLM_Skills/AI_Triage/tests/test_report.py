@@ -2097,3 +2097,26 @@ def test_section_8_does_not_print_the_check_list_and_says_a_discovered_target_is
                     "## 8. Proposed service map changes")
     assert "The target was discovered, not mapped; a map entry is proposed after publishing." in block
     assert "ECS service events" not in block
+
+
+def test_rows_dated_before_the_window_get_their_own_sub_heading_after_the_window_rows(case_dir, case):
+    rows = [
+        {"time": "2026-10-04T08:00:00Z", "offset": "2 hours before", "text": "An older deployment", "source": "changes",
+         "fact_id": None, "resource": "", "group": "before the window"},
+        {"time": "2026-10-04T10:41:00Z", "offset": "1 minute before", "text": "Container exited", "source": "ecs",
+         "fact_id": None, "resource": ""},
+    ]
+    text = render_report(VALID_REPORT, case, valid_findings(case_dir), rows, [], RENDERED_AT)
+    timeline = section(text, "## 3. Timeline")
+    assert_headings(text)
+    assert timeline.index("Container exited") < timeline.index("### Before the window") < timeline.index("An older deployment")
+    main = timeline[:timeline.index("### Before the window")]
+    assert "An older deployment" not in main
+    assert timeline.count("| Time | Relative to incident start | Event | Source |") == 2
+
+
+def test_a_timeline_without_such_rows_has_no_sub_heading(case_dir, case):
+    rows = [{"time": "2026-10-04T10:41:00Z", "offset": "1 minute before", "text": "Container exited", "source": "ecs",
+             "fact_id": None, "resource": ""}]
+    text = render_report(VALID_REPORT, case, valid_findings(case_dir), rows, [], RENDERED_AT)
+    assert "Before the window" not in text
