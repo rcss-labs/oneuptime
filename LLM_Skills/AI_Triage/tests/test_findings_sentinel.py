@@ -278,8 +278,9 @@ def test_changes_sentinel_is_refused_for_every_fact(skill_dir, case_dir, variant
 def test_reproduction_changes_resource_name_cannot_be_quoted(skill_dir, case_dir):
     run_collector(skill_dir, case_dir, "changes", {"resource_names": "OutOfMemoryError in checkout"},
                   FakeAws({"cloudtrail lookup-events": {"Events": []}}))
-    fact_id = fact_holding(case_dir, "No change was recorded for OutOfMemoryError in checkout")
-    assert any(REPEATS in reason for reason in reasons_for(case_dir, fact_id, "OutOfMemoryError in checkout"))
+    fact_id = fact_holding(case_dir, "OutOfMemoryError in checkout")
+    for excerpt in ("OutOfMemoryError in checkout", "naming 'OutOfMemoryError in checkout'"):
+        assert any(REPEATS in reason for reason in reasons_for(case_dir, fact_id, excerpt)), excerpt
 
 
 def alarm(name):
