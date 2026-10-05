@@ -171,3 +171,51 @@ def test_analyst_prompts_agree_with_the_collector_domains():
     for domain in set(COLLECTOR_DOMAIN.values()) - set(prompts):
         problems.append(f"no prompt analyst-{domain}.md for a domain in COLLECTOR_DOMAIN")
     assert not problems, "\n" + "\n".join(problems)
+
+
+# Final review fixes: the skill text must name the commands and the stops the fixes added.
+
+SKILL_SCRIPT = '"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/{}.py"'
+
+
+def skill_text() -> str:
+    return SKILL_MD.read_text()
+
+
+def test_pre_tool_use_hooks_cover_connector_tools():
+    entries = frontmatter()["hooks"]["PreToolUse"]
+    for tool in ("mcp__claude_ai_Slack__slack_send_message", "mcp__oneuptime__update_incident",
+                 "mcp__claude_ai_Atlassian__createConfluencePage"):
+        assert any(matcher_covers(entry["matcher"], tool) for entry in entries), f"no matcher covers {tool}"
+
+
+def test_intake_points_to_the_intake_reference():
+    assert "reference/intake.md" in skill_text()
+
+
+def test_discovery_is_saved_by_the_script_and_the_guard_allows_it(monkeypatch):
+    text = skill_text()
+    assert "run discover --hostname <host> --save" in text
+    command = SKILL_SCRIPT.format("discover") + ' --hostname app.example.com --save "$HOME/.ai-triage/intake/1234-discovery.json"'
+    kind, reason = guard_kind_and_reason(command, monkeypatch)
+    assert kind == ALLOW, f"{kind}: {reason}"
+
+
+def test_the_ask_list_names_the_locate_dead_ends():
+    ask = skill_text().split("## When to ask the engineer", 1)[1].split("\n## ", 1)[0]
+    for words in ("no host name", "discovery found nothing"):
+        assert words in ask, f"'When to ask the engineer' does not name: {words}"
+
+
+def test_publishing_reads_the_page_back():
+    names = {(script, sub) for _, script, sub in run_references(skill_text())}
+    assert ("publish", "verify-confluence") in names
+
+
+def test_replay_is_named_as_a_stop():
+    text = skill_text()
+    assert "AI_TRIAGE_FIXTURES" in text and "REPLAY" in text
+
+
+def test_the_guard_paragraph_does_not_claim_more_than_the_guard_does():
+    assert "refuses every other AWS or kubectl command" not in skill_text()

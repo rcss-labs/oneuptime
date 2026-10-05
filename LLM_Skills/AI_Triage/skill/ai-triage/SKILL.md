@@ -14,6 +14,11 @@ hooks:
         - type: command
           command: "\"$HOME/.claude/skills/ai-triage/scripts/guard_hook.sh\""
           timeout: 10
+    - matcher: "mcp__.*"
+      hooks:
+        - type: command
+          command: "\"$HOME/.claude/skills/ai-triage/scripts/guard_hook.sh\""
+          timeout: 10
 ---
 
 # AI Triage
@@ -23,9 +28,14 @@ work order that another engineer or agent can act on. You change nothing: not in
 AWS, Kubernetes, OpenSearch, or OneUptime. You describe the fix; you never apply it.
 
 Loading this skill turns on a guard for the rest of the session. It approves the
-skill's own commands and read-only AWS and kubectl commands on triage profiles, and
-refuses every other AWS or kubectl command. The engineer starts a new session to use
-their everyday profiles again.
+skill's own commands and read-only AWS and kubectl commands on triage profiles,
+refuses AWS and kubectl commands that change something or read secrets, and asks the
+engineer about anything it cannot read for certain. It also refuses OneUptime tools
+that change something and asks before every Slack post. The engineer starts a new
+session to use their everyday profiles again.
+
+If a script prints a line starting with `REPLAY`, the evidence comes from recordings:
+stop and tell the engineer. Never set `AI_TRIAGE_FIXTURES` yourself; it exists for tests.
 
 ## Commands
 
@@ -49,16 +59,19 @@ Do the steps in order. Work without stopping to ask, except where a step says to
    `aws sso login --profile <name>` line it printed and stop. TypeSafe unavailable:
    say so and continue; no cause can be labelled above probable.
 2. **Intake.** Read the incident from OneUptime with the read tools of its MCP
-   server: the incident, its monitors, alerts, state timeline, labels, and notes.
-   Write the incident file (format in `reference/formats.md`) to
+   server, in the order `reference/intake.md` gives: the incident, its state,
+   severity, monitors, labels, state timeline, and notes. Write the incident file
+   (format in `reference/formats.md`) to
    `~/.ai-triage/intake/<number>.json`, then `run case init --incident <that file>`.
    It prints the case folder. Read `case.md` in it.
 3. **Locate.** `case.md` says how the incident matched the service map.
    One match: `run case target --case-dir <case> --service <s> --environment <e>`.
    Several: `run judge locate --case-dir <case>` and do what it answers.
-   None: `run discover --hostname <host>`, save its output to
-   `~/.ai-triage/intake/<number>-discovery.json`, then
-   `run case target --case-dir <case> --discovery <that file>`.
+   None: `run discover --hostname <host> --save "$HOME/.ai-triage/intake/<number>-discovery.json"`,
+   then `run case target --case-dir <case> --discovery <that file>`. When the
+   incident has no host name, or discovery found nothing (`account` is null), ask
+   the engineer which service or account it is; `run case target --help` shows the
+   manual target form.
 4. **Collect.** `run case collect --case-dir <case>` runs the whole collection plan
    and prints, per collector, the evidence file it wrote and its counts of facts
    and errors (`run case plan ...` only prints the plan). Read the errors: a source
@@ -90,7 +103,9 @@ Do the steps in order. Work without stopping to ask, except where a step says to
    unresolved report still lists each cause you tested, with the findings that
    contradict it; the judging step needs at least one cause. What you could not
    establish (why a limit was set, who made a change, what a host should have
-   been) goes in `open_questions`, not into the cause.
+   been) goes in `open_questions`, not into the cause. Free text (`what_broke`,
+   `impact`, hypotheses, rationales, open questions) never states a label or calls
+   anything the root cause: the page prints labels from the judgments only.
 9. **Judge.** `run judge run --case-dir <case>`. Read `judgments/summary.json`. In
    `report.json` set each label to the label the summary gives, copy its `typesafe`
    value into `coverage.typesafe`, and make `status`, `summary.top_cause`, and the
@@ -106,16 +121,23 @@ Do the steps in order. Work without stopping to ask, except where a step says to
     prints the page request only when the audit is clean. Dispatch one subagent with `prompts/redaction-audit.md`
     to read `report.md`; without subagents, read it yourself against that prompt.
     When both are clean, create or update the Confluence page with exactly that
-    file, then `run publish record-confluence ...`. Next,
+    file in the body format the request names (the guard lets only that body
+    through). Read the page back, save its body to
+    `~/.ai-triage/intake/<number>-page.md`, and
+    `run publish verify-confluence --case-dir <case> --body-file <that file>`; a
+    difference means the page is wrong: fix it the same way. Then
+    `run publish record-confluence ...`. Next,
     `run publish slack-message --case-dir <case> --confluence-url <url>` prints the
     proposed message (leave the option out when no page was created): show it and
-    ask the engineer whether to post it and where. Post only on a yes, then
+    ask the engineer whether to post it and where, offering the default channel it
+    prints. Post only on a yes, then
     `run publish record-slack ...`. When Confluence is not connected, say so and
     leave the report in the case folder.
 12. **Service map.** When the target came from discovery, run
     `run map_suggest propose --case-dir <case> --service-name <name>` with the name
     the team uses for the service (the workload or ECS service name when you have
-    no better one), show the entry, and apply it only on a yes.
+    no better one) and `--environment <e>` when it is not production, show the
+    entry, and apply it only on a yes.
 13. **Hand over.** Tell the engineer: the status, the top cause with its label, the
     actions with their labels, what was not checked, and where the case folder is.
     When the cause is only probable, hand over its mitigation as a candidate, say
@@ -165,7 +187,8 @@ Open as leads require: `cloudtrail.md` and `deployments.md` (what changed),
 
 ## When to ask the engineer
 
-Several services match and `judge locate` says ask; a sign-in expired; a denied
+Several services match and `judge locate` says ask; the incident has no host name
+or discovery found nothing; a script printed `REPLAY`; a sign-in expired; a denied
 permission blocks the main line of investigation; three hypotheses were rejected; the
 audit found a hit you cannot remove at its source; posting to Slack; changing the
 service map.
