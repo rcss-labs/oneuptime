@@ -149,8 +149,14 @@ _COMMIT_CONTEXT_RE = re.compile(
 # a secret word anywhere on the line, as a whole word or as the end of one, switches every exemption off
 _SECRET_CONTEXT_RE = re.compile(r"(?:token|key|secret|password|passwd|credential|auth)s?(?![A-Za-z])", re.IGNORECASE)
 _CONTAINER_SCHEME_RE = re.compile(r"(?:containerd|docker|cri-o)://$")
-_CONTAINER_KEY_RE = re.compile(r"(?:container|image)id[\"'`]?[ \t]*[:=|]", re.IGNORECASE)
-_KEY_AT_END_RE = re.compile(r"[\w.-]+$")
+_CONTAINER_KEY_RE = re.compile(
+    r"(?:container|image)id[\"'`]?[ \t]*[:=|]|sandbox[ \t]+container|container[ \t]+id", re.IGNORECASE
+)
+_WORD_RE = re.compile(r"[^\s|:=\"'`\[\](),]+")
+_REQUEST_ID_KEYS = {"xamzcfid", "xamzid2", "xamzrequestid", "xamznrequestid", "requestid", "traceid"}
+_HEX_ONLY_RE = re.compile(r"[0-9A-Fa-f]+")
+_BASE64_ONLY_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+_OIDC_ID_RE = re.compile(r"(?:^|/)id/[0-9A-Fa-f]{32}$")
 _DIGEST_KEYS = ("sha256", "sha1", "md5", "digest", "checksum", "hash", "etag", "fingerprint", "thumbprint")
 _DIGEST_BEFORE_RE = re.compile(r"(?:sha(?:1|224|256|384|512)|md5):$", re.IGNORECASE)
 
@@ -158,6 +164,7 @@ _SECRET_WORDS = (
     "password", "passwd", "pwd", "passphrase", "secret", "token", "apikey", "authorization", "cookie",
     "credential", "credentials",
 )
+_ERROR_WORDS = ("invalid", "expired", "missing", "malformed", "unrecognized", "incomplete", "bad", "unauthorized", "unsupported")
 _KEY_PREFIX_WORDS = {"api", "secret", "private", "access"}
 _NAME_PART_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
 # a key: a run of name characters that does not continue a longer word or an ARN, followed by a separator
@@ -176,6 +183,14 @@ _PROSE_RE = re.compile(
     re.IGNORECASE,
 )
 _HTPASSWD_RE = re.compile(r"(?<![\w])htpasswd(?:[ \t]+-[A-Za-z]+)*[ \t]+(?P<user>\S+)[ \t]+(?P<value>\S+)", re.IGNORECASE)
+_NETRC_RE = re.compile(r"(?<![\w])login[ \t]+\S+[ \t]+password[ \t]+(?P<value>\S+)|^[ \t]*password[ \t]+(?P<alone>\S+)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+_KEY_LINE_RE = re.compile(
+    r"(?<![\w.-])(?:ParameterKey|Key|Name)[\"']?[ \t]*[:=][ \t]*[\"']?(?P<name>[\w.-]{1,60})", re.IGNORECASE
+)
+_VALUE_LINE_RE = re.compile(
+    r"(?<![\w.-])(?:ParameterValue|Value)[\"']?[ \t]*[:=][ \t]*(?P<value>\"[^\"\n]*\"|'[^'\n]*'|[^\s,;\"'}]+)",
+    re.IGNORECASE,
+)
 _NOT_A_VALUE = {"true", "false", "yes", "no", "ok", "none", "null", "redacted", "[redacted]"}
 _WORD_PATH_RE = re.compile(r"^/?[a-z]+(?:[-_][a-z]+)*(?:/[a-z]+(?:[-_][a-z]+)*)+$")
 _NUMBER_RE = re.compile(r"^[+-]?\d[\d.,_]*$")
@@ -198,6 +213,9 @@ def _is_secret_name(key: str) -> bool:
         parts.pop()
     if not parts:
         return False
+    first = parts[0]
+    if first in _ERROR_WORDS or (len(parts) == 1 and first.startswith(_ERROR_WORDS)):
+        return False  # InvalidIdentityToken and ExpiredToken are error codes
     if parts[-1] == "auth" or parts[-1].endswith(_SECRET_WORDS):  # also glued names: PGPASSWORD, githubtoken
         return True
     return parts[-1] == "key" and len(parts) > 1 and parts[-2] in _KEY_PREFIX_WORDS
@@ -219,11 +237,34 @@ def _is_not_a_secret_value(value: str) -> bool:
     )
 
 
-_SEPARATOR_ROW_RE = re.compile(r"[^\n]*\n[ \t]*\|?[ \t]*:?-{3,}")
+_SEPARATOR_ROW_RE = re.compile(r"[^\n]{0,400}\n[ \t]*\|?[ \t]*:?-{3,}")
 
 
 def _is_header_row(text: str, row_end: int) -> bool:
     return bool(_SEPARATOR_ROW_RE.match(text, row_end))
+
+
+def _paired_values(text: str):
+    """A value line within three lines of a key line whose name is a secret (CloudFormation, env lists)."""
+    for key in _KEY_LINE_RE.finditer(text):
+        if not _is_secret_name(key.group("name")):
+            continue
+        low = high = key.start()
+        for _ in range(3):
+            newline = text.rfind("\n", max(0, low - 300), low)
+            low = newline if newline >= 0 else low
+            if newline < 0:
+                break
+        low = text.rfind("\n", 0, low) + 1 if low > 0 else 0
+        for _ in range(4):
+            newline = text.find("\n", high + 1, high + 300)
+            if newline < 0:
+                high = min(len(text), high + 300)
+                break
+            high = newline
+        for value in _VALUE_LINE_RE.finditer(text, low, high):
+            if not _is_not_a_secret_value(value.group("value")):
+                yield value.start("value"), value.end("value")
 
 
 def _named_values(text: str):
@@ -251,6 +292,13 @@ def _named_values(text: str):
         if _is_not_a_secret_value(value) or (bare.isalpha() and bare in _PROSE_WORDS):
             continue
         yield sentence.start("value"), sentence.start("value") + len(value)
+    for line in _NETRC_RE.finditer(text):
+        value = line.group("value") or line.group("alone")
+        if _is_not_a_secret_value(value) or (value.isalpha() and value.lower() in _PROSE_WORDS):
+            continue
+        group = "value" if line.group("value") else "alone"
+        yield line.start(group), line.end(group)
+    yield from _paired_values(text)
     for command in _HTPASSWD_RE.finditer(text):
         value = command.group("value")
         if command.group("user").lower() in _PROSE_WORDS | {"is", "was", "file", "for", "command", "tool", "utility", "and", "or"}:
@@ -260,7 +308,7 @@ def _named_values(text: str):
 
 
 _EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
-_PHONE_RE = re.compile(r"(?<![\w+])\+\d(?:[ .()-]?\d){7,14}(?!\d)")
+_PHONE_RE = re.compile(r"(?<![\w+])\+\d(?:[ .()-]{0,2}\d){7,14}(?!\d)")
 _ACCOUNT_RE = re.compile(r"(?<![A-Za-z0-9])\d{12}(?![A-Za-z0-9])")
 
 
@@ -328,41 +376,99 @@ def _line_of(text: str, start: int, end: int) -> str:
     return text[line_start:start] + " " + text[end : end + LINE_WINDOW if line_end < 0 else line_end]
 
 
-def _follows_digest_key(text: str, start: int) -> bool:
-    """The value is directly after a key such as CodeSha256, checksum or etag."""
-    tail = text[max(0, start - 80) : start].rstrip("\"'` \t")
-    if not tail or tail[-1] not in ":=|":
+def _normalise_key(word: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", word.lower())
+
+
+def _preceding_words(text: str, start: int, count: int) -> list[str]:
+    """The last few words before the value on its line, without quotes, separators or brackets."""
+    before = text[max(0, start - 100) : start].rsplit("\n", 1)[-1]
+    return [_normalise_key(word) for word in _WORD_RE.findall(before)[-count:]]
+
+
+def _is_digest_key(name: str) -> bool:
+    return re.sub(r"(?:list|s)$", "", name).endswith(_DIGEST_KEYS)
+
+
+def _is_digest_shape(value: str) -> bool:
+    if _HEX_ONLY_RE.fullmatch(value):
+        return len(value) in (32, 40, 64, 128)
+    return bool(_BASE64_ONLY_RE.fullmatch(value)) and len(value) in (24, 28, 44, 88)
+
+
+def _table_cells(line: str) -> list[str]:
+    cells = line.split("|")
+    if line.lstrip().startswith("|"):
+        cells = cells[1:]
+    return [_normalise_key(cell) for cell in cells]
+
+
+def _line_start(text: str, position: int) -> int:
+    """Start of the line holding position, looking back at most LINE_WINDOW characters."""
+    floor = max(0, position - LINE_WINDOW)
+    newline = text.rfind("\n", floor, position)
+    return newline + 1 if newline >= 0 else floor
+
+
+def _in_digest_table(text: str, start: int) -> bool:
+    """The value sits in a table column headed by, or in a row named by, a thumbprint or digest key."""
+    line_start = _line_start(text, start)
+    if "|" not in text[line_start:start]:
         return False
-    key = _KEY_AT_END_RE.search(tail[:-1].rstrip("\"'` \t")[-60:])
-    return bool(key) and re.sub(r"[^a-z0-9]", "", key.group().lower()).endswith(_DIGEST_KEYS)
+    line_end = text.find("\n", start, start + LINE_WINDOW)
+    row = text[line_start : start + LINE_WINDOW if line_end < 0 else line_end]
+    column = text[line_start:start].count("|") - (1 if row.lstrip().startswith("|") else 0)
+    cells = _table_cells(row)
+    if 0 <= column - 1 < len(cells) and any(key in cells[column - 1] for key in _DIGEST_KEYS):
+        return True  # the cell to the left names the value
+    position = line_start
+    for _ in range(40):  # walk up to the separator row, whose line above is the header
+        if position <= 0:
+            return False
+        previous = _line_start(text, position - 1)
+        if re.match(r"[ \t]*\|?[ \t]*:?-{3,}", text[previous:position]):
+            top = _line_start(text, previous - 1)
+            header = _table_cells(text[top : min(previous - 1, top + 2 * LINE_WINDOW)])
+            return any(key in cell for cell in header for key in _DIGEST_KEYS)
+        position = previous
+    return False
 
 
 def _is_known_identifier(text: str, start: int, end: int) -> bool:
-    """A git commit, a container id or a digest that ordinary evidence carries; never next to a secret word."""
-    length = end - start
-    if _follows_digest_key(text, start):
-        return not _SECRET_CONTEXT_RE.search(_line_of(text, start, end))
-    if length not in (40, 64):
-        return False
-    line = _line_of(text, start, end)
-    if length == 40:
-        known = _COMMIT_CONTEXT_RE.search(line)
-    else:
-        known = _CONTAINER_SCHEME_RE.search(text[max(0, start - 13) : start]) or _CONTAINER_KEY_RE.search(line)
-    return bool(known) and not _SECRET_CONTEXT_RE.search(line)
+    """A commit, container id, digest or request id that ordinary evidence carries; never next to a secret word."""
+    value = text[start:end]
+    length = len(value)
+    is_hex = bool(_HEX_ONLY_RE.fullmatch(value))
+    known = False
+    words = _preceding_words(text, start, 3)
+    if _is_digest_shape(value) and (any(_is_digest_key(word) for word in words) or _in_digest_table(text, start)):
+        known = True
+    elif words and (words[-1] in _REQUEST_ID_KEYS or "".join(words[-2:]) in _REQUEST_ID_KEYS):
+        known = True
+    elif is_hex and length in (40, 64):
+        line = _line_of(text, start, end)
+        if length == 40:
+            before = text[max(0, start - 200) : start]
+            in_path = before.endswith("/") and re.search(r"\S*$", before).group().count("/") >= 2
+            known = bool(_COMMIT_CONTEXT_RE.search(line)) or in_path
+        else:
+            known = bool(
+                _CONTAINER_SCHEME_RE.search(text[max(0, start - 13) : start]) or _CONTAINER_KEY_RE.search(line)
+            )
+    return known and not _SECRET_CONTEXT_RE.search(_line_of(text, start, end))
 
 
 def _entropy_spans(text: str):
     for match in _HEX_RE.finditer(text):
         if _DIGEST_BEFORE_RE.search(text[max(0, match.start() - 8) : match.start()]):
             continue
-        if _is_known_identifier(text, match.start(), match.end()):
-            continue
+        if len(set(match.group())) < 8 or _is_known_identifier(text, match.start(), match.end()):
+            continue  # a run of one or two digits, such as git's all-zero id, is not a key
         yield match.start(), match.end()
     for match in _CHUNK_RE.finditer(text):
         chunk = match.group()
         before = text[max(0, match.start() - 8) : match.start()]
-        if _DIGEST_BEFORE_RE.search(before):
+        if _DIGEST_BEFORE_RE.search(before) or ("/id/" in chunk and _OIDC_ID_RE.search(chunk)):
             continue
         if "/" not in chunk or (not chunk.startswith("/") and "//" not in chunk):
             if _is_high_entropy(chunk) and not _is_known_identifier(text, match.start(), match.end()):

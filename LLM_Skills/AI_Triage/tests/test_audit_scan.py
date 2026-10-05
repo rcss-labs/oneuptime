@@ -22,6 +22,11 @@ def rand(length: int, seed: int, alphabet: str = ALNUM) -> str:
     return "".join(chars)
 
 
+def plain(length: int, seed: int, alphabet: str) -> str:
+    rng = random.Random(seed)
+    return "".join(rng.choice(alphabet) for _ in range(length))
+
+
 def pad(prefix: str, length: int, seed: int, alphabet: str = ALNUM) -> str:
     return prefix + rand(length, seed, alphabet)
 
@@ -84,8 +89,8 @@ POSITIVES = {
         "value " + rand(43, 33, B64URL) + " end",
         "value " + rand(64, 34, B64) + "= end",
         "value " + rand(30, 35, ALNUM) + " end",
-        "value " + "".join(random.Random(36).choice(HEX) for _ in range(40)) + " end",
-        "value " + "".join(random.Random(37).choice(HEX) for _ in range(64)) + " end",
+        "value " + plain(40, 36, HEX) + " end",
+        "value " + plain(64, 37, HEX) + " end",
     ],
     "named_value": [
         "pass" + "word=" + "hunter" + "22",
@@ -395,11 +400,6 @@ def test_fullwidth_letters_are_normalised_before_matching():
 UPPER_DIGITS = string.ascii_uppercase + string.digits
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 LOWER_DIGITS = string.ascii_lowercase + string.digits
-
-
-def plain(length: int, seed: int, alphabet: str) -> str:
-    rng = random.Random(seed)
-    return "".join(rng.choice(alphabet) for _ in range(length))
 
 
 ROUND1_POSITIVES = {
@@ -795,3 +795,163 @@ def build_round2(template: str) -> str:
 def test_round2_realistic_reports_give_no_hit(template):
     report = build_round2(template)
     assert scan(report) == [], describe(scan(report))
+
+
+# ---------------------------------------------------------------- fix round 3
+B64_40 = plain(40, 300, B64)
+B64_30 = plain(30, 301, B64)
+B64_44 = b64_of_random_bytes(302)
+B64_64 = plain(64, 303, B64)
+CF_ID = plain(54, 304, B64URL) + "=="
+HEX40_UPPER = plain(40, 305, "0123456789ABCDEF")
+HEX32_UPPER = plain(32, 306, "0123456789ABCDEF")
+
+ROUND3_POSITIVES = [
+    "deploy step printed " + B64_40,
+    "| Build | " + B64_40 + " |",
+    "image pull value " + B64_40,
+    "version " + B64_40,
+    "git tag " + B64_40,
+    "commit " + B64_40,
+    "Container id " + B64_64,
+    'sandbox container "' + B64_64 + '"',
+    "checksum: " + B64_40,
+    "etag: " + B64_30,
+    "WEBHOOK_HMAC_SHA256=" + B64_40,
+    "token x-amz-cf-id: " + CF_ID,
+    "secret request id " + B64_40,
+    "DBTo" + "ken: " + "hunter" + "22",
+    "Invalidator" + "Token: " + "hunter" + "22",
+    "password " + "hunter" + "22",
+    "  password " + "hunter" + "22",
+    "machine ftp.example.com login bot password " + "hunter" + "22",
+    "call +1 (646) 555-" + "1234",
+    "x +" + "1 (212) 555-" + "0100.",
+    "ParameterValue: " + "hunter" + "22\nParameterKey: DBPass" + "word",
+    '{"ParameterKey": "DBPass' + 'word",\n "ParameterValue": "' + "hunter" + '22"}',
+    "- name: DB_PASS" + "WORD\n  value: " + "hunter" + "22",
+    "ParameterValue: " + "hunter" + "22\n\n\nParameterKey: DBPass" + "word",
+    "deploy " + "a1b2c3d4" * 5 + " token",
+]
+
+
+@pytest.mark.parametrize("sample", ROUND3_POSITIVES)
+def test_round3_positive_shapes(sample):
+    assert scan(sample), sample
+
+
+ROUND3_NEGATIVES = [
+    "deploy step printed " + HEX40,
+    "| Build | " + HEX40 + " |",
+    "CodeSha256 is " + B64_44,
+    "CodeSha256 is now " + B64_44,
+    "57 (CodeSha256 " + B64_44 + ")",
+    "| Name | Thumbprint |\n| --- | --- |\n| root | " + HEX40_UPPER + " |",
+    "| Name | Fingerprint (old) | Fingerprint (new) |\n| --- | --- | --- |\n| root | " + HEX40_UPPER + " | " + HEX40 + " |",
+    "| Thumbprint (old) | " + HEX40_UPPER + " |",
+    '"ThumbprintList": ["' + HEX40_UPPER + '"]',
+    "thumbprint " + HEX40_UPPER,
+    "sha256: " + B64_44,
+    "x-amz-cf-id: " + CF_ID,
+    "x-amz-id-2: " + b64_of_random_bytes(307, 48),
+    "x-amz-request-id: " + plain(16, 308, "0123456789ABCDEF"),
+    "x-amzn-RequestId: " + plain(40, 309, B64),
+    "RequestId: " + plain(40, 310, B64),
+    "request id " + plain(40, 311, B64),
+    "trace id " + plain(40, 312, B64),
+    'failed to set up sandbox container "' + HEX64 + '" network for pod',
+    "Container id " + HEX64,
+    "s3://frontend-bucket/api/" + HEX40 + "/bundle.zip",
+    "origin path /releases/" + HEX40,
+    "https://cdn.example.com/assets/" + HEX40,
+    "arn:aws:iam::<ACCOUNT>:oidc-provider/oidc.eks.eu-west-1.amazonaws.com/id/" + HEX32_UPPER,
+    "https://oidc.eks.eu-west-1.amazonaws.com/id/" + HEX32_UPPER,
+    "head " + "0" * 40,
+    "head " + "a" * 40,
+    "InvalidIdentityToken: OpenIDConnect provider's HTTPS certificate doesn't match configured thumbprint",
+    "ExpiredToken: The security token included in the request is expired",
+    "BadPassword: wrong value",
+    "MissingToken: absent",
+    "password rotation policy",
+    "login bot password <SECRET-1>",
+    "the password hunter",
+    "call +1 (646)",
+    "ParameterValue: t3.large\nParameterKey: InstanceType",
+    "- name: DB_PASS" + "WORD\n  value: <SECRET-1>",
+    "- name: db_host\n  value: orders.example.com",
+    "ParameterValue: " + "hunter" + "22\n\n\n\n\nParameterKey: DBPass" + "word",
+]
+
+
+@pytest.mark.parametrize("sample", ROUND3_NEGATIVES)
+def test_round3_negative_shapes_give_no_hit(sample):
+    assert scan(sample) == [], (sample, describe(scan(sample)))
+
+
+CLOUDFRONT_REPORT = """# Incident: CloudFront 403 after a frontend deploy
+
+- Distribution E1ABCDEFGHIJKL, origin frontend-prod-bucket.s3.eu-west-1.amazonaws.com, origin path /releases/{commit}
+- Object s3://frontend-prod-bucket/releases/{commit}/index.html returned AccessDenied
+- Previous s3://frontend-prod-bucket/releases/{commit2}/index.html was served fine
+- Response headers:
+  - x-amz-cf-id: {cfid}
+  - x-amz-id-2: {id2}
+  - X-Cache: Error from cloudfront
+- Container id {container} restarted on the build host
+"""
+
+IRSA_REPORT = """# Incident: IRSA failures after the OIDC thumbprint changed
+
+- Provider arn:aws:iam::<ACCOUNT>:oidc-provider/oidc.eks.eu-west-1.amazonaws.com/id/{oidc}
+- AssumeRoleWithWebIdentity failed with InvalidIdentityToken: OpenIDConnect provider's HTTPS certificate doesn't match
+- Later calls returned ExpiredToken: The security token included in the request is expired
+
+| Thumbprint | Value |
+| --- | --- |
+| old | {old} |
+| new | {new} |
+
+| Provider | Thumbprint (old) | Thumbprint (new) |
+| --- | --- | --- |
+| eks | {old} | {new} |
+
+"ThumbprintList": ["{new}"]
+"""
+
+EKS_SANDBOX_REPORT = """# Incident: pods stuck in ContainerCreating
+
+Events:
+  Warning  FailedCreatePodSandBox  12s  kubelet  Failed to create pod sandbox: rpc error: code = Unknown desc = failed to set up sandbox container "{container}" network for pod "checkout-api-7d9f8c6b5-x2x4z": networkPlugin cni failed to set up pod
+  Normal   Killing  5s  kubelet  Container id {container} was killed
+"""
+
+
+def build_round3(template: str) -> str:
+    return template.format(
+        commit=plain(40, 320, HEX), commit2=plain(40, 321, HEX), cfid=CF_ID, id2=b64_of_random_bytes(322, 48),
+        container=plain(64, 323, HEX), oidc=HEX32_UPPER, old=HEX40_UPPER, new=plain(40, 324, "0123456789ABCDEF"),
+    )
+
+
+@pytest.mark.parametrize("template", [CLOUDFRONT_REPORT, IRSA_REPORT, EKS_SANDBOX_REPORT], ids=["cloudfront", "irsa", "eks-sandbox"])
+def test_round3_realistic_reports_give_no_hit(template):
+    report = build_round3(template)
+    assert scan(report) == [], describe(scan(report))
+
+
+def test_one_megabyte_of_round3_shapes_is_scanned_in_under_two_seconds():
+    pieces = ["x-amz-cf-id: ", "ParameterKey: DBPassword\n", "ParameterValue: ", "| Name | Thumbprint |\n| --- | --- |\n",
+              "password ", "login a password ", "+1 (6", "s3://b/", "/", "0" * 40, "sandbox container ", "\n", " ",
+              "ab12" * 10, HEX40, B64_44]
+    rng = random.Random(10)
+    text = "".join(rng.choice(pieces) for _ in range(60_000))[:1_000_000]
+    start = time.perf_counter()
+    scan(text)
+    assert time.perf_counter() - start < 2.0
+
+
+def test_one_megabyte_line_of_table_cells_is_scanned_in_under_two_seconds():
+    text = "| a | " * 150_000
+    start = time.perf_counter()
+    scan(text)
+    assert time.perf_counter() - start < 2.0
