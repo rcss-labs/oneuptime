@@ -6,12 +6,17 @@ import re
 from pathlib import Path
 
 from triage.evidence import CURRENT, INCIDENT_TIME, load_evidence
-from triage.redact import Redactor
+from triage.redact import PLACEHOLDER_RE, Redactor
 from triage.window import WindowError, parse_time
 
 CHECKED_NAME = "checked.json"
 MIN_EXCERPT = 12
 MAX_MATCHED_TEXT = 500
+# Data under these keys says what was asked of a source, not what it returned, so a finding
+# must not quote it: a search query would otherwise "prove" the claim it was typed to look for.
+NOT_QUOTABLE_KEYS = frozenset({
+    "asked", "query", "index", "filters", "window", "method", "command", "request", "target", "parameters",
+})
 MIN_WHOLE_VALUE = 3
 PROVENANCES = ("incident_time", "current", "inferred")
 CONFIDENCES = ("high", "medium", "low")
@@ -101,22 +106,36 @@ def _field_problems(finding: dict) -> list[str]:
 
 
 def quotable_strings(fact: dict) -> list[str]:
-    """The text a finding may quote: summary, excerpt, and every string in data (never keys or numbers)."""
-    strings = [_collapse(str(fact.get("summary") or "")), _collapse(str(fact.get("excerpt") or ""))]
+    """The text a finding may quote: summary, excerpt, and every string in data (never keys or numbers).
+
+    Strings under NOT_QUOTABLE_KEYS are skipped at any depth.
+    """
+    strings = [_collapse(fact[name]) for name in ("summary", "excerpt") if isinstance(fact.get(name), str)]
     pending = [fact.get("data")]
     while pending:
         item = pending.pop(0)
         if isinstance(item, str):
             strings.append(_collapse(item))
         elif isinstance(item, dict):
-            pending.extend(item.values())
+            pending.extend(value for key, value in item.items() if str(key).lower() not in NOT_QUOTABLE_KEYS)
         elif isinstance(item, list):
             pending.extend(item)
     return strings
 
 
+def _around(text: str, needle: str) -> str:
+    """At most MAX_MATCHED_TEXT characters of text, centred on the first place the needle occurs."""
+    if len(text) <= MAX_MATCHED_TEXT:
+        return text
+    middle = max(text.find(needle), 0) + len(needle) // 2
+    start = min(max(middle - MAX_MATCHED_TEXT // 2, 0), len(text) - MAX_MATCHED_TEXT)
+    return text[start:start + MAX_MATCHED_TEXT]
+
+
 def _matched_string(fact: dict, needle: str) -> str | None:
     """The quotable string holding the excerpt. A short excerpt must equal a whole string."""
+    if PLACEHOLDER_RE.fullmatch(needle):
+        return None
     for text in quotable_strings(fact):
         if len(needle) >= MIN_EXCERPT:
             if needle in text:
@@ -147,7 +166,7 @@ def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str]
             text = _matched_string(fact, needle) if needle else None
             if text is not None:
                 matching.append(fact)
-                matched_text = matched_text or text[:MAX_MATCHED_TEXT]
+                matched_text = matched_text or _around(text, needle)
         if not needle:
             problems.append("excerpt is empty")
         elif not matching and len(needle) < MIN_EXCERPT:
@@ -156,7 +175,7 @@ def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str]
                 f"(at least {MIN_WHOLE_VALUE} characters) of a cited fact"
             )
         elif not matching:
-            problems.append("excerpt was not found in the summary or excerpt of any cited fact")
+            problems.append("excerpt was not found in the summary, excerpt, or data of any cited fact")
     provenance = finding.get("provenance")
     required_kind = {"incident_time": INCIDENT_TIME, "current": CURRENT}.get(provenance)
     if required_kind and finding["fact_ids"] and matching and not any(fact.get("kind") == required_kind for fact in matching):

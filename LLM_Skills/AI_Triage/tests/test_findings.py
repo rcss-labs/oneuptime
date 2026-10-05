@@ -396,3 +396,75 @@ def test_provenance_uses_the_fact_where_the_excerpt_was_found_in_data(tmp_path):
     evidence.write(tmp_path)
     ok = check(tmp_path, [finding(fact_ids=["rds-0001", "vpc-0001"], excerpt="tcp 5432 open")])
     assert ok["rejected"] == []
+
+
+def _search_case(tmp_path, cluster):
+    """Evidence written by the real search query: one hit whose message does not mention the query."""
+    from test_opensearch_queries import hit, make_context
+    from triage.opensearch import queries
+
+    hits = {"hits": {"total": {"value": 1}, "hits": [hit("GET /health returned 200 for the load balancer", level="INFO")]}}
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": hits})
+    queries.search(ctx, "app-logs-*", query="OutOfMemoryError checkout", filters={"service": "checkout"})
+    ctx.evidence.write(tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def search_cluster(config_data):
+    from triage import config as config_module
+
+    return config_module.parse_config(config_data).opensearch_clusters["logs-prod"]
+
+
+@pytest.mark.parametrize("excerpt", ["OutOfMemoryError checkout", "app-logs-*/", "2026-10-04T10:00:00Z", "app-logs-*"])
+def test_what_was_asked_is_never_quotable(tmp_path, search_cluster, excerpt):
+    case = _search_case(tmp_path, search_cluster)
+    fact_id = next(iter(load_facts(case)))
+    result = check(case, [finding(fact_ids=[fact_id], excerpt=excerpt, provenance="incident_time")])
+    assert result["valid"] == [], excerpt
+
+
+def test_a_real_hit_message_in_the_same_fact_is_accepted(tmp_path, search_cluster):
+    case = _search_case(tmp_path, search_cluster)
+    fact_id = next(iter(load_facts(case)))
+    result = check(case, [finding(fact_ids=[fact_id], excerpt="GET /health returned 200", provenance="incident_time")])
+    assert result["rejected"] == []
+
+
+@pytest.mark.parametrize("key", ["asked", "query", "index", "filters", "window", "method", "command", "request", "target", "parameters"])
+def test_strings_under_bookkeeping_keys_are_not_quotable_at_any_depth(tmp_path, key):
+    case = _fact_with_data(tmp_path, {"outer": {key: {"deep": ["searched for needle phrase"]}}})
+    assert check(case, [finding(fact_ids=["vpc-0001"], excerpt="searched for needle phrase")])["rejected"] != []
+
+
+def test_strings_under_bookkeeping_keys_never_count_as_whole_values(tmp_path):
+    case = _fact_with_data(tmp_path, {"method": "terms"})
+    assert check(case, [finding(fact_ids=["vpc-0001"], excerpt="terms")])["rejected"] != []
+
+
+def test_a_summary_that_is_not_text_is_not_quotable(tmp_path):
+    path = _fact_with_data(tmp_path, {})
+    file = next((path / "evidence").glob("*.json"))
+    document = json.loads(file.read_text())
+    document["facts"][0]["summary"] = {"secretkey": "value"}
+    file.write_text(json.dumps(document))
+    assert check(path, [finding(fact_ids=["vpc-0001"], excerpt="{'secretkey': 'value'}")])["rejected"] != []
+
+
+@pytest.mark.parametrize("placeholder", ["<SECRET-1>", "<TOKEN-2>"])
+def test_a_lone_redaction_placeholder_is_never_an_excerpt(tmp_path, placeholder):
+    case = _fact_with_data(tmp_path, {"value": placeholder}, summary=placeholder)
+    assert check(case, [finding(fact_ids=["vpc-0001"], excerpt=placeholder)])["rejected"] != []
+
+
+def test_matched_text_is_cut_around_the_match(tmp_path):
+    long_text = "lorem ipsum " * 55 + "OOMKilled by kernel" + " dolor sit amet" * 50
+    result = check(_fact_with_data(tmp_path, {"rows": [long_text]}), [finding(fact_ids=["vpc-0001"], excerpt="OOMKilled by kernel")])
+    matched = result["valid"][0]["matched_text"]
+    assert len(matched) <= 500 and "OOMKilled by kernel" in matched
+
+
+def test_rejection_message_names_summary_excerpt_or_data(case_dir):
+    reasons = reasons_of(check(case_dir, [finding(excerpt="out of memory")]))
+    assert any("summary, excerpt, or data" in reason for reason in reasons)
