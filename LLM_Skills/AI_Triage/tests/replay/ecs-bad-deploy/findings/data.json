@@ -1,0 +1,40 @@
+{
+  "analyst": "data",
+  "findings": [
+    {
+      "id": "data-1",
+      "claim": "The database instance checkout-prod-db is available.",
+      "fact_ids": [
+        "rds-prod-main-eu-west-1:rds-0001"
+      ],
+      "excerpt": "Instance checkout-prod-db is available",
+      "provenance": "current",
+      "confidence": "high"
+    },
+    {
+      "id": "data-2",
+      "claim": "CPU of the database peaked at 85 percent at 09:50, long before the impact started.",
+      "fact_ids": [
+        "rds-prod-main-eu-west-1:rds-0004"
+      ],
+      "excerpt": "CPUUtilization (Average): peak 85 at 2026-10-04T09:50:00Z",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T09:50:00Z"
+    },
+    {
+      "id": "data-3",
+      "claim": "A database backup completed at 09:55, long before the impact started.",
+      "fact_ids": [
+        "rds-prod-main-eu-west-1:rds-0002"
+      ],
+      "excerpt": "Instance event on checkout-prod-db: Backup completed",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T09:55:00Z"
+    }
+  ],
+  "checked": [
+    "RDS instance state, events and metrics"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "number": "INC-1042",
+  "title": "Checkout API is down",
+  "url": "https://oneuptime.example.com/incident/inc-1042",
+  "description": "The checkout API health monitor fails; customers cannot pay.",
+  "severity": "Critical",
+  "state": "Ongoing",
+  "declared_at": "2026-10-04T10:45:00Z",
+  "impact_started_at": "2026-10-04T10:42:00Z",
+  "monitors": [
+    {
+      "name": "Checkout API",
+      "type": "API",
+      "target": "https://checkout.example.com/health"
+    }
+  ],
+  "labels": [
+    "checkout"
+  ],
+  "hostnames": [
+    "checkout.example.com"
+  ],
+  "timeline": [
+    {
+      "time": "2026-10-04T10:45:00Z",
+      "text": "Incident declared by the on-call engineer"
+    }
+  ],
+  "notes": [],
+  "observed_at": "2026-10-04T11:10:00Z"
+}

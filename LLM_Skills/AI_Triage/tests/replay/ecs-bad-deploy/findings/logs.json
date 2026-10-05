@@ -1,0 +1,41 @@
+{
+  "analyst": "logs",
+  "findings": [
+    {
+      "id": "logs-1",
+      "claim": "From 10:38 the application logged that checkout-db.internal.example.com cannot be resolved.",
+      "fact_ids": [
+        "logs-prod-main-eu-west-1:logs-0012"
+      ],
+      "excerpt": "Error: getaddrinfo ENOTFOUND checkout-db.internal.example.com",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T10:38:12Z"
+    },
+    {
+      "id": "logs-2",
+      "claim": "The OpenSearch index of the application logs holds the same ENOTFOUND message.",
+      "fact_ids": [
+        "opensearch-prod-main-logs-prod-search:opensearch-0001"
+      ],
+      "excerpt": "Error: getaddrinfo ENOTFOUND checkout-db.internal.example.com",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T10:38:12Z"
+    },
+    {
+      "id": "logs-3",
+      "claim": "The ENOTFOUND message is by far the most frequent message pattern in the application log group.",
+      "fact_ids": [
+        "logs-prod-main-eu-west-1:logs-0009"
+      ],
+      "excerpt": "Error: getaddrinfo ENOTFOUND checkout-db.internal.example.com",
+      "provenance": "inferred",
+      "confidence": "high"
+    }
+  ],
+  "checked": [
+    "CloudWatch Logs Insights patterns and first lines",
+    "OpenSearch search over the application index"
+  ]
+}

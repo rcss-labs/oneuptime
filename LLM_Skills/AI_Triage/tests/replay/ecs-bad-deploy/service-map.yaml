@@ -1,0 +1,23 @@
+services:
+  checkout-api:
+    match:
+      labels: ["checkout"]
+    environments:
+      prod:
+        match:
+          monitors: ["Checkout API"]
+          hostnames: ["checkout.example.com"]
+        account: prod-main
+        region: eu-west-1
+        resources:
+          ecs_service: checkout/checkout-api
+          load_balancer: checkout-prod
+          rds: checkout-prod-db
+          elasticache: checkout-prod-redis
+          log_groups: ["/ecs/checkout-api"]
+          opensearch:
+            cluster: logs-prod
+            index_pattern: "app-logs-checkout-*"
+            filter: {service: checkout-api}
+    source: confirmed
+    last_verified: 2026-10-04

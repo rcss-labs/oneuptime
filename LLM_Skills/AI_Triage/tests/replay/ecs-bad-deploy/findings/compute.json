@@ -1,0 +1,54 @@
+{
+  "analyst": "compute",
+  "findings": [
+    {
+      "id": "compute-1",
+      "claim": "Task definition revision 42 of checkout-api differs from revision 41 only in the environment variable DB_HOST, which now names checkout-db.internal.example.com instead of the database endpoint.",
+      "fact_ids": [
+        "ecs-prod-main-eu-west-1:ecs-0014"
+      ],
+      "excerpt": "DB_HOST changed from checkout-prod-db.cluster-abc.eu-west-1.rds.example.com to checkout-db.internal.example.com",
+      "provenance": "inferred",
+      "confidence": "high"
+    },
+    {
+      "id": "compute-2",
+      "claim": "A user named deployer updated the service checkout-api five minutes before the impact started.",
+      "fact_ids": [
+        "changes-prod-main-eu-west-1:changes-0001"
+      ],
+      "excerpt": "UpdateService (ecs.amazonaws.com) by deployer on checkout-api, 5 minutes before the incident started",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T10:37:00Z"
+    },
+    {
+      "id": "compute-3",
+      "claim": "The deployment of checkout-api:42 began at 10:37 and had not finished at 11:10, with no task running.",
+      "fact_ids": [
+        "ecs-prod-main-eu-west-1:ecs-0002"
+      ],
+      "excerpt": "Deployment of checkout-api:42 was created; state read now: IN_PROGRESS, 0 of 3 tasks running",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T10:37:00Z"
+    },
+    {
+      "id": "compute-4",
+      "claim": "Tasks of the new revision stopped because the essential container exited with code 1.",
+      "fact_ids": [
+        "ecs-prod-main-eu-west-1:ecs-0010"
+      ],
+      "excerpt": "Essential container in task exited; containers: checkout-api exit code 1",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T10:46:00Z"
+    }
+  ],
+  "checked": [
+    "ECS service events",
+    "stopped tasks",
+    "task definition revisions 41 and 42",
+    "CloudTrail changes to checkout-api"
+  ]
+}

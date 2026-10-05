@@ -1,0 +1,93 @@
+[
+ {
+  "method": "POST",
+  "path_contains": "app-logs-checkout-",
+  "body": {
+   "took": 4,
+   "timed_out": false,
+   "_shards": {
+    "total": 3,
+    "successful": 3,
+    "failed": 0
+   },
+   "hits": {
+    "total": {
+     "value": 6089,
+     "relation": "eq"
+    },
+    "hits": [
+     {
+      "_index": "app-logs-checkout-2026.10.04",
+      "_id": "doc1",
+      "_source": {
+       "@timestamp": "2026-10-04T10:38:12.481Z",
+       "level": "error",
+       "service": "checkout-api",
+       "message": "Error: getaddrinfo ENOTFOUND checkout-db.internal.example.com"
+      }
+     },
+     {
+      "_index": "app-logs-checkout-2026.10.04",
+      "_id": "doc2",
+      "_source": {
+       "@timestamp": "2026-10-04T10:38:12.907Z",
+       "level": "error",
+       "service": "checkout-api",
+       "message": "Unhandled promise rejection, shutting down"
+      }
+     },
+     {
+      "_index": "app-logs-checkout-2026.10.04",
+      "_id": "doc3",
+      "_source": {
+       "@timestamp": "2026-10-04T10:38:41.220Z",
+       "level": "error",
+       "service": "checkout-api",
+       "message": "Error: getaddrinfo ENOTFOUND checkout-db.internal.example.com"
+      }
+     }
+    ]
+   },
+   "aggregations": {
+    "by_time": {
+     "buckets": [
+      {
+       "key_as_string": "2026-10-04T10:35:00Z",
+       "key": 1791110100000,
+       "doc_count": 64
+      },
+      {
+       "key_as_string": "2026-10-04T10:40:00Z",
+       "key": 1791110400000,
+       "doc_count": 1840
+      },
+      {
+       "key_as_string": "2026-10-04T10:45:00Z",
+       "key": 1791110700000,
+       "doc_count": 2110
+      },
+      {
+       "key_as_string": "2026-10-04T10:50:00Z",
+       "key": 1791111000000,
+       "doc_count": 2075
+      }
+     ]
+    },
+    "top_messages": {
+     "doc_count_error_upper_bound": 0,
+     "sum_other_doc_count": 0,
+     "buckets": [
+      {
+       "key": "Error: getaddrinfo ENOTFOUND checkout-db.internal.example.com",
+       "doc_count": 5870
+      },
+      {
+       "key": "Unhandled promise rejection, shutting down",
+       "doc_count": 163
+      }
+     ]
+    }
+   }
+  }
+ }
+]
