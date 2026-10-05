@@ -60,3 +60,52 @@ def test_cloudfront_is_rated_medium_with_a_reason_and_codebuild_is_not_granted()
 
 def test_sensitive_decisions_say_collectors_do_not_store_origin_values_and_codebuild_is_not_granted():
     assert "- **CloudFront** custom origin headers are readable; collectors do not store those values. CodeBuild is not granted." in DOC.read_text()
+
+
+NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8}
+SCRIPTS = ROOT / "skill" / "ai-triage" / "scripts"
+
+
+def test_readme_counts_the_recorded_incidents_in_tests_replay():
+    folders = [entry for entry in (ROOT / "tests" / "replay").iterdir() if entry.is_dir()]
+    match = re.search(r"\b(\w+) recorded incidents", README.read_text())
+    assert match, "the README must say how many recorded incidents there are"
+    assert NUMBER_WORDS[match.group(1).lower()] == len(folders)
+    for folder in folders:
+        assert f"`{folder.name}`" in README.read_text()
+
+
+def test_every_script_the_readme_names_exists():
+    names = {name for name in re.findall(r"\b([a-z_]+)\.py\b", README.read_text()) if not name.startswith("test_")}
+    tools = ROOT / "tools"
+    missing = [name for name in sorted(names) if not (SCRIPTS / f"{name}.py").exists() and not (tools / f"{name}.py").exists()]
+    assert missing == []
+
+
+def test_every_subcommand_the_readme_names_is_in_the_script_help():
+    import subprocess
+    import sys
+
+    pairs = set(re.findall(r"\b([a-z_]+)\.py ([a-z][a-z-]+)\b", README.read_text()))
+    problems = []
+    for script, sub in sorted(pairs):
+        path = SCRIPTS / f"{script}.py"
+        if not path.exists():
+            continue  # a tool, or covered by the previous test
+        out = subprocess.run([sys.executable, str(path), "--help"], capture_output=True, text=True, cwd=SCRIPTS).stdout
+        if sub not in out:
+            problems.append(f"{script}.py {sub}")
+    assert problems == []
+    assert ("publish", "verify-confluence") in pairs and ("case", "collect") in pairs
+
+
+def test_readme_does_not_name_a_timeline_file_that_nothing_writes():
+    assert "timeline.md" not in README.read_text()
+    assert "timeline.json" in README.read_text()
+
+
+def test_readme_lists_exactly_the_service_map_resource_keys():
+    from triage.service_map import RESOURCE_KEYS
+
+    line = next((l for l in README.read_text().splitlines() if l.strip().startswith("Resource keys:")), "")
+    assert set(re.findall(r"`([a-z0-9_]+)`", line)) == set(RESOURCE_KEYS)
