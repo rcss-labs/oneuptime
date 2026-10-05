@@ -241,3 +241,46 @@ def test_odd_numbers_read_sensibly(tmp_path, config_data):
     assert _num(17.0) == "17"
     assert _num(999.5) == "1000"
     assert _num(0) == "0"
+
+
+# Metric peak order: the AWS CLI returns points newest first, fixtures often oldest first.
+
+TIES_TIMES = ["2026-10-04T10:00:00+00:00", "2026-10-04T10:05:00+00:00", "2026-10-04T10:10:00+00:00", "2026-10-04T10:15:00+00:00"]
+
+
+def _peak_fact(tmp_path, config_data, times, values, name):
+    case = tmp_path / name
+    case.mkdir()
+    ctx = ctx_with(case, config_data, reply(series(0, times, values)), reply())
+    add_metric_facts(ctx, "service/checkout", [CPU])
+    return ctx.evidence.facts[0]
+
+
+def test_the_same_points_in_either_order_give_the_same_fact(tmp_path, config_data):
+    values = [40.0, 85.0, 60.0, 85.0]
+    oldest_first = _peak_fact(tmp_path, config_data, TIES_TIMES, values, "a")
+    newest_first = _peak_fact(tmp_path, config_data, TIES_TIMES[::-1], values[::-1], "b")
+    assert oldest_first.summary == newest_first.summary
+    assert oldest_first.time == newest_first.time == "2026-10-04T10:05:00Z"
+    assert "peak 85 at 2026-10-04T10:05:00Z" in oldest_first.summary
+
+
+def test_a_peak_held_over_three_points_says_from_and_to(tmp_path, config_data):
+    values = [40.0, 85.0, 85.0, 85.0]
+    for name, times, ordered in (("a", TIES_TIMES, values), ("b", TIES_TIMES[::-1], values[::-1])):
+        fact = _peak_fact(tmp_path, config_data, times, ordered, name)
+        assert "peak 85 from 2026-10-04T10:05:00Z to 2026-10-04T10:15:00Z" in fact.summary
+        assert fact.time == "2026-10-04T10:05:00Z"
+        assert fact.data["peak_time"] == "2026-10-04T10:05:00Z"
+        assert fact.data["peak_end"] == "2026-10-04T10:15:00Z"
+
+
+def test_a_flat_series_holds_its_peak_for_the_whole_window(tmp_path, config_data):
+    fact = _peak_fact(tmp_path, config_data, TIES_TIMES[::-1], [12.0] * 4, "a")
+    assert "peak 12 from 2026-10-04T10:00:00Z to 2026-10-04T10:15:00Z" in fact.summary
+
+
+def test_a_single_point_peak_has_no_end(tmp_path, config_data):
+    fact = _peak_fact(tmp_path, config_data, TIES_TIMES[::-1], [1.0, 2.0, 9.0, 3.0], "a")
+    assert "peak 9 at 2026-10-04T10:05:00Z" in fact.summary
+    assert fact.data["peak_end"] is None

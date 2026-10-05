@@ -37,6 +37,8 @@ class MetricSummary:
     baseline_max: float | None
     change_ratio: float | None
     datapoints: int
+    # When the peak value held over consecutive points, the time of the last of them; else None.
+    peak_end: str | None = None
 
 
 def _queries(specs: Sequence[MetricSpec], period: int) -> str:
@@ -84,14 +86,25 @@ def _summarise(spec: MetricSpec, window_points: list[tuple[str, float]], baselin
     baseline_max = max(baseline_values) if baseline_values else None
     if not window_points:
         return MetricSummary(spec.label, spec.stat, None, None, None, None, baseline_avg, baseline_max, None, 0)
-    values = [value for _, value in window_points]
+    ordered = sorted(window_points, key=lambda point: parse_time(point[0]))
+    values = [value for _, value in ordered]
     window_avg = sum(values) / len(values)
-    peak_time, window_max = max(window_points, key=lambda point: point[1])
+    window_max = max(values)
+    peak_time, peak_end = _peak_span(ordered, window_max)
     ratio = window_avg / baseline_avg if baseline_avg else None
     return MetricSummary(
         spec.label, spec.stat, window_avg, window_max, min(values), peak_time,
-        baseline_avg, baseline_max, ratio, len(values),
+        baseline_avg, baseline_max, ratio, len(values), peak_end,
     )
+
+
+def _peak_span(ordered: list[tuple[str, float]], peak: float) -> tuple[str, str | None]:
+    """The earliest point at the peak value, and the last of the consecutive points that held it (None for one)."""
+    first = next(index for index, (_, value) in enumerate(ordered) if value == peak)
+    last = first
+    while last + 1 < len(ordered) and ordered[last + 1][1] == peak:
+        last += 1
+    return ordered[first][0], ordered[last][0] if last > first else None
 
 
 def _fetch(
@@ -140,7 +153,8 @@ def _ratio_words(summary: MetricSummary) -> str:
 
 
 def _summary_text(summary: MetricSummary) -> str:
-    head = f"{summary.label} ({summary.stat}): peak {_num(summary.window_max)} at {summary.peak_time}; "
+    when = f"from {summary.peak_time} to {summary.peak_end}" if summary.peak_end else f"at {summary.peak_time}"
+    head = f"{summary.label} ({summary.stat}): peak {_num(summary.window_max)} {when}; "
     if summary.baseline_avg is None:
         return head + f"window average {_num(summary.window_avg)}; no comparable baseline"
     earlier = "zero" if summary.baseline_avg == 0 else _num(summary.baseline_avg)
