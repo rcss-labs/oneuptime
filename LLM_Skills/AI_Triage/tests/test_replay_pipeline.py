@@ -324,10 +324,12 @@ def test_the_state_sent_for_a_pod_finding_carries_the_cluster_and_namespace_that
 # --- the secret ----------------------------------------------------------------------------
 
 def test_the_static_secret_is_in_the_fixtures_where_only_the_redactor_can_stop_it():
-    text = (REPLAY_DIR / "ecs-bad-deploy" / "aws.json").read_text()
-    assert text.count(SECRET) == 4  # both task definitions (hidden by name), one log line, one service event
-    for answer, needle in (("a Logs Insights line", "connect failed for postgres://"), ("an ECS service event", "stopped: container command failed")):
-        assert any(needle in line and SECRET in line for line in text.splitlines()), answer
+    recorded = read_json(REPLAY_DIR / "ecs-bad-deploy" / "aws.json")
+    text = json.dumps(recorded)
+    assert text.count(SECRET) == 4  # both task definitions (hidden by name), one log line, one stopped container's reason
+    answers = {tuple(entry["match"]): json.dumps(entry.get("result")) for entry in recorded if SECRET in json.dumps(entry)}
+    assert ("logs", "get-query-results") in answers and ("ecs", "describe-tasks") in answers
+    assert answers[("ecs", "describe-tasks")].count(SECRET) == 1 and '"reason": "Error: connect failed for postgres://' in answers[("ecs", "describe-tasks")]
 
 
 def test_the_secret_is_in_no_file_of_the_case_and_no_command_output(ecs_run):

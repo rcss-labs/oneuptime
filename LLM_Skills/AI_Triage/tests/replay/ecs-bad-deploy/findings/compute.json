@@ -5,7 +5,7 @@
       "id": "compute-1",
       "claim": "The comparison of task definition revisions 41 and 42 of checkout-api found one change: DB_HOST now names checkout-db.internal.example.com instead of the database endpoint.",
       "fact_ids": [
-        "ecs-prod-main-eu-west-1:ecs-0015"
+        "ecs-prod-main-eu-west-1:ecs-0014"
       ],
       "excerpt": "DB_HOST changed from checkout-prod-db.cluster-abc.eu-west-1.rds.example.com to checkout-db.internal.example.com",
       "provenance": "inferred",

@@ -1,155 +1,155 @@
 {
-  "status": "cause_found",
-  "summary": {
-    "what_broke": "The checkout API stopped serving requests after revision 42 of its task definition was deployed.",
-    "impact": "Customers cannot pay: the load balancer has no healthy targets and answers with 5xx since 10:41.",
-    "scope": "Only checkout-api in prod is affected; the database instance checkout-prod-db is available.",
-    "top_cause": "C1"
+ "status": "cause_found",
+ "summary": {
+  "what_broke": "The checkout API stopped serving requests after revision 42 of its task definition was deployed.",
+  "impact": "Customers cannot pay: the load balancer has no healthy targets and answers with 5xx since 10:42.",
+  "scope": "Only checkout-api in prod is affected; the database instance checkout-prod-db is available.",
+  "top_cause": "C1"
+ },
+ "symptoms": [
+  "The health check of checkout.example.com fails",
+  "The load balancer answers with 5xx and has no healthy targets"
+ ],
+ "causes": [
+  {
+   "id": "C1",
+   "label": "confirmed",
+   "statement": "Revision checkout-api:42, deployed at 10:37, changed the environment variable DB_HOST to checkout-db.internal.example.com, which does not resolve, so every new task exits with code 1 and fails its health check",
+   "supporting": [
+    "compute-1",
+    "compute-2",
+    "compute-3",
+    "compute-4",
+    "logs-1",
+    "logs-2",
+    "logs-3",
+    "data-4"
+   ],
+   "contradicting": []
   },
-  "symptoms": [
-    "The health check of checkout.example.com fails",
-    "The load balancer answers with 5xx and has no healthy targets"
-  ],
-  "causes": [
-    {
-      "id": "C1",
-      "label": "confirmed",
-      "statement": "Revision checkout-api:42, deployed at 10:37, changed the environment variable DB_HOST to checkout-db.internal.example.com, which does not resolve, so every new task exits with code 1 and fails its health check",
-      "supporting": [
-        "compute-1",
-        "compute-2",
-        "compute-3",
-        "compute-4",
-        "logs-1",
-        "logs-2",
-        "logs-3",
-        "data-4"
-      ],
-      "contradicting": []
-    },
-    {
-      "id": "C2",
-      "label": "candidate",
-      "statement": "A load spike on the database or its backup made the database unreachable",
-      "supporting": [],
-      "contradicting": [
-        "data-1",
-        "data-2",
-        "data-3"
-      ]
-    }
-  ],
-  "hypotheses": [
-    {
-      "id": "H1",
-      "statement": "The new task definition points the application at a host that does not resolve",
-      "prediction": "New tasks log a name resolution error and exit",
-      "test": "Compare revisions 41 and 42 and read the application logs",
-      "result": "confirmed",
-      "finding_ids": [
-        "compute-1",
-        "logs-1"
-      ],
-      "cause": "C1"
-    },
-    {
-      "id": "H2",
-      "statement": "A database load spike or backup caused the outage",
-      "prediction": "Impact starts when the database is busy",
-      "test": "Compare the database metrics and events with the impact start",
-      "result": "rejected",
-      "finding_ids": [
-        "data-1",
-        "data-2",
-        "data-3"
-      ],
-      "cause": "C2"
-    }
-  ],
-  "actions": [
-    {
-      "id": "A1",
-      "type": "mitigation",
-      "label": "recommended",
-      "cause": "C1",
-      "title": "Roll checkout-api back to task definition revision 41",
-      "target": {
-        "account_alias": "prod-main",
-        "account_id": "111111111111",
-        "region": "eu-west-1",
-        "service": "checkout-api",
-        "resource_id": "checkout/checkout-api",
-        "arn": "arn:aws:ecs:eu-west-1:111111111111:service/checkout/checkout-api"
-      },
-      "current_state": "The service runs revision 42 with DB_HOST set to checkout-db.internal.example.com",
-      "required_state": "The service runs revision 41, whose DB_HOST names the database endpoint",
-      "change": "Update the service checkout/checkout-api to task definition checkout-api:41",
-      "rationale": "Revision 41 differs only in DB_HOST and ran without errors before the deployment",
-      "finding_ids": [
-        "compute-1",
-        "compute-3"
-      ],
-      "risk": "Anything that shipped only in revision 42 is undone; the images are the same",
-      "blast_radius": "checkout-api in prod only",
-      "preconditions": [
-        "The engineer approves the change",
-        "Revision 41 is still registered"
-      ],
-      "verification": [
-        "Targets of checkout-api-tg become healthy",
-        "The health check of checkout.example.com passes"
-      ],
-      "rollback": [
-        "Update the service to task definition checkout-api:42 again"
-      ]
-    },
-    {
-      "id": "A2",
-      "type": "permanent_fix",
-      "label": "candidate",
-      "cause": "C1",
-      "title": "Check that DB_HOST resolves before a task definition is deployed",
-      "target": {
-        "account_alias": "prod-main",
-        "account_id": "111111111111",
-        "region": "eu-west-1",
-        "service": "checkout-api",
-        "resource_id": "checkout/checkout-api",
-        "arn": "arn:aws:ecs:eu-west-1:111111111111:service/checkout/checkout-api"
-      },
-      "current_state": "A task definition with an unresolvable DB_HOST can be deployed",
-      "required_state": "The deployment pipeline refuses a revision whose DB_HOST does not resolve",
-      "change": "Add a name resolution check of DB_HOST to the deployment pipeline",
-      "rationale": "The failure was visible in the configuration before any task started",
-      "finding_ids": [
-        "compute-1"
-      ],
-      "risk": "A slower pipeline",
-      "blast_radius": "the deployment pipeline of checkout-api",
-      "preconditions": [],
-      "verification": [
-        "A test deployment with a wrong DB_HOST is refused"
-      ],
-      "rollback": [
-        "Remove the check from the pipeline"
-      ]
-    }
-  ],
-  "open_questions": [
-    "Who intended the change to DB_HOST, and where does checkout-db.internal.example.com come from?"
-  ],
-  "coverage": {
-    "not_checked": [
-      {
-        "what": "Kubernetes workloads",
-        "why": "The service runs on ECS and no cluster is mapped"
-      }
-    ],
-    "typesafe": "available"
-  },
-  "map_changes": [],
-  "run": {
-    "engineer": "replay",
-    "duration_minutes": 5
+  {
+   "id": "C2",
+   "label": "candidate",
+   "statement": "A load spike on the database or its backup made the database unreachable",
+   "supporting": [],
+   "contradicting": [
+    "data-1",
+    "data-2",
+    "data-3"
+   ]
   }
+ ],
+ "hypotheses": [
+  {
+   "id": "H1",
+   "statement": "The new task definition points the application at a host that does not resolve",
+   "prediction": "New tasks log a name resolution error and exit",
+   "test": "Compare revisions 41 and 42 and read the application logs",
+   "result": "confirmed",
+   "finding_ids": [
+    "compute-1",
+    "logs-1"
+   ],
+   "cause": "C1"
+  },
+  {
+   "id": "H2",
+   "statement": "A database load spike or backup caused the outage",
+   "prediction": "Impact starts when the database is busy",
+   "test": "Compare the database metrics and events with the impact start",
+   "result": "rejected",
+   "finding_ids": [
+    "data-1",
+    "data-2",
+    "data-3"
+   ],
+   "cause": "C2"
+  }
+ ],
+ "actions": [
+  {
+   "id": "A1",
+   "type": "mitigation",
+   "label": "recommended",
+   "cause": "C1",
+   "title": "Roll checkout-api back to task definition revision 41",
+   "target": {
+    "account_alias": "prod-main",
+    "account_id": "111111111111",
+    "region": "eu-west-1",
+    "service": "checkout-api",
+    "resource_id": "checkout/checkout-api",
+    "arn": "arn:aws:ecs:eu-west-1:111111111111:service/checkout/checkout-api"
+   },
+   "current_state": "The service runs revision 42 with DB_HOST set to checkout-db.internal.example.com",
+   "required_state": "The service runs revision 41, whose DB_HOST names the database endpoint",
+   "change": "Update the service checkout/checkout-api to task definition checkout-api:41",
+   "rationale": "Revision 41 differs only in DB_HOST and ran without errors before the deployment",
+   "finding_ids": [
+    "compute-1",
+    "compute-3"
+   ],
+   "risk": "Anything that shipped only in revision 42 is undone; the images are the same",
+   "blast_radius": "checkout-api in prod only",
+   "preconditions": [
+    "The engineer approves the change",
+    "Revision 41 is still registered"
+   ],
+   "verification": [
+    "Targets of checkout-api-tg become healthy",
+    "The health check of checkout.example.com passes"
+   ],
+   "rollback": [
+    "Update the service to task definition checkout-api:42 again"
+   ]
+  },
+  {
+   "id": "A2",
+   "type": "permanent_fix",
+   "label": "candidate",
+   "cause": "C1",
+   "title": "Check that DB_HOST resolves before a task definition is deployed",
+   "target": {
+    "account_alias": "prod-main",
+    "account_id": "111111111111",
+    "region": "eu-west-1",
+    "service": "checkout-api",
+    "resource_id": "checkout/checkout-api",
+    "arn": "arn:aws:ecs:eu-west-1:111111111111:service/checkout/checkout-api"
+   },
+   "current_state": "A task definition with an unresolvable DB_HOST can be deployed",
+   "required_state": "The deployment pipeline refuses a revision whose DB_HOST does not resolve",
+   "change": "Add a name resolution check of DB_HOST to the deployment pipeline",
+   "rationale": "The failure was visible in the configuration before any task started",
+   "finding_ids": [
+    "compute-1"
+   ],
+   "risk": "A slower pipeline",
+   "blast_radius": "the deployment pipeline of checkout-api",
+   "preconditions": [],
+   "verification": [
+    "A test deployment with a wrong DB_HOST is refused"
+   ],
+   "rollback": [
+    "Remove the check from the pipeline"
+   ]
+  }
+ ],
+ "open_questions": [
+  "Who intended the change to DB_HOST, and where does checkout-db.internal.example.com come from?"
+ ],
+ "coverage": {
+  "not_checked": [
+   {
+    "what": "Kubernetes workloads",
+    "why": "The service runs on ECS and no cluster is mapped"
+   }
+  ],
+  "typesafe": "available"
+ },
+ "map_changes": [],
+ "run": {
+  "engineer": "replay",
+  "duration_minutes": 5
+ }
 }

@@ -89,7 +89,7 @@ kubeconfig and shell checks there.
 - Every call the collectors make is recorded: no call is missed and every recorded answer is used (the call log).
 - Every collector writes a fact, or is listed in `expected.json` under `no_facts_expected` with the reason.
 - Metric points and ECS service events are recorded in the order the real service returns them (newest first).
-- `fixture-db-password-do-not-leak` also sits in one application log line and one ECS service event, where only the
+- `fixture-db-password-do-not-leak` also sits in one application log line and the reason of one stopped ECS container, where only the
   redactor can stop it.
 - The fake judge reads `expected.json`: it favours a cause only when its statement holds the cause keywords and none of
   the `not_the_cause` words, so a draft that blames the distractor is not confirmed.
