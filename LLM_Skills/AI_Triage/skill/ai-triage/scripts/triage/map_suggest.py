@@ -12,7 +12,7 @@ from typing import Any
 
 import yaml
 
-from triage.case import CaseError, load_case, save_case
+from triage.case import CaseError, load_case, resolve_case_dir, save_case
 from triage.config import TriageConfig, is_simple_name
 from triage.service_map import MapError, load_map, parse_map
 from triage.window import format_time
@@ -141,6 +141,7 @@ def _prepare(case_dir: Path, config: TriageConfig, map_path: Path, service_name:
 
 def propose(case_dir: Path, config: TriageConfig, map_path: Path, service_name: str,
             environment: str, today: date) -> dict:
+    case_dir = resolve_case_dir(case_dir, config)
     block, _, _ = _prepare(case_dir, config, map_path, service_name, environment, today)
     return {"service_name": service_name, "yaml": block, "valid": True}
 
@@ -206,19 +207,30 @@ def _check_writable(map_path: Path) -> None:
         raise SuggestError(f"{map_path} is not writable; nothing was changed")
 
 
-def _acquire_lock(map_path: Path) -> int:
-    """Take an flock on the lock file. A run that dies releases it, so the file never goes stale."""
+def _acquire_lock(map_path: Path) -> tuple[int, Path]:
+    """Take an flock on the lock file. A run that dies releases it, so the file never goes stale.
+
+    A finished run deletes the file while it still holds the lock, so a waiting run could hold a lock on a
+    deleted file. After locking, check that the path still names the file that was locked, and try again if not.
+    """
     lock = map_path.with_name(f"{map_path.name}.lock")
-    try:
-        descriptor = os.open(lock, os.O_CREAT | os.O_RDWR, 0o644)
-    except OSError as error:
-        raise SuggestError(f"{lock}: cannot be opened ({error})") from error
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as error:
+    for _ in range(50):
+        try:
+            descriptor = os.open(lock, os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError as error:
+            raise SuggestError(f"{lock}: cannot be opened ({error})") from error
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            os.close(descriptor)
+            raise SuggestError("another run is applying a suggestion; nothing was changed") from error
+        try:
+            if os.path.samestat(os.fstat(descriptor), os.stat(lock)):
+                return descriptor, lock
+        except FileNotFoundError:
+            pass
         os.close(descriptor)
-        raise SuggestError("another run is applying a suggestion; nothing was changed") from error
-    return descriptor
+    raise SuggestError(f"{lock}: could not be locked")
 
 
 def _write_checked(map_path: Path, content: bytes, intended: dict, entry: dict, name: str,
@@ -256,8 +268,9 @@ def apply(case_dir: Path, config: TriageConfig, map_path: Path, service_name: st
 
     Returns the backup path, or None when the map file did not exist and was created.
     """
+    case_dir = resolve_case_dir(case_dir, config)
     map_path = map_path.resolve()
-    lock = _acquire_lock(map_path)
+    lock, lock_path = _acquire_lock(map_path)
     try:
         _check_writable(map_path)
         block, entry, data = _prepare(case_dir, config, map_path, service_name, environment, today)
@@ -279,4 +292,5 @@ def apply(case_dir: Path, config: TriageConfig, map_path: Path, service_name: st
             raise SuggestError(f"the map was updated but the case could not record it ({detail}){note}") from error
         return backup
     finally:
+        lock_path.unlink(missing_ok=True)
         os.close(lock)

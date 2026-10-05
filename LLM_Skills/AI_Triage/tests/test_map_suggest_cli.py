@@ -1,5 +1,6 @@
 import fcntl
 import json
+import shutil
 import subprocess
 import sys
 
@@ -123,7 +124,7 @@ def test_opensearch_without_an_index_pattern_exits_1_and_prints_the_block(skill_
 
 def test_a_missing_case_exits_2(skill_dir, tmp_path):
     result = run(skill_dir, "propose", "--case-dir", str(tmp_path / "nope"), "--service-name", "orders-api")
-    assert result.returncode == 2 and "case.json" in result.stderr
+    assert result.returncode == 2 and "not a case folder" in result.stderr
 
 
 def test_a_missing_config_exits_2(tmp_path, case_dir):
@@ -157,3 +158,21 @@ def test_apply_without_a_map_file_creates_it(skill_dir, case_dir, map_file):
     assert result.returncode == 0, result.stderr
     assert "orders-api" in yaml.safe_load(map_file.read_text())["services"]
     
+
+def test_propose_says_which_environment_it_assumed_and_how_to_change_it(skill_dir, case_dir):
+    result = run(skill_dir, "propose", "--case-dir", case_dir, "--service-name", "orders-api")
+    assert "environment prod" in result.stderr and "--environment" in result.stderr
+    named = run(skill_dir, "propose", "--case-dir", case_dir, "--service-name", "orders-api", "--environment", "staging")
+    assert "environment staging" in named.stderr
+
+
+def test_a_case_folder_outside_the_cases_root_exits_2(skill_dir, case_dir, tmp_path):
+    copy = tmp_path / "elsewhere" / "INC-9" / "run"
+    shutil.copytree(case_dir, copy)
+    result = run(skill_dir, "propose", "--case-dir", str(copy), "--service-name", "orders-api")
+    assert result.returncode == 2 and "not a case folder" in result.stderr
+
+
+def test_apply_leaves_no_lock_file(skill_dir, case_dir, map_file):
+    assert run(skill_dir, "apply", "--case-dir", case_dir, "--service-name", "orders-api").returncode == 0
+    assert not map_file.with_name("service-map.yaml.lock").exists()

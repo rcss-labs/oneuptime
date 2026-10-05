@@ -1,12 +1,13 @@
 import fcntl
 import json
+import shutil
 import os
 from datetime import date, datetime, timezone
 
 import pytest
 import yaml
 
-from triage.case import create_case, load_case, parse_incident, save_case, set_target_from_discovery, set_target_from_map
+from triage.case import CaseError, create_case, load_case, parse_incident, save_case, set_target_from_discovery, set_target_from_map
 from triage.config import parse_config
 from triage.map_suggest import SuggestError, apply, entry_yaml, propose, proposed_entry
 from triage.service_map import load_map, parse_map
@@ -475,3 +476,42 @@ def test_the_opensearch_message_names_what_is_missing(config, skill_dir, tmp_pat
     case_dir = make_case(config, skill_dir, discovery)
     with pytest.raises(SuggestError, match="missing: cluster"):
         propose(case_dir, config, write_map(tmp_path, COMMENTED_MAP), "orders-api", "prod", TODAY)
+
+
+# final review fixes
+
+def test_a_case_folder_outside_the_cases_root_is_refused(config, skill_dir, tmp_path):
+    path = write_map(tmp_path, COMMENTED_MAP)
+    case_dir = make_case(config, skill_dir)
+    copy = tmp_path / "elsewhere" / "INC-9" / "run"
+    shutil.copytree(case_dir, copy)
+    for function in (lambda: propose(copy, config, path, "orders-api", "prod", TODAY),
+                     lambda: run_apply(copy, config, path)):
+        with pytest.raises(CaseError, match="not a case folder under"):
+            function()
+    assert path.read_bytes() == COMMENTED_MAP.encode()
+    assert map_files(tmp_path) == ["service-map.yaml"]
+
+
+def test_apply_removes_its_lock_file_when_it_finishes(config, skill_dir, tmp_path):
+    path = write_map(tmp_path, COMMENTED_MAP)
+    run_apply(make_case(config, skill_dir), config, path)
+    assert not (tmp_path / "service-map.yaml.lock").exists()
+
+
+def test_apply_removes_its_lock_file_when_it_fails(config, skill_dir, tmp_path):
+    path = write_map(tmp_path, COMMENTED_MAP)
+    with pytest.raises(SuggestError):
+        run_apply(make_case(config, skill_dir), config, path, name="alpha")
+    assert not (tmp_path / "service-map.yaml.lock").exists()
+
+
+def test_apply_keeps_a_lock_file_that_another_live_run_holds(config, skill_dir, tmp_path):
+    path = write_map(tmp_path, COMMENTED_MAP)
+    case_dir = make_case(config, skill_dir)
+    lock = tmp_path / "service-map.yaml.lock"
+    with open(lock, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with pytest.raises(SuggestError, match="another run is applying"):
+            run_apply(case_dir, config, path)
+    assert lock.exists()
