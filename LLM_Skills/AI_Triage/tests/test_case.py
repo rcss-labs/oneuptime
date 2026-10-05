@@ -618,3 +618,48 @@ def test_an_old_case_without_the_key_counts_as_live(monkeypatch):
 def test_an_empty_fixtures_variable_is_not_replay(cases_config, service_map, skill_dir, monkeypatch):
     monkeypatch.setenv("AI_TRIAGE_FIXTURES", "  ")
     assert load_case(make_case(FULL_INCIDENT, cases_config, service_map, skill_dir))["replay"] is False
+
+
+# dependencies in the target
+
+def test_target_from_map_records_each_dependency_of_the_same_environment(cases_config, service_map, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    target = set_target_from_map(case_dir, service_map, cases_config, "checkout-api", "prod")
+    assert target["depends_on"] == ["payments-api"]
+    assert target["dependencies"] == [{
+        "service": "payments-api", "environment": "prod", "account": "prod-main", "region": "eu-west-1",
+        "resources": dict(service_map.services["payments-api"].environments["prod"].resources)}]
+    text = (case_dir / "case.md").read_text()
+    assert "payments-api" in text and "dynamodb_tables" in text and "payments-ledger" in text
+
+
+def test_a_dependency_without_the_same_environment_is_recorded_without_resources(cases_config, service_map, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, service_map, skill_dir)
+    set_target_from_map(case_dir, service_map, cases_config, "checkout-api", "staging")
+    # staging has no depends_on, so use a map where it does
+    env = service_map.services["checkout-api"].environments["staging"]
+    import dataclasses
+    patched = dataclasses.replace(env, depends_on=("payments-api",))
+    envs = {**service_map.services["checkout-api"].environments, "staging": patched}
+    service = dataclasses.replace(service_map.services["checkout-api"], environments=envs)
+    new_map = ServiceMap({**service_map.services, "checkout-api": service})
+    target = set_target_from_map(case_dir, new_map, cases_config, "checkout-api", "staging")
+    assert target["dependencies"] == [{"service": "payments-api", "environment": None, "account": None,
+                                       "region": None, "resources": {}}]
+    assert "no staging environment" in (case_dir / "case.md").read_text()
+
+
+def test_a_discovered_target_has_no_dependencies(cases_config, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, ServiceMap({}), skill_dir)
+    target = set_target_from_discovery(case_dir, cases_config, {"account": "prod-main", "region": "eu-west-1", "resources": {}})
+    assert target.get("dependencies", []) == []
+
+
+def test_the_new_resource_keys_are_checked_in_a_discovery(cases_config, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, ServiceMap({}), skill_dir)
+    ok = {"account": "prod-main", "region": "eu-west-1",
+          "resources": {"alarms": ["a"], "ecr_repository": "r", "opensearch_domain": "d"}}
+    assert set_target_from_discovery(case_dir, cases_config, ok)["resources"]["alarms"] == ["a"]
+    for bad in ({"alarms": "a"}, {"ecr_repository": ["r"]}, {"opensearch_domain": 3}):
+        with pytest.raises(CaseError):
+            set_target_from_discovery(case_dir, cases_config, {**ok, "resources": bad})

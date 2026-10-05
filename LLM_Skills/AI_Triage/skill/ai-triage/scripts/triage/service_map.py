@@ -32,6 +32,9 @@ RESOURCE_KEYS = frozenset(
         "sns_topics",
         "log_groups",
         "opensearch",
+        "alarms",
+        "ecr_repository",
+        "opensearch_domain",
     }
 )
 
@@ -124,6 +127,13 @@ def _check_resources(resources: dict[str, Any], where: str, config: TriageConfig
     for key in resources:
         if key not in RESOURCE_KEYS:
             errors.append(f"{where}.resources.{key}: unknown resource key")
+    alarms = resources.get("alarms")
+    if alarms is not None and not (isinstance(alarms, list) and all(isinstance(a, str) and a.strip() for a in alarms)):
+        errors.append(f"{where}.resources.alarms: must be a list of alarm names")
+    for key in ("ecr_repository", "opensearch_domain"):
+        value = resources.get(key)
+        if value is not None and not (isinstance(value, str) and value.strip()):
+            errors.append(f"{where}.resources.{key}: must be a non-empty name")
     search = resources.get("opensearch")
     if search is not None:
         if not isinstance(search, dict):

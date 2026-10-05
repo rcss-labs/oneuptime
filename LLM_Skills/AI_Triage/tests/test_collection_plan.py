@@ -241,7 +241,7 @@ def test_changes_resource_names_are_capped_at_ten(config):
 def test_a_malformed_resource_is_skipped_with_a_reason(config):
     commands = plan({"ecs_service": "no-slash", "rds": ["not", "a", "string"], "ec2_instances": "i-1"}, config)
     skipped = [c for c in commands if c.tool == "skipped"]
-    assert {c.name for c in skipped} == {"ecs", "rds", "ec2"}
+    assert {c.name for c in skipped} == {"ecs", "rds", "ec2", "alarms"}
     assert all(c.reason and c.argv == [] for c in skipped)
     assert {c.name for c in commands if c.tool != "skipped"} == {"changes", "platform"}
     assert "ecs_service" in next(c for c in skipped if c.name == "ecs").reason
@@ -249,7 +249,7 @@ def test_a_malformed_resource_is_skipped_with_a_reason(config):
 
 def test_an_empty_list_plans_nothing_and_is_not_an_error(config):
     commands = plan({"ec2_instances": [], "log_groups": [], "lambda_functions": []}, config)
-    assert {c.name for c in commands} == {"changes", "platform"}
+    assert {c.name for c in commands if c.tool != "skipped"} == {"changes", "platform"}
 
 
 def test_an_unknown_resource_key_is_skipped(config):
@@ -426,6 +426,8 @@ def test_every_planned_command_is_accepted_by_the_guard_and_the_parsers(config):
     }
     context = context_from_config(config, SKILL_DIR)
     for command in plan(resources, config):
+        if command.tool == "skipped":
+            continue
         assert decide(command.shell(), context).kind == ALLOW, command.shell()
         if command.tool == "collect.py":
             collect._build_parser().parse_args(command.argv[2:])
@@ -522,8 +524,9 @@ import time
 from triage.collection_plan import run_collection
 
 
-def planned_with_files(config, resources=None):
-    return plan(resources or FULL_RESOURCES, config)
+def runnable(commands):
+    """The plan without its skipped lines (a plan without mapped alarms always has one)."""
+    return [c for c in commands if c.tool != "skipped"]
 
 
 def test_each_planned_command_names_its_evidence_file_and_suffix(config):
@@ -571,7 +574,7 @@ def write_evidence(case_dir, command, facts=2, errors=1):
 
 
 def test_run_collection_runs_every_command_and_reports_counts(config, tmp_path):
-    commands = plan({"rds": "d", "lambda_functions": ["f"]}, config)
+    commands = runnable(plan({"rds": "d", "lambda_functions": ["f"]}, config))
     log = []
 
     def launch(argv, timeout):
@@ -589,7 +592,7 @@ def test_run_collection_runs_every_command_and_reports_counts(config, tmp_path):
 
 
 def test_an_existing_evidence_file_is_not_collected_again(config, tmp_path):
-    commands = plan({"rds": "d"}, config)
+    commands = runnable(plan({"rds": "d"}, config))
     for command in commands:
         write_evidence(tmp_path, command, facts=4, errors=2)
     log = []
@@ -600,7 +603,7 @@ def test_an_existing_evidence_file_is_not_collected_again(config, tmp_path):
 
 
 def test_a_command_that_fails_is_reported_with_the_last_stderr_line(config, tmp_path):
-    commands = plan({"rds": "d"}, config)
+    commands = runnable(plan({"rds": "d"}, config))
     results = run_collection(commands, tmp_path, launch=fake_launch(fail=lambda argv: (3, "first\n\nSign-in expired\n\n")))
     assert all(r["status"] == "failed" and r["exit_code"] == 3 and r["stderr"] == "Sign-in expired" and r["evidence"] is None
                for r in results)
@@ -722,3 +725,133 @@ def _all_names(resources):
 
 def test_the_note_says_nothing_about_left_out_names_when_all_fit(config):
     assert "left out" not in one(plan({"rds": "db"}, config), "changes").reason
+
+
+# new resource keys, event sources, alarms, dependencies
+
+def test_alarms_ecr_and_the_opensearch_domain_are_planned_with_their_targets(config):
+    resources = {"alarms": ["checkout-5xx", "checkout-cpu"], "ecr_repository": "checkout-api",
+                 "opensearch_domain": "logs-domain"}
+    commands = plan(resources, config)
+    assert targets_of(one(commands, "alarms")) == {"alarm_names": "checkout-5xx,checkout-cpu"}
+    assert targets_of(one(commands, "ecr")) == {"repository": "checkout-api"}
+    assert targets_of(one(commands, "opensearch_domain")) == {"domain": "logs-domain"}
+    assert one(commands, "alarms").domain == "logs"
+    assert one(commands, "ecr").domain == "compute" and one(commands, "opensearch_domain").domain == "data"
+
+
+def test_the_new_keys_are_known_to_the_service_map():
+    from triage.service_map import RESOURCE_KEYS
+    assert {"alarms", "ecr_repository", "opensearch_domain"} <= RESOURCE_KEYS
+
+
+def test_alarm_names_are_capped_at_the_collectors_limit(config):
+    command = one(plan({"alarms": [f"a{n}" for n in range(80)]}, config), "alarms")
+    assert len(targets_of(command)["alarm_names"].split(",")) == 50
+
+
+def test_without_mapped_alarms_a_skipped_line_says_so(config):
+    for resources in ({"rds": "db"}, {"alarms": []}):
+        alarms = one(plan(resources, config), "alarms")
+        assert alarms.tool == "skipped" and "no alarms are mapped" in alarms.reason
+
+
+@pytest.mark.parametrize("resources", [{"alarms": "one"}, {"ecr_repository": ["x"]}, {"opensearch_domain": 5}])
+def test_a_malformed_new_key_is_skipped_with_a_reason(config, resources):
+    commands = plan(resources, config)
+    key = next(iter(resources))
+    assert any(c.tool == "skipped" and c.reason.startswith(key) for c in commands)
+
+
+EVENT_SOURCES = {
+    "ecs_service": ("c/s", ["ecs.amazonaws.com", "application-autoscaling.amazonaws.com"]),
+    "load_balancer": ("lb", ["elasticloadbalancing.amazonaws.com"]),
+    "rds": ("d", ["rds.amazonaws.com"]),
+    "elasticache": ("e", ["elasticache.amazonaws.com"]),
+    "lambda_functions": (["f"], ["lambda.amazonaws.com"]),
+    "eks": ({"cluster": "platform-prod", "namespace": "n"}, ["eks.amazonaws.com"]),
+    "auto_scaling_group": ("g", ["autoscaling.amazonaws.com"]),
+    "ec2_instances": (["i-1"], ["ec2.amazonaws.com"]),
+    "dynamodb_tables": (["t"], ["dynamodb.amazonaws.com"]),
+    "sqs_queues": (["q"], ["sqs.amazonaws.com"]),
+    "sns_topics": (["n"], ["sns.amazonaws.com"]),
+    "api_gateway": ("a", ["apigateway.amazonaws.com"]),
+    "cloudfront_distribution": ("E1", ["cloudfront.amazonaws.com"]),
+    "efs": ("fs", ["elasticfilesystem.amazonaws.com"]),
+}
+
+
+@pytest.mark.parametrize("key", sorted(EVENT_SOURCES))
+def test_changes_gets_the_event_sources_of_each_mapped_resource_kind(config, key):
+    value, sources = EVENT_SOURCES[key]
+    targets = targets_of(one(plan({key: value}, config), "changes"))
+    assert targets["event_sources"].split(",") == sources
+
+
+def test_event_sources_are_listed_once_in_a_fixed_order(config):
+    targets = targets_of(one(plan({"rds": "d", "ecs_service": "c/s", "lambda_functions": ["a", "b"]}, config), "changes"))
+    assert targets["event_sources"].split(",") == [
+        "ecs.amazonaws.com", "application-autoscaling.amazonaws.com", "rds.amazonaws.com", "lambda.amazonaws.com"]
+    assert list(targets) == ["resource_names", "event_sources", "incident_start"]
+
+
+def test_no_event_sources_without_resource_names(config):
+    assert "event_sources" not in targets_of(one(plan({"log_groups": ["/g"]}, config), "changes"))
+
+
+def with_dependencies(resources, dependencies):
+    case = make_case(resources)
+    case["target"]["depends_on"] = [d["service"] for d in dependencies]
+    case["target"]["dependencies"] = dependencies
+    return case
+
+
+PAYMENTS = {"service": "payments-api", "environment": "prod", "account": "staging", "region": "eu-west-1",
+            "resources": {"rds": "payments-db", "alarms": ["payments-5xx"], "ecs_service": "pay/payments-api"}}
+
+
+def test_a_dependency_gets_a_changes_run_and_an_alarms_run_with_its_own_stems(config):
+    commands = plan_collection(with_dependencies({"rds": "db"}, [PAYMENTS]), config, SKILL_DIR)
+    changes = [c for c in named(commands, "changes") if "payments-api" in c.evidence]
+    alarms = [c for c in named(commands, "alarms") if c.tool != "skipped" and "payments-api" in c.evidence]
+    assert len(changes) == 1 and len(alarms) == 1
+    assert option(changes[0], "--account") == "staging" and option(changes[0], "--region") == "eu-west-1"
+    assert targets_of(changes[0]) == {"resource_names": "payments-api,payments-db",
+                                      "event_sources": "ecs.amazonaws.com,application-autoscaling.amazonaws.com,rds.amazonaws.com",
+                                      "incident_start": "2026-10-04T10:42:00Z"}
+    assert targets_of(alarms[0]) == {"alarm_names": "payments-5xx"}
+    assert changes[0].suffix == "dep-payments-api" and changes[0].evidence.endswith("-dep-payments-api.json")
+    assert "dependency payments-api" in changes[0].reason
+    assert len(named(commands, "changes")) == 2  # the target's own and the dependency's
+
+
+def test_a_dependency_without_alarms_gets_only_changes(config):
+    dependency = {**PAYMENTS, "resources": {"rds": "payments-db"}}
+    commands = plan_collection(with_dependencies({"rds": "db"}, [dependency]), config, SKILL_DIR)
+    assert not [c for c in named(commands, "alarms") if c.tool != "skipped" and "payments-api" in c.evidence]
+
+
+def test_a_dependency_is_followed_one_level_only(config):
+    inner = {**PAYMENTS, "service": "ledger", "resources": {"rds": "ledger-db"}}
+    outer = {**PAYMENTS, "depends_on": ["ledger"], "dependencies": [inner]}
+    commands = plan_collection(with_dependencies({"rds": "db"}, [outer]), config, SKILL_DIR)
+    assert not [c for c in commands if "ledger" in c.evidence]
+
+
+def test_a_dependency_with_no_environment_or_no_resources_is_a_skipped_line(config):
+    missing = {"service": "gone", "environment": None, "account": None, "region": None, "resources": {}}
+    empty = {**PAYMENTS, "service": "empty", "resources": {"log_groups": ["/g"]}}
+    commands = plan_collection(with_dependencies({"rds": "db"}, [missing, empty]), config, SKILL_DIR)
+    skipped = [c.reason for c in commands if c.tool == "skipped"]
+    assert any("dependency gone" in r for r in skipped) and any("dependency empty" in r for r in skipped)
+
+
+def test_dependency_commands_pass_the_guard_and_the_parser(config):
+    import collect
+    from triage.guard import context_from_config, decide
+    from triage.verdict import ALLOW
+    context = context_from_config(config, SKILL_DIR)
+    for command in plan_collection(with_dependencies(FULL_RESOURCES, [PAYMENTS]), config, SKILL_DIR):
+        if command.tool == "collect.py":
+            assert decide(command.shell(), context).kind == ALLOW
+            collect._build_parser().parse_args(command.argv[2:])

@@ -149,3 +149,18 @@ def test_bad_service_names_are_rejected(map_data, config, name):
 def test_good_service_names_are_accepted(map_data, config, name):
     _rename_service(map_data, name)
     assert name in parse_map(map_data, config).services
+
+
+def test_alarms_ecr_repository_and_opensearch_domain_are_accepted(map_data, config):
+    resources = map_data["services"]["checkout-api"]["environments"]["prod"]["resources"]
+    resources.update(alarms=["checkout-5xx"], ecr_repository="checkout-api", opensearch_domain="logs-domain")
+    smap = parse_map(map_data, config)
+    assert smap.services["checkout-api"].environments["prod"].resources["alarms"] == ["checkout-5xx"]
+
+
+@pytest.mark.parametrize("resources", [{"alarms": "one"}, {"alarms": [1]}, {"ecr_repository": ["x"]}, {"opensearch_domain": 5}])
+def test_a_wrong_shape_for_the_new_keys_is_rejected(map_data, config, resources):
+    map_data["services"]["checkout-api"]["environments"]["prod"]["resources"].update(resources)
+    with pytest.raises(MapError) as excinfo:
+        parse_map(map_data, config)
+    assert next(iter(resources)) in str(excinfo.value)

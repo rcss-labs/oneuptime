@@ -251,7 +251,11 @@ def _check_case_shape(case: Any, path: Path) -> None:
             _has(case["target"], source=_is_text, account=_is_text, region=_is_text, resources=lambda v: isinstance(v, dict))
             and _is_text_or_none(case["target"].get("service"))
             and _is_text_or_none(case["target"].get("environment"))
-            and _is_text_list(case["target"].get("depends_on", []))))
+            and _is_text_list(case["target"].get("depends_on", []))
+            and isinstance(case["target"].get("dependencies", []), list)
+            and all(_has(d, service=_is_text, resources=lambda v: isinstance(v, dict))
+                    and _is_text_or_none(d.get("environment")) and _is_text_or_none(d.get("account"))
+                    and _is_text_or_none(d.get("region")) for d in case["target"].get("dependencies", []))))
     )
     if not sound:
         raise CaseError([f"{path}: is not a valid case file"])
@@ -331,11 +335,21 @@ def _describe_target(target: dict | None) -> str:
     lines = [("Source", target["source"]), ("Service", target.get("service")), ("Environment", target.get("environment")),
              ("Account", target["account"]), ("Region", target["region"]),
              ("Depends on", ", ".join(str(d) for d in target.get("depends_on", [])))]
-    text = _bullets(lines) + "\n- Resources:"
-    resources = target.get("resources") or {}
+    text = _bullets(lines) + "\n- Resources:" + _describe_resources(target.get("resources") or {}, "  ")
+    for dependency in target.get("dependencies", []):
+        name = _line(dependency["service"])
+        if not dependency.get("environment"):
+            text += f"\n- Dependency {name}: no {_line(target.get('environment') or 'matching')} environment in the service map"
+            continue
+        where = f"{_line(dependency['environment'])}, {_line(dependency['account'])}, {_line(dependency['region'])}"
+        text += f"\n- Dependency {name} ({where}):" + _describe_resources(dependency["resources"], "  ")
+    return text
+
+
+def _describe_resources(resources: dict, indent: str) -> str:
     if not resources:
-        return text + " none"
-    return text + "\n" + "\n".join(f"  - {_line(key)}: {_line(json.dumps(value))}" for key, value in resources.items())
+        return " none"
+    return "\n" + "\n".join(f"{indent}- {_line(key)}: {_line(json.dumps(value))}" for key, value in resources.items())
 
 
 def _describe_match(match: dict) -> str:
@@ -373,6 +387,16 @@ def _store_target(case_dir: Path, target: dict) -> dict:
     return target
 
 
+def _dependency(service_map: ServiceMap, name: str, environment: str) -> dict:
+    """A service this one depends on, taken from its environment of the same name (None when it has none)."""
+    service = service_map.services.get(name)
+    env = service.environments.get(environment) if service else None
+    if env is None:
+        return {"service": name, "environment": None, "account": None, "region": None, "resources": {}}
+    return {"service": name, "environment": environment, "account": env.account, "region": env.region,
+            "resources": dict(env.resources)}
+
+
 def set_target_from_map(case_dir: Path, service_map: ServiceMap, config: TriageConfig, service: str, environment: str) -> dict:
     entry = service_map.services.get(service)
     if entry is None:
@@ -388,6 +412,7 @@ def set_target_from_map(case_dir: Path, service_map: ServiceMap, config: TriageC
         "region": env.region,
         "resources": dict(env.resources),
         "depends_on": list(env.depends_on),
+        "dependencies": [_dependency(service_map, name, environment) for name in env.depends_on],
     })
 
 

@@ -265,7 +265,7 @@ def test_collect_writes_the_same_evidence_as_running_the_planned_commands_one_by
     report = json.loads(done["stdout"])
     assert evidence_files(case.case_dir) == evidence_files(reference.case_dir)
     assert len(evidence_files(case.case_dir)) >= 6
-    for entry in report["commands"]:
+    for entry in (e for e in report["commands"] if e["status"] != "skipped"):
         assert entry["status"] == "collected" and entry["exit_code"] == 0
         document = json.loads((case.case_dir / entry["evidence"]).read_text())
         assert entry["facts"] == len(document["facts"]) and entry["errors"] == len(document["errors"])
@@ -280,7 +280,7 @@ def test_a_second_collect_reports_already_collected_and_makes_no_call(tmp_path):
     assert calls
     before = evidence_files(case.case_dir)
     again = json.loads(case.script("collect again", "case.py", "collect", "--case-dir", str(case.case_dir))["stdout"])
-    assert {entry["status"] for entry in again["commands"]} == {"already collected"}
+    assert {entry["status"] for entry in again["commands"]} - {"skipped"} == {"already collected"}
     assert load_call_log(case.base) == calls
     assert evidence_files(case.case_dir) == before
 

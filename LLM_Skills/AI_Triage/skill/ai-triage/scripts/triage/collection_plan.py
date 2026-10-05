@@ -29,9 +29,28 @@ RESOURCE_COLLECTOR = {
     "ecs_service": "ecs", "ec2_instances": "ec2", "auto_scaling_group": "autoscaling", "lambda_functions": "lambda",
     "eks": "eks", "load_balancer": "edge", "api_gateway": "apigateway", "cloudfront_distribution": "cloudfront_waf",
     "rds": "rds", "elasticache": "elasticache", "dynamodb_tables": "dynamodb", "efs": "efs",
+    "alarms": "alarms", "ecr_repository": "ecr", "opensearch_domain": "opensearch_domain",
     "sqs_queues": "messaging", "sns_topics": "messaging", "log_groups": "logs", "opensearch": "opensearch",
 }
 MAX_RESOURCE_NAMES = 10
+MAX_ALARM_NAMES = 50  # what the alarms collector reads
+# CloudTrail event sources of each resource kind, in the order they are passed to the changes collector.
+EVENT_SOURCES = {
+    "ecs_service": ("ecs.amazonaws.com", "application-autoscaling.amazonaws.com"),
+    "load_balancer": ("elasticloadbalancing.amazonaws.com",),
+    "rds": ("rds.amazonaws.com",),
+    "elasticache": ("elasticache.amazonaws.com",),
+    "lambda_functions": ("lambda.amazonaws.com",),
+    "eks": ("eks.amazonaws.com",),
+    "auto_scaling_group": ("autoscaling.amazonaws.com",),
+    "ec2_instances": ("ec2.amazonaws.com",),
+    "dynamodb_tables": ("dynamodb.amazonaws.com",),
+    "sqs_queues": ("sqs.amazonaws.com",),
+    "sns_topics": ("sns.amazonaws.com",),
+    "api_gateway": ("apigateway.amazonaws.com",),
+    "cloudfront_distribution": ("cloudfront.amazonaws.com",),
+    "efs": ("elasticfilesystem.amazonaws.com",),
+}
 COLLECT_WORKERS = 4
 COMMAND_TIMEOUT_SECONDS = 300
 STDERR_LINE_LIMIT = 300
@@ -97,9 +116,9 @@ class _Planner:
         self.commands: list[PlannedCommand] = []
         self.evidence_files: set[tuple[str, str, str]] = set()
 
-    def suffix_budget(self, collector: str) -> int:
+    def suffix_budget(self, collector: str, account: str | None = None, region: str | None = None) -> int:
         """How many characters of suffix keep the evidence file name within MAX_FILE_NAME_BYTES."""
-        stem = "-".join(_SUFFIX_CLEANER.sub("", part) for part in (collector, self.account, self.region))
+        stem = "-".join(_SUFFIX_CLEANER.sub("", part) for part in (collector, account or self.account, region or self.region))
         return MAX_FILE_NAME_BYTES - len(EVIDENCE_EXTENSION) - len(stem) - 1
 
     def _claim_file(self, name: str, scope: str, suffix: str) -> None:
@@ -108,8 +127,10 @@ class _Planner:
             raise CaseError([f"{name} with suffix '{suffix}' would write the same evidence file as another planned command"])
         self.evidence_files.add(identity)
 
-    def collect(self, name: str, targets: dict[str, str], reason: str, suffix: str = "") -> None:
-        argv = [self.python, self.collect_script, name, "--account", self.account, "--region", self.region,
+    def collect(self, name: str, targets: dict[str, str], reason: str, suffix: str = "",
+                account: str | None = None, region: str | None = None) -> None:
+        account, region = account or self.account, region or self.region
+        argv = [self.python, self.collect_script, name, "--account", account, "--region", region,
                 "--start", self.case["window"]["start"], "--end", self.case["window"]["end"],
                 "--case-dir", self.case["case_dir"]]
         # Every collector that declares an optional incident_start gets the case's, in the form changes takes.
@@ -117,11 +138,11 @@ class _Planner:
             targets = {**targets, "incident_start": self.case["incident_start"]}
         for key, value in targets.items():
             argv += ["--target", f"{key}={value}"]
-        self._claim_file(name, "", suffix)
+        self._claim_file(name, f"{account}/{region}", suffix)
         if suffix:
             argv.append(f"--suffix={suffix}")
         self.commands.append(PlannedCommand(
-            COLLECTOR_DOMAIN[name], "collect.py", name, argv, reason, suffix, _evidence_path(name, self.account, self.region, suffix)))
+            COLLECTOR_DOMAIN[name], "collect.py", name, argv, reason, suffix, _evidence_path(name, account, region, suffix)))
 
     def opensearch(self, subcommand: str, spec: dict, reason: str) -> None:
         argv = [self.python, self.opensearch_script, subcommand, "--cluster", spec["cluster"],
@@ -136,6 +157,9 @@ class _Planner:
         self.commands.append(PlannedCommand(
             COLLECTOR_DOMAIN["opensearch"], "opensearch_query.py", "opensearch", argv, reason, subcommand,
             _evidence_path("opensearch", cluster.account, cluster.name, subcommand)))
+
+    def skip_note(self, why: str) -> None:
+        self.commands.append(PlannedCommand("changes", SKIPPED, "changes", [], why))
 
     def skip(self, key: str, why: str) -> None:
         name = RESOURCE_COLLECTOR.get(key, key)
@@ -242,6 +266,14 @@ def _plan_log_groups(p: _Planner, value: Any) -> None:
         p.collect("logs", {"log_groups": ",".join(groups)}, "error and volume patterns in the logs")
 
 
+def _plan_alarms(p: _Planner, value: Any) -> None:
+    names = _text_list(value)
+    if names is None:
+        p.skip("alarms", "must be a list of alarm names")
+    elif names:
+        p.collect("alarms", {"alarm_names": ",".join(names[:MAX_ALARM_NAMES])}, "alarm state and state changes in the window")
+
+
 def _plan_opensearch(p: _Planner, value: Any) -> None:
     if (not isinstance(value, dict) or not _is_text(value.get("cluster")) or not _is_text(value.get("index_pattern"))
             or not isinstance(value.get("filter") or {}, dict)):
@@ -298,6 +330,54 @@ def _resource_names(resources: dict) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def _event_sources(resources: dict) -> list[str]:
+    sources: list[str] = []
+    for key, kinds in EVENT_SOURCES.items():
+        if resources.get(key):
+            sources += kinds
+    return sources
+
+
+def _changes_request(resources: dict, incident_start: str, subject: str = "") -> tuple[dict[str, str], str]:
+    """The targets and the note of a changes run: names (capped), event sources, and the incident start."""
+    every_name = _resource_names(resources)
+    names, left_out = every_name[:MAX_RESOURCE_NAMES], every_name[MAX_RESOURCE_NAMES:]
+    targets: dict[str, str] = {}
+    if names:
+        targets["resource_names"] = ",".join(names)
+        targets["event_sources"] = ",".join(_event_sources(resources))
+    targets["incident_start"] = incident_start
+    reason = "deployments and configuration changes before the incident" + subject
+    if left_out:
+        reason += f"; {len(left_out)} resource names left out: {', '.join(left_out)}"
+    return targets, reason
+
+
+def _plan_dependency(p: _Planner, dependency: dict) -> None:
+    """One level of dependency: a changes run and, when alarms are mapped, an alarms run, each in the
+    dependency's own account and region, with the dependency's name in the evidence file name."""
+    service = dependency["service"]
+    label = f"dependency {service}"
+    if not dependency.get("environment"):
+        p.skip_note(f"{label}: has no matching environment in the service map")
+        return
+    resources = dependency.get("resources") or {}
+    names = _resource_names(resources)
+    alarms = _text_list(resources.get("alarms")) or []
+    if not names and not alarms:
+        p.skip_note(f"{label}: has no resources in the service map to look up")
+        return
+    account, region = dependency["account"], dependency["region"]
+    budget = p.suffix_budget("changes", account, region)
+    suffix = _suffix_for(f"dep-{service}", budget)
+    if names:
+        targets, reason = _changes_request(resources, p.case["incident_start"], f" ({label})")
+        p.collect("changes", targets, reason, suffix, account, region)
+    if alarms:
+        p.collect("alarms", {"alarm_names": ",".join(alarms[:MAX_ALARM_NAMES])}, f"alarm state and changes ({label})",
+                  _suffix_for(f"dep-{service}", p.suffix_budget("alarms", account, region)), account, region)
+
+
 def plan_collection(case: dict, config: TriageConfig, skill_dir: Path) -> list[PlannedCommand]:
     """The commands to run for the case's target, in a fixed order."""
     if not case.get("target"):
@@ -318,6 +398,9 @@ def plan_collection(case: dict, config: TriageConfig, skill_dir: Path) -> list[P
         "efs": _plan_single("efs", "efs", "file_system", "file system state and burst credits"),
         "log_groups": _plan_log_groups,
         "opensearch": _plan_opensearch,
+        "alarms": _plan_alarms,
+        "ecr_repository": _plan_single("ecr", "ecr_repository", "repository", "image push times and scan results"),
+        "opensearch_domain": _plan_single("opensearch_domain", "opensearch_domain", "domain", "domain health, configuration changes, and resources"),
     }
     for key, handler in handlers.items():
         if key in p.resources:
@@ -327,16 +410,12 @@ def plan_collection(case: dict, config: TriageConfig, skill_dir: Path) -> list[P
     for key in p.resources:
         if key not in handlers and key not in ("sqs_queues", "sns_topics"):
             p.skip(key, "unknown resource key")
-    changes = {"incident_start": case["incident_start"]}
-    every_name = _resource_names(p.resources)
-    names, left_out = every_name[:MAX_RESOURCE_NAMES], every_name[MAX_RESOURCE_NAMES:]
-    if names:
-        changes = {"resource_names": ",".join(names), **changes}
-    reason = "deployments and configuration changes before the incident"
-    if left_out:
-        reason += f"; {len(left_out)} resource names left out: {', '.join(left_out)}"
-    p.collect("changes", changes, reason)
+    if p.resources.get("alarms", []) == []:
+        p.skip("alarms", "no alarms are mapped for this service; the alarms collector needs alarm names, so ask the engineer or add alarms to the service map")
+    p.collect("changes", *_changes_request(p.resources, case["incident_start"]))
     p.collect("platform", {}, "known AWS service events")
+    for dependency in case["target"].get("dependencies", []):
+        _plan_dependency(p, dependency)
     return p.commands
 
 

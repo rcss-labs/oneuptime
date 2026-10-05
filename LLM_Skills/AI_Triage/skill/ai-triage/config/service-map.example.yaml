@@ -17,6 +17,9 @@ services:
           load_balancer: checkout-prod
           rds: checkout-prod-db
           elasticache: checkout-prod-redis
+          alarms: ["checkout-prod-5xx", "checkout-prod-cpu"]   # without names the plan cannot list alarms
+          ecr_repository: checkout-api
+          opensearch_domain: logs-prod-domain
           log_groups: ["/ecs/checkout-api"]
           opensearch:
             cluster: logs-prod
