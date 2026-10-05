@@ -224,6 +224,15 @@ def distractor_draft(scenario: Path) -> dict:
     distractor["supporting"], distractor["contradicting"] = distractor["contradicting"], []
     for action in report["actions"]:
         action["cause"] = distractor["id"]
+    # A draft an agent could submit: the distractor's hypothesis is confirmed and tied to it, the real cause stays an
+    # untested candidate, and every other hypothesis keeps its own result.
+    real = report["causes"][0] if report["causes"][0]["id"] != distractor["id"] else report["causes"][1]
+    for hypothesis in report["hypotheses"]:
+        if hypothesis["cause"] == distractor["id"]:
+            hypothesis["result"] = "confirmed"
+        elif hypothesis["cause"] == real["id"]:
+            hypothesis["result"] = "inconclusive"
+    real["label"] = "candidate"
     return report
 
 

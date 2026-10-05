@@ -34,11 +34,12 @@ from triage.findings import (
     asked_strings,
     check_findings,
     evidence_documents,
+    valid_findings,
     qualified_id,
     quotable_strings,
 )
 from triage.guard import context_from_config, decide
-from triage.report import validate_work_order
+from triage.report import check_draft, validate_work_order
 from triage.verdict import ALLOW, ASK
 
 SECRET = "fixture-db-password-do-not-leak"
@@ -397,6 +398,8 @@ def test_a_draft_that_blames_the_distractor_is_not_confirmed_and_its_actions_are
     draft = distractor_draft(folder)
     distractor = draft["summary"]["top_cause"]
     case = start_case(folder, tmp_path)
+    config = load_config(case.skill_dir / "config" / "triage-config.yaml")
+    assert check_draft(draft, valid_findings(case.case_dir), config) == []  # a real draft: only judging can stop it
     summary = case.judge(favourable_judge(folder), apply_labels=True, draft=draft)
     assert summary["causes"][distractor]["label"] != "confirmed"
     blamed = [action["id"] for action in draft["actions"] if action["cause"] == distractor]
