@@ -265,3 +265,9 @@ def test_no_throttling_is_not_stated_when_table_level_throttle_metrics_show_thro
 def test_zero_table_level_throttle_events_do_not_suppress_the_statement(config_data, tmp_path):
     ctx, _ = run_with_metrics(config_data, tmp_path, {("WriteThrottleEvents", None): 0.0})
     assert len(by_summary(ctx, "throttling or system error was recorded")) == 1
+
+
+def test_a_zero_per_operation_datapoint_does_not_suppress_the_statement(config_data, tmp_path):
+    for data in ({("ThrottledRequests", "Query"): 0.0}, {("SystemErrors", "PutItem"): 0.0}):
+        ctx, _ = run_with_metrics(config_data, tmp_path, data)
+        assert len(by_summary(ctx, "throttling or system error was recorded")) == 1

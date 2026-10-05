@@ -71,7 +71,10 @@ def _add_operation_metrics(ctx: CollectContext, name: str, resource: str, table_
             kind=DERIVED, resource=resource, command=ctx.last_command,
             summary="The one-week baseline for the per-operation metrics could not be read (see errors); the window values are reported without a comparison",
         )
-    problems = [s for s in summaries if s.datapoints and s.label.split()[0] in ("ThrottledRequests", "SystemErrors")]
+    problems = [
+        s for s in summaries
+        if s.datapoints and s.label.split()[0] in ("ThrottledRequests", "SystemErrors") and (s.window_max or 0) > 0
+    ]
     if not problems and not table_throttled:
         ctx.evidence.add(
             kind=DERIVED, resource=resource, command=window_command,
