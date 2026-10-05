@@ -1,55 +1,69 @@
 {
   "status": "cause_found",
   "summary": {
-    "what_broke": "The checkout API stopped serving requests after revision 42 of its task definition was deployed.",
-    "impact": "Customers cannot pay: the load balancer has no healthy targets and answers with 5xx.",
-    "scope": "Only checkout-api in prod-main is affected; the database instance checkout-prod-db is available.",
+    "what_broke": "Clients reject the TLS certificate of checkout.example.com because the certificate on the HTTPS listener of the load balancer checkout-prod expired at 12:00:00.",
+    "impact": "Clients that validate certificates cannot call the checkout API; the service, its targets and its database are healthy.",
+    "scope": "Only the HTTPS listener of checkout-prod in prod-main; the ECS tasks, the targets and the database are healthy.",
     "top_cause": "C1"
   },
   "symptoms": [
-    "The health check of checkout.example.com fails",
-    "The load balancer answers with 5xx and has no healthy targets"
+    "Clients report TLS certificate errors when calling checkout.example.com",
+    "The health monitor of checkout.example.com fails"
   ],
   "causes": [
     {
       "id": "C1",
       "label": "confirmed",
-      "statement": "Revision 42 of checkout-api, registered at 10:36, changed the environment variable DB_HOST to checkout-db.internal.example.com, which does not resolve, so every new task exits and fails its health check",
-      "supporting": ["lead-1", "lead-2", "lead-3", "lead-4"],
+      "statement": "The certificate 9a8b7c6d-1e2f-4a3b-8c4d-5e6f7a8b9c0d on the HTTPS listener of checkout-prod expired at 12:00:00, so clients reject the TLS handshake to checkout.example.com",
+      "supporting": [
+        "lead-1",
+        "lead-2",
+        "lead-3"
+      ],
       "contradicting": []
     },
     {
       "id": "C2",
       "label": "candidate",
-      "statement": "The database was overloaded and stopped answering the checkout API",
+      "statement": "The deployment of checkout-api:41 at 10:05 broke the application",
       "supporting": [],
-      "contradicting": ["lead-5", "lead-6"]
+      "contradicting": [
+        "lead-4",
+        "lead-5"
+      ]
     }
   ],
   "hypotheses": [
     {
       "id": "H1",
-      "statement": "The new task definition points the application at a host that does not resolve",
-      "prediction": "New tasks log a name resolution error for that host and exit",
-      "test": "Compare revisions 41 and 42 and read the application logs",
+      "statement": "The certificate served by the load balancer has expired",
+      "prediction": "The certificate of the HTTPS listener is EXPIRED, with an expiry inside the incident window",
+      "test": "Read the listener and its certificate in ACM",
       "result": "confirmed",
-      "finding_ids": ["lead-1", "lead-3"],
+      "finding_ids": [
+        "lead-1",
+        "lead-3"
+      ],
       "cause": "C1"
     },
     {
       "id": "H2",
-      "statement": "A database overload made the database unreachable",
-      "prediction": "The database CPU is high when the impact starts",
-      "test": "Compare the database CPU and state with the impact start",
+      "statement": "The deployment of checkout-api:41 broke the application",
+      "prediction": "Tasks or targets are unhealthy when the impact starts",
+      "test": "Read the deployment, the task definition change and the target health",
       "result": "rejected",
-      "finding_ids": ["lead-5", "lead-6"],
+      "finding_ids": [
+        "lead-4",
+        "lead-5",
+        "lead-6"
+      ],
       "cause": "C2"
     },
     {
       "id": "H3",
-      "statement": "A second change outside ECS contributed to the outage",
-      "prediction": "CloudTrail shows another change to checkout-api or its network before 10:42",
-      "test": "Read the CloudTrail changes for the resources of checkout-api",
+      "statement": "A second certificate on the listener also expires soon",
+      "prediction": "Another certificate of the listener has an expiry date in the next days",
+      "test": "List the certificates of the listener",
       "result": "inconclusive",
       "finding_ids": [],
       "cause": null
@@ -61,32 +75,35 @@
       "type": "mitigation",
       "label": "recommended",
       "cause": "C1",
-      "title": "Roll checkout-api back to task definition revision 41",
+      "title": "Replace the expired certificate on the HTTPS listener of checkout-prod",
       "target": {
         "account_alias": "prod-main",
         "account_id": "111111111111",
         "region": "eu-west-1",
         "service": "checkout-api",
-        "resource_id": "checkout/checkout-api",
-        "arn": "arn:aws:ecs:eu-west-1:111111111111:service/checkout/checkout-api"
+        "resource_id": "checkout-prod",
+        "arn": "arn:aws:elasticloadbalancing:eu-west-1:111111111111:listener/app/checkout-prod/50dc6c495c0c9188/f2f7dc8efc522ab2"
       },
-      "current_state": "The service runs revision 42 with DB_HOST set to checkout-db.internal.example.com",
-      "required_state": "The service runs revision 41, whose DB_HOST names the database endpoint",
-      "change": "Update the service checkout/checkout-api to task definition checkout-api:41",
-      "rationale": "Revision 41 differs only in DB_HOST and ran without errors before the deployment",
-      "finding_ids": ["lead-1", "lead-2"],
-      "risk": "Anything that shipped only in revision 42 is undone",
-      "blast_radius": "checkout-api in prod-main only",
+      "current_state": "Listener HTTPS 443 serves certificate 9a8b7c6d-1e2f-4a3b-8c4d-5e6f7a8b9c0d, which expired at 12:00:00",
+      "required_state": "The listener serves an ISSUED certificate for checkout.example.com that has not expired",
+      "change": "Request or import a valid certificate for checkout.example.com in ACM in eu-west-1, then set it as the default certificate of listener HTTPS 443 of checkout-prod",
+      "rationale": "The certificate is the one the listener serves, and it expired five seconds before the impact started",
+      "finding_ids": [
+        "lead-1",
+        "lead-3"
+      ],
+      "risk": "A wrong certificate would keep clients failing; the targets are not touched",
+      "blast_radius": "The HTTPS listener of checkout-prod",
       "preconditions": [
         "The engineer approves the change",
-        "Revision 41 is still registered"
+        "A valid certificate for checkout.example.com exists in ACM in eu-west-1"
       ],
       "verification": [
-        "Targets of checkout-api-tg become healthy",
-        "The health check of checkout.example.com passes"
+        "A TLS handshake to checkout.example.com presents a certificate that has not expired",
+        "The health monitor of checkout.example.com passes"
       ],
       "rollback": [
-        "Update the service to task definition checkout-api:42 again"
+        "Set the previous certificate as the default certificate of the listener again"
       ]
     },
     {
@@ -94,33 +111,35 @@
       "type": "permanent_fix",
       "label": "candidate",
       "cause": "C1",
-      "title": "Check that DB_HOST resolves before a task definition is deployed",
+      "title": "Renew the certificate of checkout.example.com automatically and alert before it expires",
       "target": {
         "account_alias": "prod-main",
         "account_id": "111111111111",
         "region": "eu-west-1",
         "service": "checkout-api",
-        "resource_id": "checkout/checkout-api",
-        "arn": "arn:aws:ecs:eu-west-1:111111111111:service/checkout/checkout-api"
+        "resource_id": "9a8b7c6d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+        "arn": "arn:aws:acm:eu-west-1:111111111111:certificate/9a8b7c6d-1e2f-4a3b-8c4d-5e6f7a8b9c0d"
       },
-      "current_state": "A task definition with a DB_HOST that does not resolve can be deployed",
-      "required_state": "The deployment pipeline refuses a revision whose DB_HOST does not resolve",
-      "change": "Add a name resolution check of DB_HOST to the deployment pipeline of checkout-api",
-      "rationale": "The wrong value was visible in the configuration before any task started",
-      "finding_ids": ["lead-1"],
-      "risk": "A slower pipeline",
-      "blast_radius": "the deployment pipeline of checkout-api",
+      "current_state": "The certificate expired without a renewal or an alert",
+      "required_state": "The certificate renews itself, and an alert fires 30 days before any expiry",
+      "change": "Use an ACM certificate with DNS validation that renews itself, and add an alarm on days to expiry for it",
+      "rationale": "Nobody renewed the certificate before 12:00:00",
+      "finding_ids": [
+        "lead-2"
+      ],
+      "risk": "A DNS validation record must be kept in place",
+      "blast_radius": "The certificate of checkout.example.com",
       "preconditions": [],
       "verification": [
-        "A test deployment with a wrong DB_HOST is refused"
+        "The new certificate shows renewal eligibility ELIGIBLE or a renewal date"
       ],
       "rollback": [
-        "Remove the check from the pipeline"
+        "Remove the alarm; keep the old certificate until the new one is serving"
       ]
     }
   ],
   "open_questions": [
-    "Who intended the change to DB_HOST, and where does checkout-db.internal.example.com come from?"
+    "Why was the certificate not renewed before it expired?"
   ],
   "coverage": {
     "typesafe": "available",
@@ -132,7 +151,7 @@
     ]
   },
   "map_changes": [
-    "Add the load balancer checkout-prod to the prod environment of checkout-api"
+    "Add the listener of the load balancer checkout-prod to the resources of the prod environment of checkout-api"
   ],
   "run": {
     "engineer": "on-call engineer",

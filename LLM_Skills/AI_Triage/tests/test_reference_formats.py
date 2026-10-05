@@ -1,6 +1,6 @@
 """reference/formats.md and its two example files must agree with the code that reads the files they describe.
 
-The examples are run through the real commands on a case built from the ecs-bad-deploy replay. The field tables of
+The examples are run through the real commands on a case built from the cert-expired replay. The field tables of
 the reference are parsed and compared with the examples and with what the code requires. Every refusal message the
 reference quotes must be one the code can produce.
 """
@@ -32,6 +32,8 @@ FINDINGS_EXAMPLE = SKILL_SRC / "templates" / "findings.example.json"
 REPORT_EXAMPLE = SKILL_SRC / "templates" / "report.example.json"
 SOURCE_DIRS = (SKILL_SRC / "scripts", SKILL_SRC / "scripts" / "triage")
 # Lists whose items are free-form: their keys are not fields the code knows.
+# Not ecs-bad-deploy: that recording is the one agents are tested on, and the examples must not solve it.
+SCENARIO = "cert-expired"
 FREE_FORM = {"requests", "map_changes"}
 CODE_MODULES = {"findings": findings_module, "evidence": evidence, "compose": compose, "judge": judge_module,
                 "report": report_module, "publish": publish_module, "case": case_module, "questions": questions_module,
@@ -145,9 +147,9 @@ def examples() -> dict:
 
 @pytest.fixture(scope="module")
 def built(tmp_path_factory, examples):
-    """The ecs-bad-deploy case with only the example findings, checked, and the example report judged."""
+    """The cert-expired case with only the example findings, checked, and the example report judged."""
     base = tmp_path_factory.mktemp("formats")
-    case = start_case(REPLAY_DIR / "ecs-bad-deploy", base)
+    case = start_case(REPLAY_DIR / SCENARIO, base)
     findings_dir = case.case_dir / "findings"
     for path in findings_dir.glob("*.json"):
         path.unlink()
@@ -168,7 +170,8 @@ def judged(built, examples):
     scenario = base / "example-scenario"
     scenario.mkdir()
     shutil.copyfile(REPORT_EXAMPLE, scenario / "report.json")
-    incident = json.loads((REPLAY_DIR / "ecs-bad-deploy" / "incident.json").read_text())
+    shutil.copyfile(REPLAY_DIR / SCENARIO / "expected.json", scenario / "expected.json")
+    incident = json.loads((REPLAY_DIR / SCENARIO / "incident.json").read_text())
     summary = run_judgments(case.case_dir, built["config"], favourable_judge(scenario), built["questions"],
                             random.Random(incident["number"]))
     return {**built, "summary": summary}
@@ -219,7 +222,7 @@ def test_example_report_is_valid_with_the_labels_the_summary_allows(judged):
 
 def test_example_report_renders_with_the_nine_sections(judged):
     case = judged["case"]
-    now = json.loads((REPLAY_DIR / "ecs-bad-deploy" / "incident.json").read_text())["observed_at"]
+    now = json.loads((REPLAY_DIR / SCENARIO / "incident.json").read_text())["observed_at"]
     case.script("report render", "report.py", "render", "--case-dir", str(case.case_dir), "--now", now)
     text = (case.case_dir / "report.md").read_text()
     headings = [line for line in text.splitlines() if line.startswith("# ") or line.startswith("## ")]
@@ -277,7 +280,7 @@ def test_incident_table_lists_the_fields_case_init_reads_and_which_it_requires()
         for cells in body:
             for name in inline_code(cells[0]):
                 listed[name] = cells[1].lower().startswith("yes")
-    incident = json.loads((REPLAY_DIR / "ecs-bad-deploy" / "incident.json").read_text())
+    incident = json.loads((REPLAY_DIR / SCENARIO / "incident.json").read_text())
     assert set(parse_incident(incident)) == set(listed)
     for name, required in listed.items():
         reduced = {key: value for key, value in incident.items() if key != name}
@@ -287,6 +290,16 @@ def test_incident_table_lists_the_fields_case_init_reads_and_which_it_requires()
         except CaseError:
             refused = True
         assert refused == required, name
+
+
+def test_reference_explains_what_a_finding_verdict_answers():
+    text = " ".join(section(reference_text(), "What judging writes").split())
+    assert "whether the evidence a finding cites supports that finding's own claim" in text
+    assert "which list of the cause" in text
+    text = section(reference_text(), "report.json")
+    for field in ("account_id", "arn"):
+        row = next(line for line in text.splitlines() if line.startswith(f"| `actions[].target.{field}`"))
+        assert "whenever a fact holds it" in row
 
 
 def test_every_listed_value_set_is_the_codes(examples):

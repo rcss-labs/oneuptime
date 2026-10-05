@@ -3,71 +3,69 @@
   "findings": [
     {
       "id": "lead-1",
-      "claim": "Revision 42 of checkout-api differs from revision 41 only in DB_HOST, which now names checkout-db.internal.example.com.",
-      "fact_ids": ["ecs-prod-main-eu-west-1:ecs-0014"],
-      "excerpt": "DB_HOST changed from checkout-prod-db.cluster-abc.eu-west-1.rds.example.com to checkout-db.internal.example.com",
-      "provenance": "inferred",
-      "confidence": "high"
+      "claim": "The certificate on the HTTPS listener of checkout-prod expired at 12:00:00, five seconds before the impact started.",
+      "fact_ids": ["edge-prod-main-eu-west-1:edge-0008"],
+      "excerpt": "Certificate 9a8b7c6d-1e2f-4a3b-8c4d-5e6f7a8b9c0d expired at 2026-10-04T12:00:00Z",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T12:00:00Z"
     },
     {
       "id": "lead-2",
-      "claim": "Revision 42 of the checkout-api task definition was registered by deployer at 10:36, six minutes before the impact started.",
-      "fact_ids": ["changes-prod-main-eu-west-1:changes-0002"],
-      "excerpt": "RegisterTaskDefinition (ecs.amazonaws.com) by deployer on checkout-api:42",
-      "provenance": "incident_time",
-      "confidence": "high",
-      "time": "2026-10-04T10:36:00Z"
-    },
-    {
-      "id": "lead-3",
-      "claim": "From 10:38 the application logged that checkout-db.internal.example.com cannot be resolved, in the log group and in the OpenSearch index.",
-      "fact_ids": [
-        "logs-prod-main-eu-west-1:logs-0012",
-        "opensearch-prod-main-logs-prod-search:opensearch-0001"
-      ],
-      "excerpt": "Error: getaddrinfo ENOTFOUND checkout-db.internal.example.com",
-      "provenance": "incident_time",
-      "confidence": "high",
-      "time": "2026-10-04T10:38:12Z"
-    },
-    {
-      "id": "lead-4",
-      "claim": "The load balancer target group checkout-api-tg has two unhealthy targets now.",
-      "fact_ids": ["edge-prod-main-eu-west-1:edge-0005"],
-      "excerpt": "Target group checkout-api-tg has 2 unhealthy targets",
+      "claim": "The certificate for checkout.example.com is in state EXPIRED now.",
+      "fact_ids": ["edge-prod-main-eu-west-1:edge-0007"],
+      "excerpt": "(checkout.example.com) is EXPIRED, valid until 2026-10-04T12:00:00Z",
       "provenance": "current",
       "confidence": "medium"
     },
     {
-      "id": "lead-5",
-      "claim": "The database CPU peaked at 85 percent at 09:50, long before the impact started at 10:42.",
-      "fact_ids": ["rds-prod-main-eu-west-1:rds-0005"],
-      "excerpt": "CPUUtilization (Average): peak 85 at 2026-10-04T09:50:00Z",
+      "id": "lead-3",
+      "claim": "The expired certificate is the one the HTTPS listener serves.",
+      "fact_ids": [
+        "edge-prod-main-eu-west-1:edge-0002",
+        "edge-prod-main-eu-west-1:edge-0007"
+      ],
+      "excerpt": "Listener HTTPS 443, certificate 9a8b7c6d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+      "provenance": "current",
+      "confidence": "high"
+    },
+    {
+      "id": "lead-4",
+      "claim": "The deployment of checkout-api:41 was created at 10:05 and completed with every task running, about two hours before the impact.",
+      "fact_ids": ["ecs-prod-main-eu-west-1:ecs-0002"],
+      "excerpt": "Deployment of checkout-api:41 was created; state read now: COMPLETED, 3 of 3 tasks running",
       "provenance": "incident_time",
-      "confidence": "medium",
-      "time": "2026-10-04T09:50:00Z"
+      "confidence": "high",
+      "time": "2026-10-04T10:05:00Z"
+    },
+    {
+      "id": "lead-5",
+      "claim": "All three targets of the target group checkout-api-tg are healthy now.",
+      "fact_ids": ["edge-prod-main-eu-west-1:edge-0005"],
+      "excerpt": "Target group checkout-api-tg has 3 healthy targets",
+      "provenance": "current",
+      "confidence": "low"
     },
     {
       "id": "lead-6",
-      "claim": "The database instance checkout-prod-db is available now.",
-      "fact_ids": ["rds-prod-main-eu-west-1:rds-0001"],
-      "excerpt": "Instance checkout-prod-db is available",
-      "provenance": "current",
-      "confidence": "low",
-      "time": "2026-10-04T11:10:00Z"
+      "claim": "The deployment changed one thing, the container image tag; it did not touch any configuration value.",
+      "fact_ids": ["ecs-prod-main-eu-west-1:ecs-0005"],
+      "excerpt": "changed between revision 40 and 41: 1 change (image)",
+      "provenance": "inferred",
+      "confidence": "medium",
+      "time": "2026-10-04T10:05:00Z"
     }
   ],
   "checked": [
-    "CloudTrail changes to checkout-api",
-    "ECS task definition revisions 41 and 42",
-    "application log patterns and first lines",
-    "RDS instance state and CPU"
+    "ECS deployments and task definition revisions 40 and 41",
+    "load balancer listener, certificate and target health",
+    "CloudTrail changes to checkout-api"
   ],
   "requests": [
     {
-      "collector": "rds",
-      "targets": {"db": "checkout-prod-db"},
-      "reason": "Database connection counts at one minute resolution would show whether connections dropped at 10:38"
+      "collector": "edge",
+      "targets": {"listener": "HTTPS 443"},
+      "reason": "Other certificates on the listener would show whether a second one is about to expire"
     }
   ]
 }

@@ -105,7 +105,7 @@ The check never stops at the first problem: a refused finding lists every reason
 `valid=<n> rejected=<n> unreadable=<n> requests=<n>` and exits 0 whatever it refused, so read `findings/checked.json`. A refused finding is not evidence and cannot be cited.
 
 Excerpt rules, as enforced. Before any comparison the excerpt is trimmed and each run of whitespace becomes one space; comparison is case-sensitive.
-The text a finding may quote, from one cited fact, is its `summary`, its `excerpt`, and every string in `data`, except strings under `asked`.
+The text a finding may quote, from one cited fact, is its `summary`, its `excerpt`, and every string in `data`, except strings under `asked`. The judge is shown what a finding quotes, so quote the words that prove the claim, not a nearby heading.
 
 | Rule | Message | What to do |
 | --- | --- | --- |
@@ -193,14 +193,14 @@ before = write it before judging; after = set it from `judgments/summary.json` o
 | `actions[].title` | yes | Non-empty text | before |
 | `actions[].target` | yes | Object | before |
 | `actions[].target.account_alias` | yes | Non-empty text; an account alias of the config | before |
-| `actions[].target.account_id` | yes | Text; may be empty. Use the 12-digit id of that alias. | before |
+| `actions[].target.account_id` | yes | Text; the key must be present. Fill it from the evidence whenever a fact holds it: the 12 digits inside any ARN, which appear in a fact's `command` (for example after `--listener-arn`). An empty value is accepted. | before |
 | `actions[].target.region` | yes | Non-empty text | before |
 | `actions[].target.service` | yes | Non-empty text | before |
 | `actions[].target.resource_id` | yes | Non-empty text | before |
-| `actions[].target.arn` | yes | Text; may be empty | before |
+| `actions[].target.arn` | yes | Text; the key must be present. Fill it from the evidence whenever a fact holds it, in its `summary`, `data`, or `command` (`--certificate-arn`, `--listener-arn`, `--load-balancer-arn`). An empty value is accepted. | before |
 | `actions[].current_state` | yes | Non-empty text | before |
 | `actions[].required_state` | yes | Non-empty text | before |
-| `actions[].change` | yes | Non-empty text: the exact change | before |
+| `actions[].change` | yes | Non-empty text: the exact change. Judging rates how specific an action is from `title`, `target`, `current_state`, `required_state`, `change` as written, so an empty `account_id` or `arn` leaves that rating less to go on. | before |
 | `actions[].rationale` | yes | Non-empty text | before |
 | `actions[].finding_ids` | yes | List of finding ids with at least one valid | before |
 | `actions[].risk` | yes | Non-empty text | before |
@@ -278,6 +278,9 @@ It writes `judgments/summary.json` and one `judgments/<nnn>-<kind>.json` per que
 | `draft_digest` | Ties the summary to the draft (section 7) |
 
 A finding verdict: relation `supports` with confidence at least 0.8 is `verified`; `contradicts` at least 0.6 is `contradicted`; `says_nothing` at least 0.8 is `unsupported`; anything else is `uncertain`.
+A verdict answers one question: whether the evidence a finding cites supports that finding's own claim. It does not say whether the finding helps or hurts a cause.
+Which way a finding counts for a cause is decided only by which list of the cause it stands on in `report.json`, `supporting` or `contradicting`.
+A finding that rules a cause out is `verified` (its relation is `supports`: its evidence supports its own claim) and still counts against the cause it is listed under as `contradicting`.
 Only the first 40 findings are judged, contradicting ones first; the rest are `uncertain` and not asked.
 
 | Threshold | Value | Constant |
@@ -440,5 +443,3 @@ A 12-digit number in the report that is not a configured account id is an audit 
 | Nesting depth of `report.json` | 50 | `report.MAX_DEPTH` |
 | Actions named in the Slack message | 3 | `publish.SLACK_ACTION_LIMIT` |
 | Characters of the Slack message | 1500 | `publish.SLACK_LIMIT` |
-| Lowest score levels of a `score` question | 2 | `questions.SCORE_LEVELS_MIN` |
-| Highest score levels of a `score` question | 10 | `questions.SCORE_LEVELS_MAX` |
