@@ -392,7 +392,7 @@ def test_a_repeated_name_is_planned_once(config):
 
 def test_a_duplicate_evidence_file_name_is_an_error(config, monkeypatch):
     import triage.collection_plan as module
-    monkeypatch.setattr(module, "_suffix_for", lambda name: "same")
+    monkeypatch.setattr(module, "_suffix_for", lambda *args: "same")
     with pytest.raises(CaseError) as caught:
         plan({"lambda_functions": ["a", "b"]}, config)
     assert "same evidence file" in str(caught.value)
@@ -431,3 +431,58 @@ def test_every_planned_command_is_accepted_by_the_guard_and_the_parsers(config):
             collect._build_parser().parse_args(command.argv[2:])
         else:
             opensearch_query._build_parser().parse_args(command.argv[2:])
+
+
+# fix round 3
+
+def stems(commands):
+    return [c.argv[2] + "|" + option(c, "--suffix").lower() for c in commands if c.tool == "collect.py" and "--suffix=" in " ".join(c.argv)]
+
+
+@pytest.mark.parametrize("names", [["Orders", "orders"], ["orders", "Orders"], ["ORDERS", "Orders", "orders"]])
+def test_names_that_differ_only_in_case_get_distinct_files_ignoring_case(config, names):
+    import hashlib
+    commands = named(plan({"dynamodb_tables": names}, config), "dynamodb")
+    assert len(commands) == len(names)
+    assert len(set(stems(commands))) == len(names)
+    upper = next(c for c, n in zip(commands, names) if n == "Orders")
+    assert option(upper, "--suffix") == "Orders-" + hashlib.sha256(b"Orders").hexdigest()[:6]
+
+
+def test_a_lower_case_name_keeps_its_plain_suffix(config):
+    assert option(one(plan({"dynamodb_tables": ["orders"]}, config), "dynamodb"), "--suffix") == "orders"
+
+
+def test_a_case_insensitive_duplicate_is_an_error(config, monkeypatch):
+    import triage.collection_plan as module
+    monkeypatch.setattr(module, "_suffix_for", lambda *args: "Same" if args[0] == "a" else "same")
+    with pytest.raises(CaseError):
+        plan({"lambda_functions": ["a", "b"]}, config)
+
+
+@pytest.mark.parametrize("length", [190, 200, 254, 300])
+def test_a_long_name_is_cut_so_the_evidence_file_name_fits(config, length):
+    import hashlib
+    name = "a" * (length - 1) + "."
+    command = one(plan({"dynamodb_tables": [name]}, config), "dynamodb")
+    suffix = option(command, "--suffix")
+    stem = "-".join(["dynamodb", "prod-main", "eu-west-1", suffix]) + ".json"
+    assert len(stem.encode()) <= 200
+    if length > 150:
+        assert suffix.endswith("-" + hashlib.sha256(name.encode()).hexdigest()[:6])
+
+
+def test_two_long_names_with_the_same_start_stay_distinct(config):
+    names = ["a" * 300 + "x", "a" * 300 + "y"]
+    commands = named(plan({"lambda_functions": names}, config), "lambda")
+    assert len({option(c, "--suffix") for c in commands}) == 2
+
+
+def test_long_names_are_still_accepted_by_the_guard_and_parser(config):
+    import collect
+    from triage.guard import context_from_config, decide
+    from triage.verdict import ALLOW
+    context = context_from_config(config, SKILL_DIR)
+    for command in named(plan({"dynamodb_tables": ["A" * 400, "b" * 400]}, config), "dynamodb"):
+        assert decide(command.shell(), context).kind == ALLOW
+        collect._build_parser().parse_args(command.argv[2:])

@@ -481,3 +481,27 @@ def test_angle_brackets_in_incident_text_are_escaped(cases_config, service_map, 
     line = next(l for l in text.splitlines() if l.startswith("- Title: "))
     assert line == "- Title: &lt;!-- hide &lt;b&gt;x&lt;/b&gt; &gt; y"
     assert "<!--" not in text
+
+
+# fix round 3
+
+@pytest.mark.parametrize("fill", ["<", ">", "&", "x"])
+def test_the_caps_count_the_text_as_written(cases_config, service_map, skill_dir, fill):
+    text = case_md_values(cases_config, service_map, skill_dir, title=fill * 5000, url="https://oneuptime.example.com/" + fill * 9000)
+    for label, cap in (("- Title: ", 300), ("- URL: ", 2000)):
+        line = next(l for l in text.splitlines() if l.startswith(label))
+        assert len(line) - len(label) <= cap + len(" (cut)"), (label, len(line))
+        assert line.endswith(" (cut)")
+
+
+def test_a_cut_never_splits_an_entity(cases_config, service_map, skill_dir):
+    for pad in range(5):  # one case per pad; five run names exist per second
+        text = case_md_values(cases_config, service_map, skill_dir, title="A" * pad + "<" * 400)
+        line = next(l for l in text.splitlines() if l.startswith("- Title: "))
+        body = line[len("- Title: "):-len(" (cut)")]
+        assert body.replace("&lt;", "").replace("A", "") == ""
+
+
+def test_a_value_within_the_cap_after_escaping_is_not_cut(cases_config, service_map, skill_dir):
+    text = case_md_values(cases_config, service_map, skill_dir, title="<" * 75)
+    assert "(cut)" not in text

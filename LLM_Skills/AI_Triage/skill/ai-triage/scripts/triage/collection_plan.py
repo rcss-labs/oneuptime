@@ -35,14 +35,24 @@ _SUFFIX_CLEANER = re.compile(r"[^A-Za-z0-9-]")
 FILTER_KEY_RE = re.compile(r"[A-Za-z_@][A-Za-z0-9_.@-]*")
 
 
-def _suffix_for(name: str) -> str:
-    """A file name suffix for a resource. A name that cleaning would change gets a short hash of the raw name,
-    so that two names that clean to the same text still write different evidence files."""
+MAX_FILE_NAME_BYTES = 200
+EVIDENCE_EXTENSION = ".json"
+HASH_LENGTH = 6
+
+
+def _suffix_for(name: str, budget: int) -> str:
+    """A file name suffix of at most `budget` characters for a resource.
+
+    A name that cleaning would change, that has an upper-case letter (volumes that ignore case would merge it
+    with its lower-case twin), or that is too long gets a short hash of the raw name, so that two names that
+    clean to the same text still write different evidence files."""
     cleaned = _SUFFIX_CLEANER.sub("", name)
-    if cleaned == name:
+    if cleaned == name and name == name.lower() and len(name) <= budget:
         return name
-    digest = hashlib.sha256(name.encode()).hexdigest()[:6]
-    return f"{cleaned}-{digest}" if cleaned else digest
+    digest = hashlib.sha256(name.encode()).hexdigest()[:HASH_LENGTH]
+    room = budget - HASH_LENGTH - 1
+    kept = cleaned[:room].rstrip("-") if room > 0 else ""
+    return f"{kept}-{digest}" if kept else digest
 
 
 @dataclass(frozen=True)
@@ -69,8 +79,13 @@ class _Planner:
         self.commands: list[PlannedCommand] = []
         self.evidence_files: set[tuple[str, str, str]] = set()
 
+    def suffix_budget(self, collector: str) -> int:
+        """How many characters of suffix keep the evidence file name within MAX_FILE_NAME_BYTES."""
+        stem = "-".join(_SUFFIX_CLEANER.sub("", part) for part in (collector, self.account, self.region))
+        return MAX_FILE_NAME_BYTES - len(EVIDENCE_EXTENSION) - len(stem) - 1
+
     def _claim_file(self, name: str, scope: str, suffix: str) -> None:
-        identity = (name, scope, _SUFFIX_CLEANER.sub("", suffix))
+        identity = (name.lower(), scope.lower(), _SUFFIX_CLEANER.sub("", suffix).lower())
         if identity in self.evidence_files:
             raise CaseError([f"{name} with suffix '{suffix}' would write the same evidence file as another planned command"])
         self.evidence_files.add(identity)
@@ -153,8 +168,9 @@ def _plan_each(p: _Planner, key: str, collector: str, target_key: str, reason: s
     if items is None:
         p.skip(key, "must be a list of names")
         return
+    budget = p.suffix_budget(collector)
     for item in dict.fromkeys(items):
-        p.collect(collector, {target_key: item}, reason, suffix=_suffix_for(item))
+        p.collect(collector, {target_key: item}, reason, suffix=_suffix_for(item, budget))
 
 
 def _plan_eks(p: _Planner, value: Any) -> None:

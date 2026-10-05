@@ -256,16 +256,26 @@ def save_case(case_dir: Path, case: dict) -> None:
         raise CaseError([f"{case_dir}: cannot write the case ({error.strerror or error})"]) from error
 
 
+_ENTITIES = {"<": "&lt;", ">": "&gt;"}
+
+
 def _line(value: Any, limit: int = MAX_TEXT) -> str:
-    """One bounded line of text. A leading Markdown marker is escaped and angle brackets are written as
-    entities, so that a value can neither start a block nor open a tag or comment."""
+    """One bounded line of text, at most `limit` characters as written (entities included) plus a " (cut)" mark.
+    A leading Markdown marker is escaped and angle brackets are written as entities, so that a value can neither
+    start a block nor open a tag or comment."""
     text = _WHITESPACE_RE.sub(" ", str(value)).strip()
-    if len(text) > limit:
-        text = text[:limit] + " (cut)"
-    text = text.replace("<", "&lt;").replace(">", "&gt;")
     if text.startswith(_MARKER_START):
-        return "\\" + text
-    return _LEADING_NUMBER_RE.sub(r"\1\\.", text, count=1) if _LEADING_NUMBER_RE.match(text) else text
+        text = "\\" + text
+    elif _LEADING_NUMBER_RE.match(text):
+        text = _LEADING_NUMBER_RE.sub(r"\1\\.", text, count=1)
+    pieces, used = [], 0
+    for index, char in enumerate(text):
+        piece = _ENTITIES.get(char, char)
+        if used + len(piece) > limit:
+            return "".join(pieces) + " (cut)"
+        pieces.append(piece)
+        used += len(piece)
+    return "".join(pieces)
 
 
 def _bullets(pairs: list[tuple[str, Any]], limits: dict[str, int] | None = None) -> str:
