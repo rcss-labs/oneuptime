@@ -371,3 +371,30 @@ def test_asked_lists_items_only_for_targets_the_collector_declares_as_lists(skil
     asked = json.loads(next((case / "evidence").iterdir()).read_text())["asked"]
     assert asked["targets"] == {"groups": "/aws/a", "pattern": "ERROR, timeout"}
     assert asked["target_items"] == {"groups": ["/aws/a"]}
+
+
+def test_replay_evidence_file_is_marked_and_the_banner_is_printed(skill_dir, replay_dir, tmp_path, fake_collector, no_real_calls, capsys):
+    case = tmp_path / "case"
+    assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case))) == 0
+    assert "REPLAY" in capsys.readouterr().err
+    document = json.loads(next((case / "evidence").iterdir()).read_text())
+    assert document["replay"] is True
+
+
+def test_live_evidence_file_has_no_replay_mark(skill_dir, fake_collector, tmp_path, monkeypatch):
+    monkeypatch.delenv("AI_TRIAGE_FIXTURES", raising=False)
+    case = tmp_path / "case"
+    assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case)), runner=FakeAws({})) == 0
+    assert "replay" not in json.loads(next((case / "evidence").iterdir()).read_text())
+
+
+def test_list_shows_optional_targets(monkeypatch, capsys):
+    entry = Collector("logs", "Log lines", ("log_groups",), ("pattern",), lambda ctx, targets: None)
+    bare = Collector("changes", "Recent changes", (), ("resource_names", "stack"), lambda ctx, targets: None)
+    monkeypatch.setattr(collect, "all_collectors", lambda: {"logs": entry, "changes": bare})
+    assert collect.main(["--list"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    logs_line = next(line for line in lines if line.startswith("logs"))
+    changes_line = next(line for line in lines if line.startswith("changes"))
+    assert "log_groups" in logs_line and "optional: pattern" in logs_line
+    assert "optional: resource_names, stack" in changes_line

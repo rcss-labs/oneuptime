@@ -26,8 +26,9 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 
 def _list_line(collector: Collector) -> str:
     keys = ",".join(collector.required) or "-"
+    optional = f"  optional: {', '.join(collector.optional)}" if collector.optional else ""
     one_of = f"  one of: {', '.join(collector.one_of)}" if collector.one_of else ""
-    return f"{collector.name}  {keys}{one_of}  {collector.description}"
+    return f"{collector.name}  {keys}{optional}{one_of}  {collector.description}"
 
 
 def _parse_targets(pairs: list[str]) -> tuple[dict[str, str], list[str]] | None:
@@ -135,7 +136,7 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     allowed_regions = (*account.regions, GLOBAL_REGION) if GLOBAL_REGION not in account.regions else account.regions
     if region not in allowed_regions:
         return _fail(f"region {region} is not allowed for {account.alias}; use one of: {', '.join(allowed_regions)}", 2)
-    evidence = Evidence(collector.name, account.alias, region, window)
+    evidence = Evidence(collector.name, account.alias, region, window, replay=replay is not None)
     evidence.set_asked(dict(targets), {"start": args.start, "end": args.end}, _asked_items(collector, targets))
     if args.case_dir and evidence.path_for(args.case_dir, args.suffix).exists():
         existing = evidence.path_for(args.case_dir, args.suffix)

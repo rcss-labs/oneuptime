@@ -137,7 +137,10 @@ def _limit_data(data: dict) -> dict:
 class Evidence:
     """Collects the facts and errors of one collector for one account and region."""
 
-    def __init__(self, collector: str, account: str, region: str, window: Window, redactor: Redactor | None = None):
+    def __init__(
+        self, collector: str, account: str, region: str, window: Window, redactor: Redactor | None = None,
+        replay: bool = False,
+    ):
         self.collector = collector
         self.account = account
         self.region = region
@@ -147,6 +150,7 @@ class Evidence:
         self.errors: list[dict] = []
         self.truncated = False
         self.asked: dict | None = None
+        self.replay = replay  # the answers came from recordings (AI_TRIAGE_FIXTURES), not live systems
 
     def add(
         self,
@@ -218,6 +222,8 @@ class Evidence:
         }
         if self.asked is not None:
             document["asked"] = self.asked
+        if self.replay:
+            document["replay"] = True
         return document
 
     def to_json(self) -> str:

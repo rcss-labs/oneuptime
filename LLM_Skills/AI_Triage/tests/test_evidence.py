@@ -298,3 +298,9 @@ def test_asked_records_raw_strings_and_declared_list_items():
         "target_items": {"log_groups": ["/aws/a"]},
         "window": {"start": "s", "end": "e"},
     }
+
+
+def test_replay_evidence_says_so_at_the_top_level():
+    evidence = make_evidence(replay=True)
+    assert evidence.to_dict()["replay"] is True
+    assert "replay" not in make_evidence().to_dict()
