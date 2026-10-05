@@ -286,12 +286,10 @@ def _secret_or_personal_name(name: str) -> bool:
 
 
 def _setting_kind(name: str) -> str | None:
-    """The kind of setting a name says it is: the last name word that names a kind decides."""
-    for part in reversed(key_components(name)):
-        kind = _KIND_OF_WORD.get(part.rstrip("0123456789"))
-        if kind:
-            return kind
-    return None
+    """The kind of setting a name says it is, from its last part only (trailing digits stripped)."""
+    parts = [part.rstrip("0123456789") for part in key_components(name)]
+    parts = [part for part in parts if part]
+    return _KIND_OF_WORD.get(parts[-1]) if parts else None
 
 
 def shown_env_value(name: str, value: Any) -> str:

@@ -611,11 +611,27 @@ def test_secret_name_shows_only_a_url_origin():
     assert not is_shown("DB_PASSWORD", "jdbc:postgresql://db.prod.example.com:5432/app")
 
 
-# Known residual shapes, stated so a change in them is noticed. Both need a decision outside this module:
-# "bind" is not a secret stem in the redactor (ruling 1 keeps the word list there), and a dictionary word
-# inside a plain lower-case path cannot be told from a directory name by its shape.
-def test_known_residual_ldap_server_bind_shows_a_single_word_as_a_host():
-    assert is_shown("LDAP_SERVER_BIND", PW)
+# A dictionary word inside a plain lower-case path cannot be told from a directory name by its shape;
+# this known residual is pinned so a change in it is noticed.
+def test_ldap_server_bind_has_no_kind_so_a_single_word_is_hidden():
+    assert not is_shown("LDAP_SERVER_BIND", PW)
+
+
+@pytest.mark.parametrize(
+    "name, value, expected_shown",
+    [
+        ("SERVER_PORT", "8080", True),
+        ("TOPIC_ARN", "arn:aws:sns:eu-west-1:111111111111:alerts", True),
+        ("DB_ARN", "arn:aws:sns:eu-west-1:111111111111:alerts", True),
+        ("DB_HOST_NAME", "db-main", True),
+        ("DB_HOST_NAME", "example.com:5432", False),  # a name, not a host; two labels fail rule 4
+        ("API_URL_PREFIX", "/v1", False),
+        ("API_URL_PREFIX", "http://api:8080", False),
+        ("DB_HOST2", "redis:6379", True),
+    ],
+)
+def test_only_the_last_name_part_decides_the_kind(name, value, expected_shown):
+    assert is_shown(name, value) == expected_shown
 
 
 def test_known_residual_dictionary_word_inside_a_path_is_shown():
