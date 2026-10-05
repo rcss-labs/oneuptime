@@ -126,6 +126,12 @@ def _decode(name: str, data: bytes) -> str:
         raise PublishError(f"{name}: not valid UTF-8 ({error.reason})") from error
 
 
+ACCEPT_VALUE_RE = re.compile(r"[0-9a-f]{64}")
+ACCEPT_VALUE_RULE = "the --accept-hits value must be 64 lower-case hex characters"
+# Account ids that may appear in these files; the Slack message and the title always use an empty set.
+ACCOUNT_ID_FILES = ("report.md", "work-order.json")
+
+
 def _hit_records(redact_hits: list, scan_hits: list) -> tuple[list[dict], list[dict]]:
     """Positions and kinds only. The redactor does not report a length, so its entries carry none."""
     redact = [{"kind": h.category, "line": h.line, "column": h.column, "length": None} for h in redact_hits]
@@ -133,8 +139,8 @@ def _hit_records(redact_hits: list, scan_hits: list) -> tuple[list[dict], list[d
     return redact, second
 
 
-def _file_entry(data: bytes, text: str) -> dict:
-    redact, second = _hit_records(audit_text(text), scan(text, frozenset()))
+def _file_entry(data: bytes, text: str, allowed_account_ids: frozenset[str]) -> dict:
+    redact, second = _hit_records(audit_text(text), scan(text, allowed_account_ids))
     return {"sha256": hashlib.sha256(data).hexdigest(), "redact_hits": redact, "scan_hits": second}
 
 
@@ -142,11 +148,30 @@ def _has_hits(entry: dict) -> bool:
     return bool(entry["redact_hits"] or entry["scan_hits"])
 
 
-def _audit(case_dir: Path, title: str | None = None, accept_hits: str | None = None) -> dict:
+def _set_digest(files: dict[str, dict]) -> str:
+    """One digest of the whole audited set: the sorted `<item name>:<item sha256>` lines."""
+    lines = sorted(f"{name}:{entry['sha256']}" for name, entry in files.items())
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def _earlier_acceptances(case_dir: Path) -> list:
+    try:
+        data = _read_regular(case_dir / "audit.json")
+        previous = json.loads(data.decode("utf-8")) if data is not None else {}
+    except (PublishError, ValueError):
+        return []
+    acceptances = previous.get("acceptances") if isinstance(previous, dict) else None
+    return acceptances if isinstance(acceptances, list) else []
+
+
+def _audit(case_dir: Path, title: str | None = None, accept_hits: str | None = None,
+           allowed_account_ids: frozenset[str] = frozenset()) -> dict:
     """Read each published file once, run both detectors on those exact bytes, and write audit.json.
 
-    --accept-hits is honoured only when every audited item that has hits has exactly that sha256.
+    --accept-hits is honoured only when it equals the set digest of everything audited.
     """
+    if accept_hits is not None and not ACCEPT_VALUE_RE.fullmatch(accept_hits):
+        raise PublishError(ACCEPT_VALUE_RULE)
     contents = {name: _regular_file_bytes(case_dir, name) for name in PUBLISHED_FILES}
     if contents["report.md"] is None:
         raise PublishError(f"report.md: file not found in {case_dir}")
@@ -156,21 +181,27 @@ def _audit(case_dir: Path, title: str | None = None, accept_hits: str | None = N
         if data is None:
             continue
         checked.append(name)
-        files[name] = _file_entry(data, _decode(name, data))
+        allowed = allowed_account_ids if name in ACCOUNT_ID_FILES else frozenset()
+        files[name] = _file_entry(data, _decode(name, data), allowed)
     if title is not None:
-        files["title"] = _file_entry(title.encode("utf-8"), title)
-    with_hits = [entry for entry in files.values() if _has_hits(entry)]
-    result = {"clean": not with_hits, "checked": checked, "files": files, "sha256": digests}
-    if with_hits and accept_hits and all(entry["sha256"] == accept_hits for entry in with_hits):
+        files["title"] = _file_entry(title.encode("utf-8"), title, frozenset())
+    with_hits = {name: entry for name, entry in files.items() if _has_hits(entry)}
+    digest = _set_digest(files)
+    acceptances = _earlier_acceptances(case_dir)
+    result = {"clean": not with_hits, "checked": checked, "files": files, "sha256": digests, "set_sha256": digest}
+    if with_hits and accept_hits == digest:
         result["accepted_by_flag"] = True
-        result["accepted_sha256"] = accept_hits
+        result["accepted_sha256"] = digest
+        acceptances.append({"set_sha256": digest, "items": {name: entry["sha256"] for name, entry in with_hits.items()}})
+    result["acceptances"] = acceptances
     _write_text(case_dir / "audit.json", json.dumps(result, indent=2) + "\n")
     return result
 
 
-def audit_case(case_dir: Path, accept_hits: str | None = None) -> dict:
+def audit_case(case_dir: Path, accept_hits: str | None = None,
+               allowed_account_ids: frozenset[str] = frozenset()) -> dict:
     """Audit every published file that exists and write audit.json. Reports positions, never values."""
-    return _audit(case_dir, accept_hits=accept_hits)
+    return _audit(case_dir, accept_hits=accept_hits, allowed_account_ids=allowed_account_ids)
 
 
 def may_proceed(result: dict) -> bool:
@@ -178,12 +209,25 @@ def may_proceed(result: dict) -> bool:
 
 
 def hit_lines(result: dict) -> list[str]:
-    """`<file>:<line>:<column> <kind>` for every hit of either detector, then the sha256 to accept."""
+    """`<file>:<line>:<column> <kind>` for every hit of either detector."""
     lines = []
     for name, entry in result["files"].items():
         for hit in entry["redact_hits"] + entry["scan_hits"]:
             lines.append(f"{name}:{hit['line']}:{hit['column']} {hit['kind']}")
     return lines
+
+
+def load_audit(case_dir: Path) -> dict:
+    """audit.json as written, read without following a link."""
+    return json.loads(_read_text(case_dir / "audit.json"))
+
+
+def read_audited(case_dir: Path, name: str, result: dict) -> str:
+    """The text of a published file, only when its bytes are the ones the audit covered."""
+    data = _regular_file_bytes(case_dir, name)
+    if data is None or hashlib.sha256(data).hexdigest() != result["sha256"].get(name):
+        raise PublishError(f"{name}: changed since it was audited")
+    return _decode(name, data)
 
 
 def page_title(case: dict) -> str:
@@ -194,9 +238,8 @@ def page_title(case: dict) -> str:
 
 
 def _refusal(result: dict) -> str:
-    digests = sorted({entry["sha256"] for entry in result["files"].values() if _has_hits(entry)})
     return ("the audit found secrets, nothing is prepared: " + "; ".join(hit_lines(result))
-            + "; sha256 of the audited bytes: " + ", ".join(digests))
+            + "; set sha256 of the audited items: " + result["set_sha256"])
 
 
 def _recorded_page(case: dict) -> dict | None:
@@ -229,13 +272,17 @@ def previous_page(case_dir: Path) -> dict | None:
     return None
 
 
+def configured_account_ids(config: TriageConfig) -> frozenset[str]:
+    return frozenset(account.account_id for account in config.accounts.values())
+
+
 def confluence_request(case_dir: Path, config: TriageConfig, accept_hits: str | None = None) -> dict:
     """Audit the files and the title now, and return the request only when the audit is clean.
 
     Nothing is trusted from an earlier audit: the request carries the sha256 of the report bytes audited here.
     """
     title = page_title(_load_case_file(case_dir))
-    result = _audit(case_dir, title, accept_hits)
+    result = _audit(case_dir, title, accept_hits, configured_account_ids(config))
     if not may_proceed(result):
         raise PublishError(_refusal(result))
     return {

@@ -15,9 +15,12 @@ from triage.config import ConfigError, default_config_path, load_config
 from triage.publish import (
     PublishError,
     audit_case,
+    configured_account_ids,
     confluence_request,
     hit_lines,
+    load_audit,
     may_proceed,
+    read_audited,
     record_confluence,
     record_slack,
     slack_message,
@@ -28,16 +31,16 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="publish", description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(prog="publish", description=__doc__.split("\n\n")[0], allow_abbrev=False)
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="subcommand", required=True, metavar="SUBCOMMAND")
 
     def add_accept(child: argparse.ArgumentParser) -> None:
         child.add_argument("--accept-hits", metavar="SHA256", default=None,
-                           help="engineer only: proceed past audit hits in exactly the bytes with this sha256")
+                           help="engineer only: proceed past audit hits when this is the set sha256 the refusal printed")
 
     def add(name: str, help_text: str, aliases: tuple[str, ...] = ()) -> argparse.ArgumentParser:
-        child = sub.add_parser(name, help=help_text, description=help_text, aliases=list(aliases))
+        child = sub.add_parser(name, help=help_text, description=help_text, aliases=list(aliases), allow_abbrev=False)
         child.add_argument("--skill-dir", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         child.add_argument("--case-dir", type=Path, required=True)
         return child
@@ -70,34 +73,50 @@ def _print_audit(result: dict, stream) -> None:
         print(line, file=stream)
 
 
+def _print_refusal(result: dict) -> None:
+    _print_audit(result, sys.stderr)
+    print(f"set sha256 of the audited items: {result['set_sha256']}", file=sys.stderr)
+
+
 def _note_accepted(result: dict) -> None:
     if result.get("accepted_by_flag"):
         print("accepted by --accept-hits; hits at:", file=sys.stderr)
         _print_audit(result, sys.stderr)
 
 
+def _account_ids(args: argparse.Namespace) -> frozenset[str]:
+    return configured_account_ids(load_config(default_config_path(args.skill_dir)))
+
+
 def _audit(args: argparse.Namespace) -> int:
-    result = audit_case(args.case_dir)
+    result = audit_case(args.case_dir, allowed_account_ids=_account_ids(args))
     _print_audit(result, sys.stdout)
+    if not result["clean"]:
+        _print_refusal_digest(result)
     return 0 if result["clean"] else 1
+
+
+def _print_refusal_digest(result: dict) -> None:
+    print(f"set sha256 of the audited items: {result['set_sha256']}", file=sys.stderr)
 
 
 def _confluence(args: argparse.Namespace) -> int:
     config = load_config(default_config_path(args.skill_dir))
     request = confluence_request(args.case_dir, config, args.accept_hits)
-    _note_accepted(json.loads((args.case_dir / "audit.json").read_text()))
+    _note_accepted(load_audit(args.case_dir))
     print(json.dumps(request, indent=2))
     return 0
 
 
 def _slack_message(args: argparse.Namespace) -> int:
-    message = slack_message(args.case_dir, args.confluence_url)
-    result = audit_case(args.case_dir, args.accept_hits)
+    account_ids = _account_ids(args)
+    slack_message(args.case_dir, args.confluence_url)
+    result = audit_case(args.case_dir, args.accept_hits, account_ids)
     if not may_proceed(result):
-        _print_audit(result, sys.stderr)
+        _print_refusal(result)
         return 1
     _note_accepted(result)
-    print(message)
+    print(read_audited(args.case_dir, "slack-message.md", result))
     return 0
 
 

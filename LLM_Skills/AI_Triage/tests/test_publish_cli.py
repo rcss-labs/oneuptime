@@ -170,9 +170,13 @@ def test_audit_through_a_link_at_audit_json_exits_one(skill_dir, case_dir, tmp_p
     assert outside.read_text() == "keep"
 
 
-def _digest(path):
+def _set_digest(case_dir, names):
     import hashlib
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    lines = sorted(f"{name}:{hashlib.sha256((case_dir / name).read_bytes()).hexdigest()}" for name in names)
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+
+PLANTED = {"report.md": "a\nvalue " + HIGH_ENTROPY + "\n"}
 
 
 def test_no_output_or_audit_json_holds_either_half_of_a_planted_token(skill_dir, case_dir):
@@ -188,12 +192,23 @@ def test_no_output_or_audit_json_holds_either_half_of_a_planted_token(skill_dir,
     assert "report.md:2:7 entropy" in joined
 
 
-def test_confluence_proceeds_with_the_matching_accept_hits_flag(skill_dir, case_dir):
+def test_both_refusals_print_the_set_digest(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
-    digest = _digest(case_dir / "report.md")
+    slack = run(skill_dir, "slack-message", "--case-dir", str(case_dir))
+    digest = _set_digest(case_dir, ("report.md", "work-order.json", "slack-message.md"))
+    assert slack.returncode == 1 and digest in slack.stderr
+    confluence = run(skill_dir, "confluence", "--case-dir", str(case_dir))
+    assert confluence.returncode == 1 and "sha256" in confluence.stderr
+    audit = json.loads((case_dir / "audit.json").read_text())
+    assert confluence.stderr.strip().endswith(audit["set_sha256"])
+
+
+def test_confluence_proceeds_with_the_set_digest(skill_dir, case_dir):
+    (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    refused = run(skill_dir, "confluence", "--case-dir", str(case_dir))
+    digest = refused.stderr.strip().split()[-1]
     result = run(skill_dir, "confluence", "--case-dir", str(case_dir), f"--accept-hits={digest}")
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["body_sha256"] == digest
     assert "report.md:2:7 entropy" in result.stderr and HIGH_ENTROPY[:14] not in result.stderr
     assert json.loads((case_dir / "audit.json").read_text())["accepted_by_flag"] is True
 
@@ -204,11 +219,39 @@ def test_the_confluence_request_alias_works_and_a_wrong_flag_refuses(skill_dir, 
     assert result.returncode == 1 and result.stdout == ""
 
 
-def test_slack_message_proceeds_with_the_matching_accept_hits_flag(skill_dir, case_dir):
+def test_slack_message_proceeds_with_the_set_digest_and_prints_the_audited_bytes(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
     refused = run(skill_dir, "slack-message", "--case-dir", str(case_dir), "--accept-hits=" + "0" * 64)
     assert refused.returncode == 1 and refused.stdout == ""
-    digest = _digest(case_dir / "report.md")
+    digest = _set_digest(case_dir, ("report.md", "work-order.json", "slack-message.md"))
     result = run(skill_dir, "slack-message", "--case-dir", str(case_dir), f"--accept-hits={digest}")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.startswith("INC-123:") and "report.md:2:7 entropy" in result.stderr
+    assert result.stdout == (case_dir / "slack-message.md").read_text() + "\n"
+    assert "report.md:2:7 entropy" in result.stderr
+
+
+@pytest.mark.parametrize("flag", ["--acc", "--accept", "--accept-h"])
+@pytest.mark.parametrize("subcommand", ["confluence", "slack-message"])
+def test_abbreviated_override_flags_are_errors(skill_dir, case_dir, flag, subcommand):
+    (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    result = run(skill_dir, subcommand, "--case-dir", str(case_dir), f"{flag}={'0' * 64}")
+    assert result.returncode == 2 and "unrecognized" in result.stderr
+    assert result.stdout == ""
+
+
+def test_an_abbreviated_case_dir_is_an_error_too(skill_dir, case_dir):
+    result = run(skill_dir, "audit", "--case", str(case_dir))
+    assert result.returncode == 2
+
+
+def test_a_malformed_accept_value_says_why(skill_dir, case_dir):
+    (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    result = run(skill_dir, "confluence", "--case-dir", str(case_dir), "--accept-hits=" + "A" * 64)
+    assert result.returncode == 1 and "64 lower-case hex" in result.stderr
+
+
+def test_a_configured_account_id_passes_in_the_report_but_not_an_unconfigured_one(skill_dir, case_dir):
+    (case_dir / "report.md").write_text("- Account: prod (" + "1" * 12 + ")\n")
+    assert run(skill_dir, "audit", "--case-dir", str(case_dir)).returncode == 0
+    (case_dir / "report.md").write_text("- Account: other (" + "333" * 4 + ")\n")
+    assert run(skill_dir, "audit", "--case-dir", str(case_dir)).returncode == 1

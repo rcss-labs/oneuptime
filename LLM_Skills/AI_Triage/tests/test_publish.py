@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -166,27 +167,62 @@ def test_an_ordinary_report_passes_both_detectors_through_the_gate(run_dir, conf
 
 # accept_hits
 
+def set_digest(run_dir, names):
+    lines = sorted(f"{name}:{sha(run_dir / name)}" for name in names)
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+
 def test_a_wrong_or_missing_accept_value_never_proceeds(run_dir, config):
     (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + "\n")
-    for wrong in (None, "", "0" * 64, sha(run_dir / "work-order.json")):
+    for wrong in (None, "0" * 64, sha(run_dir / "report.md")):
         with pytest.raises(PublishError):
             confluence_request(run_dir, config, accept_hits=wrong)
         assert not audit_case(run_dir, accept_hits=wrong).get("accepted_by_flag")
 
 
-def test_the_right_accept_value_proceeds_and_is_recorded(run_dir, config):
+@pytest.mark.parametrize("bad", ["", "A" * 64, " " + "a" * 64, "a" * 63, "g" * 64])
+def test_a_malformed_accept_value_is_refused_with_a_reason(run_dir, config, bad):
     (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + "\n")
-    digest = sha(run_dir / "report.md")
-    request = confluence_request(run_dir, config, accept_hits=digest)
-    audit = json.loads((run_dir / "audit.json").read_text())
-    assert request["body_sha256"] == digest
-    assert audit["accepted_by_flag"] is True and audit["accepted_sha256"] == digest
-    assert audit["clean"] is False
+    with pytest.raises(PublishError, match="64 lower-case hex"):
+        confluence_request(run_dir, config, accept_hits=bad)
+
+
+def test_the_set_digest_proceeds_and_is_recorded(run_dir, config):
+    (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + "\n")
+    digest = set_digest(run_dir, ("report.md", "work-order.json"))
+    audit = audit_case(run_dir)
+    assert audit["set_sha256"] == digest
+    with pytest.raises(PublishError, match="set sha256"):
+        confluence_request(run_dir, config)
+    # the title is part of the set on the Confluence path
+    title_digest = hashlib.sha256("\n".join(sorted([
+        f"report.md:{sha(run_dir / 'report.md')}", f"work-order.json:{sha(run_dir / 'work-order.json')}",
+        "title:" + hashlib.sha256(page_title(load_case(run_dir)).encode()).hexdigest()])).encode()).hexdigest()
+    request = confluence_request(run_dir, config, accept_hits=title_digest)
+    recorded = json.loads((run_dir / "audit.json").read_text())
+    assert request["body_sha256"] == sha(run_dir / "report.md")
+    assert recorded["accepted_by_flag"] is True and recorded["accepted_sha256"] == title_digest
+    assert recorded["clean"] is False
+
+
+def test_hits_in_two_items_are_accepted_together(cases_dir, config):
+    run = make_run(cases_dir, case=case_data(title="t " + HIGH_ENTROPY))
+    (run / "report.md").write_text("value " + HIGH_ENTROPY + "\n")
+    with pytest.raises(PublishError) as raised:
+        confluence_request(run, config)
+    digest = re.search(r"[0-9a-f]{64}$", str(raised.value)).group()
+    assert confluence_request(run, config, accept_hits=digest)["title"].startswith("INC-123")
+
+
+def test_a_digest_of_one_item_does_not_cover_the_set(run_dir, config):
+    (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + "\n")
+    with pytest.raises(PublishError):
+        confluence_request(run_dir, config, accept_hits=sha(run_dir / "report.md"))
 
 
 def test_an_accept_value_for_old_bytes_does_not_cover_new_bytes(run_dir, config):
     (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + "\n")
-    digest = sha(run_dir / "report.md")
+    digest = audit_case(run_dir)["set_sha256"]
     (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + " changed\n")
     with pytest.raises(PublishError):
         confluence_request(run_dir, config, accept_hits=digest)
@@ -195,6 +231,55 @@ def test_an_accept_value_for_old_bytes_does_not_cover_new_bytes(run_dir, config)
 def test_an_accept_value_is_ignored_when_there_are_no_hits(run_dir):
     audit = audit_case(run_dir, accept_hits="0" * 64)
     assert audit["clean"] and "accepted_by_flag" not in audit
+
+
+def test_acceptances_accumulate_across_audits(run_dir):
+    (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + "\n")
+    digest = audit_case(run_dir)["set_sha256"]
+    audit_case(run_dir, accept_hits=digest)
+    audit_case(run_dir)
+    audit_case(run_dir, accept_hits=digest)
+    recorded = json.loads((run_dir / "audit.json").read_text())
+    assert [a["set_sha256"] for a in recorded["acceptances"]] == [digest, digest]
+    assert recorded["acceptances"][0]["items"] == {"report.md": sha(run_dir / "report.md")}
+
+
+# account ids
+
+CONFIGURED = "1" * 12
+UNCONFIGURED = "333" * 4
+ALLOWED = frozenset({"1" * 12, "2" * 12})
+
+
+def test_a_configured_account_id_passes_in_the_report_and_the_work_order(run_dir):
+    (run_dir / "report.md").write_text(f"- Account: prod ({CONFIGURED})\n")
+    (run_dir / "work-order.json").write_text(json.dumps({"target": {"account_id": CONFIGURED}}))
+    assert audit_case(run_dir, allowed_account_ids=ALLOWED)["clean"]
+
+
+def test_an_unconfigured_account_id_is_a_hit(run_dir):
+    (run_dir / "report.md").write_text(f"- Account: other ({UNCONFIGURED})\n")
+    result = audit_case(run_dir, allowed_account_ids=ALLOWED)
+    assert not result["clean"] and result["files"]["report.md"]["scan_hits"][0]["kind"] == "account_id"
+
+
+def test_a_configured_account_id_in_the_slack_message_is_a_hit(cases_dir):
+    run = make_run(cases_dir, case=case_data(title=f"Down in {CONFIGURED}"))
+    slack_message(run, None)
+    result = audit_case(run, allowed_account_ids=ALLOWED)
+    assert not result["clean"] and result["files"]["slack-message.md"]["scan_hits"]
+    assert result["files"]["report.md"]["scan_hits"] == []
+
+
+def test_a_configured_account_id_in_the_title_is_a_hit(cases_dir, config):
+    run = make_run(cases_dir, case=case_data(title=f"Down in {CONFIGURED}"))
+    with pytest.raises(PublishError, match="title"):
+        confluence_request(run, config)
+
+
+def test_the_gate_allows_the_configured_ids_in_the_report(run_dir, config):
+    (run_dir / "report.md").write_text(f"- Account: prod ({CONFIGURED})\n")
+    assert confluence_request(run_dir, config)["body_sha256"] == sha(run_dir / "report.md")
 
 
 def test_audit_needs_report_md(run_dir):
