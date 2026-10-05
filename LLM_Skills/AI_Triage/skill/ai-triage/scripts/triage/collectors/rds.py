@@ -1,9 +1,13 @@
 """RDS collector: instance or cluster state, events, error log lines, metrics, Performance Insights.
 
-Log lines are masked before they enter a fact: quoted spans, row values, user names in a prefix and every run of
-three or more digits are hidden. A quoted span is kept only when it is identifier-shaped and directly follows a word
-such as relation, constraint, or column. Known limit: free text that an application raised inside the database
-(a custom error message with a name in it, unquoted) is shown as written apart from numbers.
+Log lines are masked before they enter a fact, without trying to match quotes. The prefix keeps its timestamp, pid
+and db/app/client values, and never shows a user (user=, role=, usename=, the role in user@database, MySQL
+'user'@'host'). In the message, an apostrophe in an English contraction is part of the word, and an identifier-shaped
+name quoted directly after a word such as relation, constraint or key is kept; from any other quote character, or
+dollar-quote tag, to the end of the line everything is replaced by <rest masked>. Row values on DETAIL lines are
+masked, and every run of two or more digits outside the timestamp, kept names and engine error codes becomes <n>.
+Known limit: unquoted free text that an application raised inside the database (a custom error message with a name
+in it) is shown as written apart from numbers.
 """
 from __future__ import annotations
 
@@ -28,26 +32,48 @@ CLUSTER_NOT_FOUND = ("DBClusterNotFound", "DBClusterNotFoundFault")
 LOG_LINES_TO_READ = "200"
 TOP_WAIT_EVENTS = 5
 PROBLEM_LINE = re.compile(r"ERROR|FATAL|PANIC|(?i:deadlock)|\bError:")
+SQL_SERVER_ERROR = re.compile(r"\bError: \d+, Severity:")
 MASK = "<value>"
 MAX_LOG_FILES_READ = 6
 MAX_LISTING_PAGES = 5
-LEADING_TIMESTAMP = re.compile(r"\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?")
+LEADING_TIMESTAMP = re.compile(r"\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
 FILE_HOUR = re.compile(r"(\d{4}-\d{2}-\d{2})[-.](\d{2})(?!\d)")
 FILE_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 EARLIEST = datetime.min.replace(tzinfo=timezone.utc)
+REST_MASK = "<rest masked>"
+QUOTES = "'\"`\u2018\u2019\u201c\u201d"
 DOLLAR_TAG = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
-PHONE_SHAPE = re.compile(r"\+?\d+(?:[\s._()-]+\d{2,}){2,}")
-LONG_DIGITS = re.compile(r"\d{3,}")
+CONTRACTION_END = re.compile(r"(t|s|re|ve|ll|d|m)(?![A-Za-z0-9_'\"`$\\])")
+NOT_STEMS = frozenset((
+    "can", "don", "doesn", "didn", "isn", "wasn", "weren", "aren", "won", "couldn", "wouldn", "shouldn", "hasn",
+    "haven", "hadn", "mustn", "needn",
+))
+PRONOUN_STEMS = frozenset(("i", "you", "we", "they", "he", "she", "it", "that", "there", "what", "who", "let", "here"))
+DIGIT_RUN = re.compile(r"\d{2,}")
 NUMBER_MASK = "<n>"
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.$]{0,62}")
-IDENTIFIER_WORDS = (
+IDENTIFIER_WORDS = frozenset((
     "relation", "table", "column", "constraint", "index", "schema", "database", "function", "type", "sequence",
     "view", "trigger", "key", "extension", "parameter",
+))
+WORD_BEFORE = re.compile(r"([A-Za-z0-9_.$]*)\s*$")
+ACCOUNT_KEY = re.compile(r"\b(user|role|usename)=")
+ACCOUNT_VALUE_END = re.compile(r"[,;)]|\s+[A-Za-z_]+=")
+KEPT_PREFIX_VALUE = re.compile(r"\b(?:db|app|client)=[^,\s]*|\[\d+\]|\(\d+\)|\bspid\d+s?\b")
+PREFIX_USER_AT = re.compile(r"(?<![^\s:\[\]()=,])[^\s:\[\]()@=,<>]+@")
+MYSQL_ACCOUNT = re.compile(r"'[^'\s]*'@'[^'\s]*'")
+# The fixed RDS PostgreSQL prefix %t:%r:%u@%d:[%p]: (after the timestamp): zone, client host(port), role, database, pid.
+RDS_POSTGRES_PREFIX = re.compile(
+    r"(?P<head>\s*[A-Z]{0,5}:(?:[^()\s]*\(\d+\)|[^:\s]*):)(?P<user>.*?)(?P<tail>@[^@\s]*?:\[\d+\]:)"
 )
-PRECEDING_WORD = re.compile(r"([A-Za-z]+)\s*$")
-ACCOUNT_VALUE = re.compile(r"\b(user|role|usename)=[^\s,)]+")
+SQL_SERVER_PREFIX = re.compile(r"\s+(?:spid\d+s?|[A-Z][a-z]+)\s{2,}")
+MESSAGE_MARKER = re.compile(
+    r"\b(?:LOG|ERROR|FATAL|PANIC|WARNING|NOTICE|INFO|DEBUG\d?|DETAIL|HINT|CONTEXT|STATEMENT|QUERY|LOCATION):"
+    r"|\[(?:ERROR|Warning|Note|System|Information)\]|\bError:|\bERROR \d"
+)
 ENGINE_CODE = re.compile(
-    r"MY-\d{6}|SQLSTATE[ :=\[]*\w{5}|ERROR \d{4} \(\w{5}\)|Error: \d+, Severity: \d+, State: \d+|ORA-\d{5}"
+    r"MY-\d{6}(?!\d)|SQLSTATE[ :=\[]*[0-9A-Z]{5}(?![0-9A-Za-z])|ERROR \d{4} \([0-9A-Z]{5}\)"
+    r"|Error: \d{1,6}, Severity: \d{1,6}, State: \d{1,6}(?!\d)|ORA-\d{5}(?!\d)"
 )
 LOG_TIMESTAMP = re.compile(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})")
 METRICS = (
@@ -101,57 +127,62 @@ def _add_events(ctx: CollectContext, name: str, source_type: str, noun: str) -> 
         )
 
 
-def _quoted_end(line: str, start: int) -> tuple[int | None, bool]:
-    """Index just past the quoted span that opens at line[start] (None when never closed), and whether a backslash escape was used."""
-    quote, index, escaped = line[start], start + 1, False
-    while index < len(line):
-        if line[index] == "\\" and quote != "`":
-            escaped = True
-            index += 2
-        elif line[index] == quote:
-            if line[index + 1:index + 2] == quote:
-                index += 2
-            else:
-                return index + 1, escaped
-        else:
+def _is_contraction(text: str, index: int) -> bool:
+    """An apostrophe inside an English contraction (Can't, doesn't, it's, we're). Only known stems count, so a literal
+    glued to a word (N'...', E'...', _binary'...', select'...') is never taken for one."""
+    if text[index] != "'" or text[index - 1:index].isspace():
+        return False
+    word = WORD_BEFORE.search(text[:index]).group(1).lower()
+    ending = CONTRACTION_END.match(text, index + 1)
+    if not ending:
+        return False
+    return (word in NOT_STEMS and ending.group(1) == "t") or (word in PRONOUN_STEMS and ending.group(1) != "t")
+
+
+def _kept_identifier_end(text: str, index: int) -> int | None:
+    """Index just past an identifier quoted at text[index] that may be shown, else None.
+
+    Kept only when the whole word before the quote is one of IDENTIFIER_WORDS, the span closes with the same quote
+    before any other quote character, its content is identifier-shaped, and whitespace, punctuation or the end follows.
+    """
+    quote = text[index]
+    if quote not in QUOTES or WORD_BEFORE.search(text[:index]).group(1).lower() not in IDENTIFIER_WORDS:
+        return None
+    close = next((i for i in range(index + 1, len(text)) if text[i] in QUOTES), None)
+    if close is None or text[close] != quote or not IDENTIFIER.fullmatch(text[index + 1:close]):
+        return None
+    after = text[close + 1:close + 2]
+    if after and (after.isalnum() or after in "_\\$" or after in QUOTES):
+        return None
+    return close + 1
+
+
+def _mask_quotes(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Scan left to right without matching quotes: keep contractions and kept identifiers, and replace everything from
+    any other quote character (or dollar-quote tag) to the end of the line. When such a quote follows a kept identifier,
+    the mask starts at the first kept identifier instead, because unescaped quotes inside a value can look like
+    keyword 'name' pairs. Returns the text and the kept spans."""
+    out: list[str] = []
+    kept: list[tuple[int, int]] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        is_quote = char in QUOTES or (char == "$" and DOLLAR_TAG.match(text, index))
+        if not is_quote or (char == "'" and _is_contraction(text, index)):
+            out.append(char)
             index += 1
-    return None, escaped
-
-
-def _keeps_identifier(before: str, span: str) -> bool:
-    """True for an identifier-shaped quoted name that directly follows a word like relation or constraint."""
-    word = PRECEDING_WORD.search(before)
-    return bool(word) and word.group(1).lower() in IDENTIFIER_WORDS and bool(IDENTIFIER.fullmatch(span[1:-1]))
-
-
-def _mask_quoted(line: str) -> str:
-    out, index = [], 0
-    while index < len(line):
-        char = line[index]
-        if char in "'\"`":
-            end, escaped = _quoted_end(line, index)
-            if end is not None and not escaped and _keeps_identifier("".join(out), line[index:end]):
-                out.append(line[index:end])
-                index = end
-                continue
-            if out and out[-1] in "Ee" and (len(out) == 1 or not out[-2].isalnum()) and char == "'":
-                out.pop()
-            out.append(MASK)
-            if end is None or escaped:
-                break
-            index = end
             continue
-        tag = DOLLAR_TAG.match(line, index) if char == "$" else None
-        if tag:
-            close = line.find(tag.group(0), tag.end())
-            out.append(MASK)
-            if close < 0:
-                break
-            index = close + len(tag.group(0))
-            continue
-        out.append(char)
-        index += 1
-    return "".join(out)
+        end = _kept_identifier_end(text, index)
+        if end is None:
+            if kept:
+                return text[:kept[0][0]] + REST_MASK, []
+            out.append(REST_MASK)
+            break
+        position = len("".join(out))
+        out.append(text[index:end])
+        kept.append((position, position + end - index))
+        index = end
+    return "".join(out), kept
 
 
 def _balanced_end(text: str, start: int) -> int:
@@ -180,24 +211,62 @@ def _mask_row_values(line: str) -> str:
     return _mask_last_group(line, equals + 1) if equals >= 0 else line
 
 
-def _mask_numbers(text: str) -> str:
-    """Mask phone-shaped and long digit runs, keeping engine error codes as written."""
-    pieces, position = [], 0
-    for code in ENGINE_CODE.finditer(text):
-        pieces.append(LONG_DIGITS.sub(NUMBER_MASK, PHONE_SHAPE.sub(NUMBER_MASK, text[position:code.start()])))
-        pieces.append(code.group(0))
-        position = code.end()
-    pieces.append(LONG_DIGITS.sub(NUMBER_MASK, PHONE_SHAPE.sub(NUMBER_MASK, text[position:])))
-    return "".join(pieces)
+def _mask_accounts(text: str) -> str:
+    """Mask user=, role= and usename= values up to the next separator (a quoted value up to its closing quote), quotes
+    and spaces included, and both parts of a MySQL 'user'@'host' pair."""
+    text = MYSQL_ACCOUNT.sub(f"{MASK}@{MASK}", text)
+    out, position = [], 0
+    for key in ACCOUNT_KEY.finditer(text):
+        if key.start() < position:
+            continue
+        start = key.end()
+        if text[start:start + 1] in QUOTES:
+            close = text.find(text[start], start + 1)
+            start = len(text) if close < 0 else close + 1
+        stop = ACCOUNT_VALUE_END.search(text, start)
+        end = stop.start() if stop else len(text)
+        out.append(text[position:key.end()] + MASK)
+        position = end
+    return "".join(out) + text[position:]
+
+
+def _mask_digits(text: str, kept: list[tuple[int, int]]) -> str:
+    """Replace every run of two or more digits, keeping the given spans and engine error codes as written."""
+    spans = sorted(kept + [(m.start(), m.end()) for m in ENGINE_CODE.finditer(text)])
+    out, position = [], 0
+    for start, end in spans:
+        if start < position:
+            continue
+        out.append(DIGIT_RUN.sub(NUMBER_MASK, text[position:start]) + text[start:end])
+        position = end
+    return "".join(out) + DIGIT_RUN.sub(NUMBER_MASK, text[position:])
+
+
+def _split_prefix(rest: str) -> tuple[str, str]:
+    """The line prefix (before the severity or message marker) with its account values masked, and the message."""
+    rds = RDS_POSTGRES_PREFIX.match(rest)
+    if rds:
+        user = MASK if rds.group("user") else ""
+        return rds.group("head") + user + rds.group("tail"), rest[rds.end():]
+    server = SQL_SERVER_PREFIX.match(rest)
+    if server:
+        return server.group(0), rest[server.end():]
+    marker = MESSAGE_MARKER.search(rest)
+    if not marker or any(char in QUOTES for char in rest[:marker.start()]):
+        return "", rest
+    prefix = PREFIX_USER_AT.sub(MASK + "@", _mask_accounts(rest[:marker.start()]))
+    return _mask_digits(prefix, [(m.start(), m.end()) for m in KEPT_PREFIX_VALUE.finditer(prefix)]), rest[marker.start():]
 
 
 def _mask_values(line: str) -> str:
-    """Hide data values in a log line, keeping the error text, identifiers after known words, and the leading timestamp."""
+    """Hide data values in a log line: the prefix keeps its timestamp, pid and db/app/client values but never a user;
+    the message keeps contractions and identifiers after known words, and masks the rest of the line from any other
+    quote; then every run of two or more digits is masked apart from engine error codes."""
     stamp = LEADING_TIMESTAMP.match(line)
     head, rest = (line[:stamp.end()], line[stamp.end():]) if stamp else ("", line)
-    rest = ACCOUNT_VALUE.sub(lambda match: f"{match.group(1)}={MASK}", rest)
-    rest = _mask_row_values(_mask_quoted(rest))
-    return head + _mask_numbers(rest)
+    prefix, message = _split_prefix(rest)
+    message, kept = _mask_quotes(_mask_row_values(_mask_accounts(message)))
+    return head + prefix + _mask_digits(message, kept)
 
 
 def _error_files(files: list[dict]) -> list[dict]:
@@ -309,7 +378,7 @@ def _add_log_lines(ctx: CollectContext, name: str) -> None:
             if PROBLEM_LINE.search(line) and moment is not None and ctx.window.start <= moment < ctx.window.end:
                 previous_kept = (moment, file_name, line)
                 inside.append(previous_kept)
-            elif previous_kept is not None and "DETAIL:" in line:
+            elif previous_kept is not None and ("DETAIL:" in line or SQL_SERVER_ERROR.search(previous_kept[2])):
                 inside.append((moment or previous_kept[0], file_name, line))
                 previous_kept = None
             else:

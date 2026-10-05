@@ -258,7 +258,8 @@ def test_a_date_only_name_covers_that_day_and_an_old_date_does_not(config_data, 
 def test_sql_server_error_log_and_its_error_lines(config_data, tmp_path):
     files = [{"LogFileName": "log/ERROR", "LastWritten": WINDOW_START_MILLIS + 6 * 3_600_000, "Size": 1}]
     line = "2026-10-04 10:30:00.12 Logon       Error: 18456, Severity: 14, State: 8."
-    ctx, aws = run(config_data, tmp_path, log_answers(files, line + "\n2026-10-04 10:31:00.12 Server      Started"))
+    message = "2026-10-04 10:30:00.12 Logon       Login failed for user <hidden>."
+    ctx, aws = run(config_data, tmp_path, log_answers(files, line + "\n" + message + "\n2026-10-04 10:31:00.12 Server      Started"))
     assert downloaded(aws) == ["log/ERROR"]
     facts = [f for f in ctx.evidence.facts if "Error: 18456" in f.excerpt]
     assert len(facts) == 1 and "Severity: 14, State: 8" in facts[0].excerpt and "Started" not in ctx.evidence.to_json()
@@ -302,7 +303,7 @@ def test_log_lines_are_capped_at_twenty(config_data, tmp_path):
     data = "\n".join(f"2026-10-04 10:{n:02d}:00 UTC::@:[1]:ERROR:  failure {n}" for n in range(30))
     ctx, _ = run(config_data, tmp_path, log_answers(files, data))
     lines = [f for f in ctx.evidence.facts if "failure" in f.excerpt]
-    assert len(lines) == 20 and "failure 29" in lines[-1].excerpt
+    assert len(lines) == 20 and lines[-1].time == "2026-10-04T10:29:00Z"
 
 
 def test_data_values_never_reach_a_log_fact(config_data, tmp_path):
@@ -319,44 +320,79 @@ def test_data_values_never_reach_a_log_fact(config_data, tmp_path):
 
 
 BACKSLASH = "\\"
+REST = "<rest masked>"
+PERSON = "Ada" + " Love" + "lace"
+ROLE = "ada" + "." + "love" + "lace"
+EMAIL = "ada" + "@" + "example.com"
 
 
-def test_mask_values_hides_single_quoted_strings():
-    assert _mask_values("ERROR: INSERT INTO t (a, b) VALUES ('x y', 'it''s') failed") == "ERROR: INSERT INTO t (a, b) VALUES (<value>, <value>) failed"
-
-
-def test_a_backslash_escape_masks_the_rest_of_the_line_after_the_span_starts():
-    mysql = "ERROR: Duplicate entry 'O" + BACKSLASH + "'Brien-" + "5550" + "199' for key 'users.name'"
-    assert _mask_values(mysql) == "ERROR: Duplicate entry <value>"
-    name = "Ada" + " Lovelace"
-    standard = "ERROR: VALUES ('C:" + BACKSLASH + "dir" + BACKSLASH + "', '" + name + "', 'z')"
-    masked = _mask_values(standard)
-    assert name not in masked and masked == "ERROR: VALUES (<value>"
-
-
-def test_mask_values_hides_the_escape_string_form():
-    line = "ERROR: bad literal E'123-45-" + BACKSLASH + "'67" + "89' near"
-    assert _mask_values(line) == "ERROR: bad literal <value>"
-
-
-def test_mask_values_hides_double_quoted_values():
-    assert _mask_values('ERROR:  invalid input syntax for type integer: "' + "4111" * 4 + '"') == "ERROR:  invalid input syntax for type integer: <value>"
-    assert _mask_values('ERROR: value "a ""quoted"" one" and "c" end') == "ERROR: value <value> and <value> end"
-
-
-def test_mask_values_hides_backtick_quoted_text():
-    assert _mask_values("ERROR: unknown thing `secret col` in table") == "ERROR: unknown thing <value> in table"
-
-
-def test_mask_values_hides_dollar_quoted_strings():
-    line = "ERROR: near $$Dollar Secret Value$$, $tag$tagged Value$tag$ and more"
-    assert _mask_values(line) == "ERROR: near <value>, <value> and more"
+def test_any_quote_that_does_not_open_a_kept_identifier_masks_the_rest_of_the_line():
+    assert _mask_values("ERROR: INSERT INTO t (a, b) VALUES ('x y', 'it''s') failed") == "ERROR: INSERT INTO t (a, b) VALUES (" + REST
+    assert _mask_values('ERROR:  invalid input syntax for type integer: "' + "4111" * 4 + '"') == "ERROR:  invalid input syntax for type integer: " + REST
+    assert _mask_values("ERROR: unknown thing `secret col` in table") == "ERROR: unknown thing " + REST
+    assert _mask_values("ERROR: near $$Dollar Secret Value$$ and more") == "ERROR: near " + REST
+    assert _mask_values("ERROR: near $tag$tagged Value$tag$ and more") == "ERROR: near " + REST
     assert _mask_values("ERROR: near $1 and $2") == "ERROR: near $1 and $2"
+    assert _mask_values("ERROR: syntax error near 'secret value") == "ERROR: syntax error near " + REST
+    assert _mask_values("ERROR: near \u2018secret value\u2019 x") == "ERROR: near " + REST
 
 
-def test_mask_values_masks_an_unterminated_quote_to_the_end_of_the_line():
-    assert _mask_values("ERROR: syntax error near 'secret value") == "ERROR: syntax error near <value>"
-    assert _mask_values('ERROR: near "secret value') == "ERROR: near <value>"
+def test_backslashes_and_escape_strings_mask_the_rest_of_the_line():
+    mysql = "ERROR: Duplicate entry 'O" + BACKSLASH + "'Brien-" + "5550" + "199' for key 'users.name'"
+    assert _mask_values(mysql) == "ERROR: Duplicate entry " + REST
+    standard = "ERROR: VALUES ('C:" + BACKSLASH + "dir" + BACKSLASH + "', '" + PERSON + "', 'z')"
+    assert _mask_values(standard) == "ERROR: VALUES (" + REST
+    assert _mask_values("ERROR: bad literal E'123-45-" + BACKSLASH + "'67" + "89' near") == "ERROR: bad literal E" + REST
+
+
+def test_literal_prefixes_glued_to_a_quote_never_pass_as_contractions():
+    for prefix in ("N", "E", "X", "B", "_binary", "_utf8mb4", "U&", "n"):
+        masked = _mask_values(f"ERROR: VALUES ({prefix}'{PERSON}', 1)")
+        assert masked == f"ERROR: VALUES ({prefix}" + REST, prefix
+    assert _mask_values(f"ERROR: VALUES (N's {PERSON}')") == "ERROR: VALUES (N" + REST
+
+
+def test_the_mysql_statement_form_replica_error_shows_nothing_after_the_first_unkept_quote():
+    first, last, value = "Ada", "Love" + "lace", "ada" + "_l"
+    line = (
+        "2026-10-04T10:05:00.123456Z 12 [ERROR] [MY-010584] [Repl] Replica SQL for channel '': Error 'Duplicate entry '"
+        + value + "' for key 'users.email'' on query. Default database: 'shop'. Query: 'INSERT INTO users VALUES ('"
+        + first + "', '" + last + "')', Error_code: MY-001062"
+    )
+    masked = _mask_values(line)
+    assert masked == "2026-10-04T10:05:00.123456Z <n> [ERROR] [MY-010584] [Repl] Replica SQL for channel " + REST
+    nested = "ERROR: Error 'Duplicate entry '" + value + "' for key 'k'' on query"
+    assert _mask_values(nested) == "ERROR: Error " + REST
+
+
+def test_contractions_are_words_and_do_not_start_a_quoted_span():
+    assert _mask_values("ERROR: Can't drop database 'shop'; database doesn't exist") == \
+        "ERROR: Can't drop database 'shop'; database doesn't exist"
+    name = "ada" + "_love" + "lace"
+    assert _mask_values(f"ERROR: Can't find row for user '{name}' in table") == "ERROR: Can't find row for user " + REST
+    assert _mask_values("ERROR: Table 'shop/orders' doesn't exist in engine") == "ERROR: Table " + REST
+
+
+def test_a_kept_identifier_needs_a_whole_keyword_a_clean_close_and_a_clean_end():
+    secret = "sk" + "Q7" + "vB9" + "xZ"
+    for word in ("api_key", "secret_key", "user_key", "card_type", "shop.key", "monkey"):
+        assert _mask_values(f'ERROR: bad {word} "{secret}" given') == f"ERROR: bad {word} " + REST, word
+    assert _mask_values("ERROR: for key 'users.email''x") == "ERROR: for key " + REST
+    assert _mask_values("ERROR: for key 'users\"email' end") == "ERROR: for key " + REST
+    assert _mask_values("ERROR: for key 'abc'def end") == "ERROR: for key " + REST
+    assert _mask_values("ERROR: key: 'abc' end") == "ERROR: key: " + REST
+    assert _mask_values("ERROR: KEY 'abc' end") == "ERROR: KEY 'abc' end"
+
+
+def test_an_unkept_quote_later_in_the_line_masks_from_the_first_kept_identifier():
+    assert _mask_values(f"ERROR: relation 'x' for key 'k' {PERSON}' end") == "ERROR: relation " + REST
+    assert _mask_values("ERROR: Unknown column 'Ada' in 'field list'") == "ERROR: Unknown column " + REST
+
+
+def test_only_english_contractions_count_as_words():
+    for glued in ("select", "THEN", "user", "_binary"):
+        assert _mask_values(f"ERROR: {glued}'s {PERSON}' x") == f"ERROR: {glued}" + REST, glued
+    assert _mask_values("ERROR: it's here and we're done, couldn't stop") == "ERROR: it's here and we're done, couldn't stop"
 
 
 def test_identifier_shaped_names_after_a_keyword_are_kept():
@@ -366,20 +402,22 @@ def test_identifier_shaped_names_after_a_keyword_are_kept():
     assert _mask_values('ERROR:  column "amount" of relation "orders" does not exist') == 'ERROR:  column "amount" of relation "orders" does not exist'
     assert _mask_values("ERROR 1062 (23000): Duplicate entry for key 'users.name'") == "ERROR 1062 (23000): Duplicate entry for key 'users.name'"
     assert _mask_values("ERROR: Unknown column `amount` here") == "ERROR: Unknown column `amount` here"
+    assert _mask_values('ERROR:  index "orders_2024_idx" is corrupt') == 'ERROR:  index "orders_2024_idx" is corrupt'
 
 
 def test_other_quoted_spans_are_masked_even_when_identifier_shaped():
-    assert _mask_values('ERROR:  role "ada" does not exist') == "ERROR:  role <value> does not exist"
-    assert _mask_values("ERROR: user 'ada' denied") == "ERROR: user <value> denied"
-    assert _mask_values('ERROR:  relation "has space" does not exist') == "ERROR:  relation <value> does not exist"
-    assert _mask_values('ERROR:  value "orders" bad') == "ERROR:  value <value> bad"
-    assert _mask_values('ERROR:  table  "' + "x" * 70 + '" gone') == "ERROR:  table  <value> gone"
+    assert _mask_values('ERROR:  role "ada" does not exist') == "ERROR:  role " + REST
+    assert _mask_values("ERROR: user 'ada' denied") == "ERROR: user " + REST
+    assert _mask_values('ERROR:  relation "has space" does not exist') == "ERROR:  relation " + REST
+    assert _mask_values('ERROR:  value "orders" bad') == "ERROR:  value " + REST
+    assert _mask_values('ERROR:  table  "' + "x" * 70 + '" gone') == "ERROR:  table  " + REST
 
 
 def test_mask_values_hides_the_row_in_a_detail_line_but_keeps_the_column_list():
     phone = "+44 7700 900" + "123"
     assert _mask_values(f"DETAIL:  Key (phone)=({phone}) already exists.") == "DETAIL:  Key (phone)=(<value>) already exists."
     assert _mask_values("DETAIL:  Failing row contains (1, " + "Ada" + ", x@example.org).") == "DETAIL:  Failing row contains (<value>)."
+    assert _mask_values("DETAIL:  Failing row contains (1, '" + PERSON + "', x).") == "DETAIL:  Failing row contains (<value>)."
 
 
 def test_mask_values_hides_nested_parentheses_in_a_key_group():
@@ -387,37 +425,164 @@ def test_mask_values_hides_nested_parentheses_in_a_key_group():
     assert _mask_values(line) == "ERROR: Key (name)=(<value>) already exists"
 
 
-def test_runs_of_three_or_more_digits_become_n_but_the_leading_timestamp_stays():
+def test_runs_of_two_or_more_digits_become_n_but_the_leading_timestamp_stays():
     assert _mask_values("2026-10-04 10:42:11.123456 UTC ERROR: user " + "12345678" + " missing, retry 3 of 4, port " + "5432") == \
         "2026-10-04 10:42:11.123456 UTC ERROR: user <n> missing, retry 3 of 4, port <n>"
 
 
-def test_engine_error_codes_are_kept():
+def test_dates_split_pins_and_digits_glued_to_letters_leave_no_digit_pair():
+    assert _mask_values("ERROR: born " + "01/02/" + "99" + " pin " + "12 " + "34") == "ERROR: born <n>/<n>/<n> pin <n> <n>"
+    assert _mask_values("ERROR: token AB" + "12CD" + "34 and a1b2c3") == "ERROR: token AB<n>CD<n> and a1b2c3"
+
+
+def test_engine_error_codes_are_kept_and_bounded():
     for line in ("[ERROR] [MY-" + "010000] [Server] x", "ERROR: failed SQLSTATE " + "23505", "ERROR 1062 (23000): Duplicate",
                  "Error: 18456, Severity: 14, State: 8.", "ORA-" + "00942: table or view does not exist"):
         assert _mask_values(line) == line
+    assert _mask_values("Error: " + "4111" * 4 + ", Severity: 14, State: 8.") == "Error: <n>, Severity: <n>, State: 8."
+    assert _mask_values("ERROR: SQLSTATE " + "4111" * 4) == "ERROR: SQLSTATE <n>"
+    assert _mask_values("ERROR: ORA-" + "4111" * 4) == "ERROR: ORA-<n>"
 
 
-def test_phone_and_card_shapes_with_any_separator_leave_no_digits():
+def test_phone_and_card_shapes_with_any_separator_leave_no_digit_pair():
     shapes = [
         "(" + "555" + ") " + "123" + "-" + "4567", "555" + "-" + "0199", "+44 7700 900" + "123", "+44 77 00 12 34",
-        "4111" + "." + "1111" + "." + "1111" + "." + "1111", "_".join(["4111"] * 4), "\u00a0".join(["4111"] * 4),
+        "4111" + "." + "1111" + "." + "1111" + "." + "1111", "_".join(["4111"] * 4), " ".join(["4111"] * 4),
         "-".join(["4111"] * 4), " ".join(["4111"] * 4), "123" + "-" + "45" + "-" + "6789",
     ]
     for shape in shapes:
         masked = _mask_values(f"ERROR: customer rejected {shape} today")
-        assert not re.search(r"\d", masked), (shape, masked)
+        assert not re.search(r"\d\d", masked), (shape, masked)
 
 
-def test_the_user_role_and_usename_values_in_a_prefix_are_masked_but_db_app_client_are_kept():
+def test_the_user_role_and_usename_values_are_masked_but_db_app_client_are_kept():
     line = "2026-10-04 10:42:11 UTC:user=Ada,db=shop,app=psql,client=10.0.0.5 ERROR: x"
     assert _mask_values(line) == "2026-10-04 10:42:11 UTC:user=<value>,db=shop,app=psql,client=10.0.0.5 ERROR: x"
-    assert _mask_values("ERROR: role=ada usename=bob end") == "ERROR: role=<value> usename=<value> end"
+    assert _mask_values("ERROR: role=ada usename=bob end") == "ERROR: role=<value> usename=<value>"
+    spaced = f"2026-10-04 10:42:11 UTC:user={PERSON},db=shop ERROR: x"
+    assert _mask_values(spaced) == "2026-10-04 10:42:11 UTC:user=<value>,db=shop ERROR: x"
+    quoted = "2026-10-04 10:42:11 UTC:user=\"Love" + "lace, Ada\",db=shop ERROR: x"
+    assert _mask_values(quoted) == "2026-10-04 10:42:11 UTC:user=<value>,db=shop ERROR: x"
+    unclosed = f"2026-10-04 10:42:11 UTC:user='{PERSON} ERROR: x"
+    assert _mask_values(unclosed) == "2026-10-04 10:42:11 UTC:user=<value>"
+
+
+def test_the_role_in_the_default_rds_postgresql_prefix_is_masked():
+    head = "2026-10-04 10:05:00 UTC:10.0.0.5(53412):"
+    for role in (ROLE, "ada:x", "a@b", "Ada Love" + "lace", "o'brien", '"q"'):
+        line = f"{head}{role}@shop:[24816]:ERROR:  deadlock detected"
+        assert _mask_values(line) == f"{head}<value>@shop:[24816]:ERROR:  deadlock detected", role
+    assert _mask_values("2026-10-04 10:05:00 UTC::@:[1]:ERROR:  x") == "2026-10-04 10:05:00 UTC::@:[1]:ERROR:  x"
+    ipv6 = "2026-10-04 10:05:00 UTC:2001:db8::5(53412):" + ROLE + "@shop:[24816]:ERROR:  x"
+    assert _mask_values(ipv6) == "2026-10-04 10:05:00 UTC:2001:db8::5(53412):<value>@shop:[24816]:ERROR:  x"
+
+
+def test_the_mysql_user_and_host_pair_are_both_masked():
+    line = "2026-10-04T10:05:00.123456Z 9 [Warning] [MY-010055] [Server] Access denied for user 'bob'@'10.0.0.5' (using password: YES)"
+    assert _mask_values(line) == \
+        "2026-10-04T10:05:00.123456Z 9 [Warning] [MY-010055] [Server] Access denied for user <value>@<value> (using password: YES)"
+
+
+def test_free_text_before_a_late_marker_is_not_kept_as_a_prefix():
+    line = f"2026-10-04 10:30:00.12 spid51      Login failed for user '{PERSON}'. Reason: Error: x"
+    masked = _mask_values(line)
+    assert PERSON.split()[0] not in masked and PERSON.split()[1] not in masked
 
 
 def test_mask_values_leaves_a_line_without_values_alone():
     line = "2026-10-04 10:42:11 UTC ERROR: too many connections for role app, limit 5"
     assert _mask_values(line) == line
+
+
+POSTGRES_PREFIX = "2026-10-04 10:05:00 UTC:10.0.0.5(53412):"
+
+
+def test_three_realistic_postgresql_lines():
+    cases = [
+        (f'{POSTGRES_PREFIX}{ROLE}@shop:[24816]:ERROR:  duplicate key value violates unique constraint "users_email_key"',
+         f'{POSTGRES_PREFIX}<value>@shop:[24816]:ERROR:  duplicate key value violates unique constraint "users_email_key"'),
+        (f"{POSTGRES_PREFIX}{ROLE}@shop:[24816]:DETAIL:  Key (email)=({EMAIL}) already exists.",
+         f"{POSTGRES_PREFIX}<value>@shop:[24816]:DETAIL:  Key (email)=(<value>) already exists."),
+        (f"{POSTGRES_PREFIX}app@shop:[24816]:DETAIL:  Process 24816 waits for ShareLock on transaction 9123456; blocked by process 24901.",
+         f"{POSTGRES_PREFIX}<value>@shop:[24816]:DETAIL:  Process <n> waits for ShareLock on transaction <n>; blocked by process <n>."),
+        (f'{POSTGRES_PREFIX}{ROLE}@shop:[24816]:FATAL:  password authentication failed for user "{ROLE}"',
+         f"{POSTGRES_PREFIX}<value>@shop:[24816]:FATAL:  password authentication failed for user " + REST),
+    ]
+    for line, expected in cases:
+        assert _mask_values(line) == expected
+
+
+def test_three_realistic_mysql_lines():
+    stamp = "2026-10-04T10:05:00.123456Z"
+    cases = [
+        (f"{stamp} 0 [ERROR] [MY-012592] [InnoDB] Operating system error number 28 in a file operation.",
+         f"{stamp} 0 [ERROR] [MY-012592] [InnoDB] Operating system error number <n> in a file operation."),
+        (f"{stamp} 14 [ERROR] [MY-010584] [Repl] Replica SQL for channel '': Worker 1 failed executing transaction 'ANONYMOUS'"
+         f" at source log mysql-bin-changelog.004512, end_log_pos 98213; Could not execute Write_rows event on table shop.users;"
+         f" Duplicate entry '{EMAIL}' for key 'users.email', Error_code: 1062",
+         f"{stamp} <n> [ERROR] [MY-010584] [Repl] Replica SQL for channel " + REST),
+        (f"{stamp} 8 [ERROR] [MY-013183] [InnoDB] Table 'shop/orders' doesn't exist in engine",
+         f"{stamp} 8 [ERROR] [MY-013183] [InnoDB] Table " + REST),
+    ]
+    for line, expected in cases:
+        assert _mask_values(line) == expected
+
+
+def test_three_realistic_sql_server_lines():
+    stamp = "2026-10-04 10:30:00.12"
+    cases = [
+        (f"{stamp} Logon       Login failed for user '{ROLE}'. Reason: Password did not match that for the login provided. [CLIENT: 10.0.0.5]",
+         f"{stamp} Logon       Login failed for user " + REST),
+        (f"{stamp} spid51      Could not allocate space for object 'dbo.orders'.'PK_orders' in database 'shop' because the 'PRIMARY' filegroup is full.",
+         f"{stamp} spid51      Could not allocate space for object " + REST),
+        (f"{stamp} spid63      The transaction log for database 'shop' is full due to 'LOG_BACKUP'.",
+         f"{stamp} spid63      The transaction log for database " + REST),
+    ]
+    for line, expected in cases:
+        assert _mask_values(line) == expected
+    assert _mask_values(f"{stamp} spid51      Error: 1105, Severity: 17, State: 2.") == f"{stamp} spid51      Error: 1105, Severity: 17, State: 2."
+
+
+def test_the_sql_server_message_line_after_an_error_line_is_kept_and_masked(config_data, tmp_path):
+    files = [{"LogFileName": "log/ERROR", "LastWritten": WINDOW_START_MILLIS + 6 * 3_600_000, "Size": 1}]
+    data = "\n".join([
+        "2026-10-04 10:30:00.12 Logon       Error: 18456, Severity: 14, State: 8.",
+        f"2026-10-04 10:30:00.12 Logon       Login failed for user '{ROLE}'. Reason: Password did not match.",
+        "2026-10-04 10:31:00.12 Server      Started",
+    ])
+    ctx, _ = run(config_data, tmp_path, log_answers(files, data))
+    document = ctx.evidence.to_json()
+    assert "Login failed for user" in document and ROLE not in document and "Started" not in document
+
+
+QUOTE_OPENERS = ("'", '"', "`", "$$", "$tag$", "N'", "E'", "X'", "_binary'", "U&'", "''", "\\'")
+CONTEXT_WORDS = (
+    "key", "relation", "table", "column", "api_key", "Can't", "doesn't", "for", "VALUES (", "=", ",", "(", "Error",
+    "database", "constraint", "x", "", "''", "'a'", "\"b\"", "`c`", "\\", "key 'users.email'", "O'",
+)
+CONTENT_PIECES = ("", "it''s ", "a\\'b ", "\"", "'", "`", ") ", "$$", "t ", "s ", "x' for key 'k' ", "Can't ")
+
+
+def planted_line(rng, marker):
+    """A line with the marker inside a quote of a random kind, at a random place, among other quotes and words."""
+    before = " ".join(rng.choice(CONTEXT_WORDS) for _ in range(rng.randint(0, 4)))
+    opener = rng.choice(QUOTE_OPENERS)
+    closer = opener[-1] if not opener.startswith("$") else opener
+    inside = rng.choice(CONTENT_PIECES) + marker + rng.choice(CONTENT_PIECES)
+    after = " ".join(rng.choice(CONTEXT_WORDS) for _ in range(rng.randint(0, 4)))
+    keyword = rng.choice(("", "key ", "relation ", "column ", "table "))
+    return f"2026-10-04 10:05:00 UTC:10.0.0.5(1):app@shop:[7]:ERROR:  {before} {keyword}{opener}{inside}{closer} {after}"
+
+
+def test_fuzz_a_marker_inside_any_quote_never_survives():
+    import random
+    rng = random.Random(20261004)
+    first, second = "Qz" + "vk", "Mar" + "kerx"
+    marker = f"{first} {second}"
+    for _ in range(2000):
+        line = planted_line(rng, marker)
+        masked = _mask_values(line)
+        assert first not in masked and second not in masked, (line, masked)
 
 
 def test_a_detail_line_directly_after_a_kept_line_is_included_after_masking(config_data, tmp_path):
