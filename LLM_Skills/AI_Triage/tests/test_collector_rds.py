@@ -898,3 +898,63 @@ def test_an_instance_without_an_endpoint_yet_gets_no_endpoint_fact(config_data, 
     assert endpoint_facts(ctx) == [] and ctx.evidence.errors == []
     ctx, _ = run(config_data, tmp_path, healthy_answers(**{"rds describe-db-instances": instance(Endpoint={})}))
     assert endpoint_facts(ctx) == [] and ctx.evidence.errors == []
+
+
+ACCOUNT = "1" * 12
+
+
+def rds_arn(kind, name):
+    return f"arn:aws:rds:eu-west-1:{ACCOUNT}:{kind}:{name}"
+
+
+def test_the_instance_state_fact_holds_its_arn_and_related_names(config_data, tmp_path):
+    body = instance(
+        DBInstanceArn=rds_arn("db", "orders-db"),
+        DBSubnetGroup={"DBSubnetGroupName": "orders-subnets", "DBSubnetGroupArn": rds_arn("subgrp", "orders-subnets"), "VpcId": "vpc-1"},
+        VpcSecurityGroups=[{"VpcSecurityGroupId": "sg-0a1b2c3d", "Status": "active"}, {"VpcSecurityGroupId": "sg-0e0f", "Status": "active"}],
+    )
+    ctx, aws = run(config_data, tmp_path, healthy_answers(**{"rds describe-db-instances": body}))
+    state = ctx.evidence.facts[0]
+    assert state.data["arn"] == rds_arn("db", "orders-db")
+    assert state.data["parameter_group_names"] == ["orders-pg"]
+    assert state.data["subnet_group_name"] == "orders-subnets" and state.data["subnet_group_arn"] == rds_arn("subgrp", "orders-subnets")
+    assert state.data["security_group_ids"] == ["sg-0a1b2c3d", "sg-0e0f"]
+    assert state.data["DBInstanceStatus"] == "available"
+    assert_read_only(ctx, aws)
+
+
+def test_an_instance_answer_without_arn_fields_writes_no_arn_key(config_data, tmp_path):
+    body = instance()
+    body["DBInstances"][0].pop("DBParameterGroups")
+    ctx, _ = run(config_data, tmp_path, healthy_answers(**{"rds describe-db-instances": body}))
+    state = ctx.evidence.facts[0]
+    assert "arn" not in state.data and "subnet_group_name" not in state.data and "security_group_ids" not in state.data
+    assert "parameter_group_names" not in state.data and ctx.evidence.errors == []
+
+
+def test_the_cluster_state_fact_holds_its_arn_its_members_and_the_writer_arn(config_data, tmp_path):
+    cluster = {"DBClusters": [{"DBClusterIdentifier": "orders-db", "DBClusterArn": rds_arn("cluster", "orders-db"),
+                               "Status": "available", "Engine": "aurora-postgresql", "EngineVersion": "15.4",
+                               "DBClusterParameterGroup": "orders-cluster-pg", "DBSubnetGroup": "orders-subnets",
+                               "VpcSecurityGroups": [{"VpcSecurityGroupId": "sg-0a1b2c3d", "Status": "active"}],
+                               "DBClusterMembers": [{"DBInstanceIdentifier": "orders-db-1", "IsClusterWriter": True},
+                                                    {"DBInstanceIdentifier": "orders-db-2", "IsClusterWriter": False}]}]}
+    per = {"rds describe-db-instances": {
+        "orders-db": NOT_FOUND,
+        "orders-db-1": instance("orders-db-1", DBInstanceArn=rds_arn("db", "orders-db-1")),
+        "orders-db-2": instance("orders-db-2", DBInstanceArn=rds_arn("db", "orders-db-2"))}}
+    fake = ByArgument(healthy_answers(**{"rds describe-db-clusters": cluster}), "--db-instance-identifier", per)
+    ctx, aws = run(config_data, tmp_path, healthy_answers(), fake=fake)
+    state = by_summary(ctx, "Cluster orders-db is available")[0]
+    assert state.data["arn"] == rds_arn("cluster", "orders-db")
+    assert state.data["writer_instance_arn"] == rds_arn("db", "orders-db-1")
+    assert state.data["member_instances"] == [
+        {"id": "orders-db-1", "writer": True, "arn": rds_arn("db", "orders-db-1")},
+        {"id": "orders-db-2", "writer": False, "arn": rds_arn("db", "orders-db-2")},
+    ]
+    assert state.data["cluster_parameter_group_name"] == "orders-cluster-pg"
+    assert state.data["subnet_group_name"] == "orders-subnets" and state.data["security_group_ids"] == ["sg-0a1b2c3d"]
+    member = by_summary(ctx, "Instance orders-db-2 is")[0]
+    assert member.data["arn"] == rds_arn("db", "orders-db-2") and "describe-db-instances" in member.command
+    assert "orders-db-2" in member.command
+    assert_read_only(ctx, aws)

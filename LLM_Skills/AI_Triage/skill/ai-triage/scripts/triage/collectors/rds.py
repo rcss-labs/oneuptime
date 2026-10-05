@@ -36,6 +36,7 @@ MAX_LOG_FILES = "10"
 MAX_EVENT_ITEMS = "50"
 MAX_MEMBERS = 6
 MAX_CUSTOM_ENDPOINTS = 10
+MAX_RELATED_IDS = 20
 INSTANCE_NOT_FOUND = ("DBInstanceNotFound", "DBInstanceNotFoundFault")
 CLUSTER_NOT_FOUND = ("DBClusterNotFound", "DBClusterNotFoundFault")
 LOG_LINES_TO_READ = "1000"
@@ -122,17 +123,67 @@ def _parameter_groups_text(instance: dict) -> str:
     return ", ".join(f"{g.get('DBParameterGroupName')} {g.get('ParameterApplyStatus')}" for g in groups) or "none"
 
 
-def _add_instance_state(ctx: CollectContext, instance: dict) -> None:
+def _capped(data: dict, key: str, values: list) -> None:
+    """Put at most MAX_RELATED_IDS values under key, with a count of the rest; nothing when there are none."""
+    if values:
+        data[key] = values[:MAX_RELATED_IDS]
+        if len(values) > MAX_RELATED_IDS:
+            data[f"{key}_omitted"] = len(values) - MAX_RELATED_IDS
+
+
+def _security_group_ids(resource: dict) -> list[str]:
+    return [g["VpcSecurityGroupId"] for g in resource.get("VpcSecurityGroups") or [] if g.get("VpcSecurityGroupId")]
+
+
+def _instance_identifiers(instance: dict) -> dict:
+    """The ARN and the names and ids of related resources an action could target, as the describe answer gives them."""
+    data: dict = {}
+    if instance.get("DBInstanceArn"):
+        data["arn"] = instance["DBInstanceArn"]
+    names = [g["DBParameterGroupName"] for g in instance.get("DBParameterGroups") or [] if g.get("DBParameterGroupName")]
+    _capped(data, "parameter_group_names", names)
+    subnet_group = instance.get("DBSubnetGroup") or {}
+    for key, field in (("subnet_group_name", "DBSubnetGroupName"), ("subnet_group_arn", "DBSubnetGroupArn")):
+        if subnet_group.get(field):
+            data[key] = subnet_group[field]
+    _capped(data, "security_group_ids", _security_group_ids(instance))
+    return data
+
+
+def _cluster_identifiers(cluster: dict, member_instances: dict[str, dict]) -> dict:
+    """The cluster ARN, its members (ARNs from the member describe answers) with the writer, and related names."""
+    data: dict = {}
+    if cluster.get("DBClusterArn"):
+        data["arn"] = cluster["DBClusterArn"]
+    members = []
+    for member in cluster.get("DBClusterMembers") or []:
+        member_id = member.get("DBInstanceIdentifier")
+        entry = {"id": member_id, "writer": bool(member.get("IsClusterWriter"))}
+        arn = (member_instances.get(member_id) or {}).get("DBInstanceArn")
+        if arn:
+            entry["arn"] = arn
+            if entry["writer"]:
+                data["writer_instance_arn"] = arn
+        members.append(entry)
+    _capped(data, "member_instances", members)
+    for key, field in (("cluster_parameter_group_name", "DBClusterParameterGroup"), ("subnet_group_name", "DBSubnetGroup")):
+        if cluster.get(field):
+            data[key] = cluster[field]
+    _capped(data, "security_group_ids", _security_group_ids(cluster))
+    return data
+
+
+def _add_instance_state(ctx: CollectContext, instance: dict, command: str) -> None:
     name = instance.get("DBInstanceIdentifier")
     ctx.evidence.add(
-        kind=CURRENT, resource=f"db/{name}", command=ctx.last_command,
+        kind=CURRENT, resource=f"db/{name}", command=command,
         summary=(
             f"Instance {name} is {instance.get('DBInstanceStatus')}: class {instance.get('DBInstanceClass')}, "
             f"engine {instance.get('Engine')} {instance.get('EngineVersion')}, "
             f"multi-AZ {'yes' if instance.get('MultiAZ') else 'no'}, storage {instance.get('AllocatedStorage')} GiB, "
             f"{_pending_text(instance)}, parameter group {_parameter_groups_text(instance)}"
         ),
-        data={key: instance.get(key) for key in ("DBInstanceStatus", "PendingModifiedValues")},
+        data={**{key: instance.get(key) for key in ("DBInstanceStatus", "PendingModifiedValues")}, **_instance_identifiers(instance)},
     )
 
 
@@ -548,10 +599,10 @@ def _add_wait_events(ctx: CollectContext, name: str, resource_id: str) -> None:
     )
 
 
-def _collect_instance(ctx: CollectContext, instance: dict, onset: datetime) -> None:
+def _collect_instance(ctx: CollectContext, instance: dict, onset: datetime, command: str) -> None:
     name = instance.get("DBInstanceIdentifier", "")
-    _add_instance_state(ctx, instance)
-    _add_instance_endpoint(ctx, instance, ctx.last_command)
+    _add_instance_state(ctx, instance, command)
+    _add_instance_endpoint(ctx, instance, command)
     _add_events(ctx, name, "db-instance", "Instance")
     _add_log_lines(ctx, name, onset)
     _add_metrics(ctx, name)
@@ -569,29 +620,34 @@ def _collect_cluster(ctx: CollectContext, name: str, onset: datetime) -> None:
                 summary=f"RDS instance or cluster {name} was not found",
             )
         return
-    cluster = clusters[0]
+    cluster, cluster_command = clusters[0], ctx.last_command
     members = cluster.get("DBClusterMembers", [])
+    # Members are described first so the cluster fact can name their ARNs; their facts follow the cluster's.
+    described: list[tuple[dict, str]] = []
+    for member in members[:MAX_MEMBERS]:
+        instance = _describe_instance(ctx, member.get("DBInstanceIdentifier", ""))
+        if instance is not None:
+            described.append((instance, ctx.last_command))
     roles = ", ".join(
         f"{m.get('DBInstanceIdentifier')} ({'writer' if m.get('IsClusterWriter') else 'reader'})" for m in members
     )
     ctx.evidence.add(
-        kind=CURRENT, resource=f"db/{name}", command=ctx.last_command,
+        kind=CURRENT, resource=f"db/{name}", command=cluster_command,
         summary=(
             f"Cluster {name} is {cluster.get('Status')}: engine {cluster.get('Engine')} {cluster.get('EngineVersion')}, "
             f"multi-AZ {'yes' if cluster.get('MultiAZ') else 'no'}, members {roles or 'none'}"
         ),
+        data=_cluster_identifiers(cluster, {i.get("DBInstanceIdentifier"): i for i, _ in described}),
     )
-    _add_cluster_endpoints(ctx, name, cluster, ctx.last_command)
+    _add_cluster_endpoints(ctx, name, cluster, cluster_command)
     _add_events(ctx, name, "db-cluster", "Cluster")
     if len(members) > MAX_MEMBERS:
         ctx.evidence.add(
             kind=DERIVED, resource=f"db/{name}",
             summary=f"The cluster has {len(members)} members; only the first {MAX_MEMBERS} were described",
         )
-    for member in members[:MAX_MEMBERS]:
-        instance = _describe_instance(ctx, member.get("DBInstanceIdentifier", ""))
-        if instance is not None:
-            _collect_instance(ctx, instance, onset)
+    for instance, command in described:
+        _collect_instance(ctx, instance, onset, command)
 
 
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
@@ -599,7 +655,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     onset = _incident_start(ctx, targets)
     instance = _describe_instance(ctx, name)
     if instance is not None:
-        _collect_instance(ctx, instance, onset)
+        _collect_instance(ctx, instance, onset, ctx.last_command)
     elif was_not_found(ctx, INSTANCE_NOT_FOUND):
         _collect_cluster(ctx, name, onset)
 
