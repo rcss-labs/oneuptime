@@ -130,6 +130,9 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
         return _fail(f"region {region} is not allowed for {account.alias}; use one of: {', '.join(allowed_regions)}", 2)
     evidence = Evidence(collector.name, account.alias, region, window)
     evidence.set_asked(_asked_targets(targets), {"start": args.start, "end": args.end})
+    if args.case_dir and evidence.path_for(args.case_dir, args.suffix).exists():
+        existing = evidence.path_for(args.case_dir, args.suffix)
+        return _fail(f"{existing} already exists; pass another --suffix to keep both", 2)
     ctx = CollectContext(
         config, account, region, window, evidence, args.skill_dir,
         runner=runner or subprocess_runner, kube_runner=kube_runner or subprocess_runner,
@@ -142,10 +145,7 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     except Exception as error:  # noqa: BLE001 - one bad field must not cost the evidence already collected
         evidence.add_error("", "CollectorError", f"{type(error).__name__}: {error}")
     if args.case_dir:
-        try:
-            path = evidence.write(args.case_dir, args.suffix)
-        except FileExistsError as error:
-            return _fail(str(error), 2)
+        path = evidence.write(args.case_dir, args.suffix)
         print(f"{path} facts={len(evidence.facts)} errors={len(evidence.errors)} truncated={evidence.truncated}")
     else:
         print(evidence.to_json())

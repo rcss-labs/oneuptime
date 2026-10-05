@@ -322,8 +322,11 @@ def test_existing_evidence_file_is_not_overwritten(skill_dir, fake_collector, tm
     argv = args(skill_dir, "--target", "thing=x", "--case-dir", str(case))
     assert collect.main(argv, runner=FakeAws({})) == 0
     capsys.readouterr()
-    assert collect.main(argv, runner=FakeAws({})) == 2
+    second_runner = FakeAws({})
+    assert collect.main(argv, runner=second_runner) == 2
     assert "--suffix" in capsys.readouterr().err
+    assert len(fake_collector) == 1  # refused before the collector ran
+    assert not second_runner.calls
 
 
 @pytest.mark.parametrize("value", [",", " , ", ",,  ,"])

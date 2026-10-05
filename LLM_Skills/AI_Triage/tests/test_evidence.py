@@ -196,17 +196,17 @@ def test_nested_keys_equal_after_the_cut_are_counted():
     assert fact.data["inner"] == {"b" * 100: 1, "keys_omitted": 1}
 
 
-def test_nested_lists_and_dicts_are_capped_at_50_with_a_count_beside_them():
-    fact = add_simple(make_evidence(), data={"items": list(range(5000)), "table": {f"k{n}": n for n in range(300)}, "few": [1, 2]})
-    assert fact.data["items"] == list(range(50))
-    assert fact.data["items_omitted"] == 4950
-    assert len(fact.data["table"]) == 50 and fact.data["table_omitted"] == 250
-    assert fact.data["few"] == [1, 2] and "few_omitted" not in fact.data
+def test_nested_lists_and_dicts_are_capped_at_200_with_a_count_beside_them():
+    fact = add_simple(make_evidence(), data={"items": list(range(5000)), "table": {f"k{n}": n for n in range(300)}, "hits": list(range(200))})
+    assert fact.data["items"] == list(range(200))
+    assert fact.data["items_omitted"] == 4800
+    assert len(fact.data["table"]) == 200 and fact.data["table_omitted"] == 100
+    assert fact.data["hits"] == list(range(200)) and "hits_omitted" not in fact.data
 
 
 def test_lists_inside_lists_are_capped_with_a_marker_entry():
-    fact = add_simple(make_evidence(), data={"rows": [list(range(60))]})
-    assert fact.data["rows"][0] == list(range(50)) + ["10 more entries omitted"]
+    fact = add_simple(make_evidence(), data={"rows": [list(range(210))]})
+    assert fact.data["rows"][0] == list(range(200)) + ["10 more entries omitted"]
 
 
 def test_non_finite_numbers_become_text_and_json_is_strict():
@@ -217,13 +217,13 @@ def test_non_finite_numbers_become_text_and_json_is_strict():
     assert data == {"a": "not a number", "b": ["not a number"], "c": {"d": "not a number"}, "e": 1.5}
 
 
-def test_write_refuses_to_overwrite_an_existing_file(tmp_path):
-    first = make_evidence().write(tmp_path)
-    before = first.read_text()
-    with pytest.raises(FileExistsError) as raised:
-        make_evidence().write(tmp_path)
-    assert "--suffix" in str(raised.value)
-    assert first.read_text() == before
+def test_write_still_replaces_an_existing_file_and_path_for_names_it(tmp_path):
+    evidence = make_evidence()
+    assert evidence.path_for(tmp_path, "x y") == tmp_path / "evidence" / "ecs-prod-main-eu-west-1-xy.json"
+    first = evidence.write(tmp_path)
+    add_simple(evidence)
+    assert evidence.write(tmp_path) == first
+    assert load_evidence(first)["facts"]
 
 
 def test_asked_is_recorded_redacted_and_is_not_a_fact():

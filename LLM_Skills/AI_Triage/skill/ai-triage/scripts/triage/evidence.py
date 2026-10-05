@@ -23,7 +23,7 @@ MAX_SUMMARY = 500
 MAX_DATA_STRING = 500
 MAX_DATA_KEYS = 50
 MAX_KEY_LENGTH = 100
-MAX_NESTED_ENTRIES = 50
+MAX_NESTED_ENTRIES = 200
 NOT_A_NUMBER = "not a number"
 OMITTED_SUFFIX = "_omitted"
 SUMMARY_CUT_MARKER = "… [summary cut]"
@@ -189,20 +189,18 @@ class Evidence:
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, allow_nan=False)
 
-    def write(self, case_dir: Path, suffix: str = "") -> Path:
+    def path_for(self, case_dir: Path, suffix: str = "") -> Path:
+        """The file write() would write, without writing it."""
         name = "-".join(_SUFFIX_CLEANER.sub("", part) for part in (self.collector, self.account, self.region))
         cleaned = _SUFFIX_CLEANER.sub("", suffix)
         if cleaned:
             name += f"-{cleaned}"
-        directory = case_dir / "evidence"
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{name}.json"
-        text = self.to_json() + "\n"
-        try:
-            with path.open("x") as handle:
-                handle.write(text)
-        except FileExistsError:
-            raise FileExistsError(f"{path} already exists; pass another --suffix to keep both") from None
+        return case_dir / "evidence" / f"{name}.json"
+
+    def write(self, case_dir: Path, suffix: str = "") -> Path:
+        path = self.path_for(case_dir, suffix)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.to_json() + "\n")
         return path
 
 
