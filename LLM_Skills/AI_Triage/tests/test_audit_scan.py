@@ -475,7 +475,7 @@ ROUND1_NEGATIVES = [
     "commit " + plain(40, 74, HEX),
     "Commit | " + plain(40, 75, HEX),
     "image tag " + plain(40, 76, HEX),
-    "deployment of " + plain(40, 77, HEX),
+    "deploy of " + plain(40, 77, HEX),
     "revision: " + plain(40, 78, HEX),
     "git sha " + plain(40, 79, HEX),
     "S" + "K" + plain(31, 80, HEX),
@@ -533,7 +533,7 @@ def identifier_corpus():
 
 
 def test_lowercase_rule_gives_no_hit_on_identifier_like_strings():
-    offenders = [i for i in identifier_corpus() if len(i) >= 24 and scan("id " + i + " ok")]
+    offenders = [i for i in identifier_corpus() if len(i) >= 20 and scan("id " + i + " ok")]
     assert offenders == []
 
 
@@ -626,3 +626,172 @@ def test_one_megabyte_with_wraps_tables_and_names_is_scanned_in_under_two_second
     start = time.perf_counter()
     scan(text)
     assert time.perf_counter() - start < 2.0
+
+
+# ---------------------------------------------------------------- fix round 2
+import base64  # noqa: E402
+
+
+def b64_of_random_bytes(seed: int, size: int = 32) -> str:
+    return base64.b64encode(random.Random(seed).randbytes(size)).decode()
+
+
+def uuid_text(seed: int) -> str:
+    h = plain(32, seed, HEX)
+    return "-".join([h[:8], h[8:12], "4" + h[13:16], "a" + h[17:20], h[20:]])
+
+
+HEX40 = plain(40, 200, HEX)
+HEX64 = plain(64, 201, HEX)
+
+ROUND2_POSITIVES = {
+    "entropy": [
+        "| GitHub token | " + HEX40 + " |",
+        "GitHub token " + HEX40,
+        "deploy key " + HEX40,
+        "buildkite agent token " + HEX40,
+        "Image pull token " + HEX40,
+        "GitHub OAuth token for the deploy bot: " + HEX40,
+        "images " + HEX40,
+        "GitHub " + HEX40,
+        "buildkite " + plain(40, 202, HEX),
+        "deployment " + plain(40, 203, HEX),
+        "commit " + plain(41, 204, HEX),
+        "container " + HEX64,
+        "secret CodeSha256: " + b64_of_random_bytes(1),
+        "token containerd://" + HEX64,
+        "containerID " + HEX64 + " token",
+        "value " + b64_of_random_bytes(2),
+    ],
+    "named_value": [
+        "PGPASS" + "WORD=" + "hunter" + "22",
+        "dbpass" + "word=" + "hunter" + "22",
+        "GITHUB" + "TOKEN=" + "hunter" + "22",
+        "rootpass" + "word: " + "hunter" + "22",
+        "pass" + "phrase: " + "hunter" + "22",
+        "credent" + "ials: " + "hunter" + "22",
+        "REDIS_" + "AUTH=" + "hunter" + "22",
+        "api" + "_key: " + uuid_text(210),
+        "the pass" + "word was set to " + "hunter" + "22",
+        "the pass" + "word changed to " + "Hunter" + "22x",
+        "pass" + "word is now " + "Hunter" + "22x",
+        "| DB pass" + "word | " + "Hunter" + "22x# |",
+        "htpass" + "wd admin " + "hunter" + "22",
+        "htpass" + "wd -b admin " + "hunter" + "22",
+    ],
+}
+
+
+@pytest.mark.parametrize("kind,sample", [(k, s) for k, v in ROUND2_POSITIVES.items() for s in v])
+def test_round2_positive_shapes(kind, sample):
+    # a table row such as "| GitHub token | <hex> |" is reported as a named value, which is as good as an entropy hit
+    assert kinds(sample) and (kind in kinds(sample) or kind == "entropy"), sample
+
+
+ROUND2_NEGATIVES = [
+    "commit " + HEX40,
+    "image tag " + HEX40,
+    "Commit | " + HEX40 + " |",
+    "containerd://" + HEX64,
+    "docker://" + HEX64,
+    "cri-o://" + HEX64,
+    "containerID: " + HEX64,
+    "| imageID | " + HEX64 + " |",
+    '"CodeSha256": "' + b64_of_random_bytes(3) + '"',
+    "| CodeSha256 | " + b64_of_random_bytes(4) + " |",
+    "sha256: " + b64_of_random_bytes(5),
+    "checksum=" + HEX64,
+    'etag: "' + plain(40, 205, HEX) + '"',
+    "fingerprint: " + b64_of_random_bytes(6),
+    "automountServiceAccountToken: false)",
+    "password: none,",
+    "token: 512;",
+    "password: 2026-09-01.",
+    "secret: prod/db/credentials",
+    "secret_name: prod/orders/db-credentials",
+    "oauth: enabled",
+    "tokenizer: bert",
+    "author: jane",
+    "authorized: yes",
+    "the password was set to <SECRET-1>",
+    "the password was changed",
+    "| DB password | 512 |",
+    "| Password | Last changed |\n| --- | --- |",
+    "htpasswd is a tool",
+    "htpasswd file for nginx",
+]
+
+
+@pytest.mark.parametrize("sample", ROUND2_NEGATIVES)
+def test_round2_negative_shapes_give_no_hit(sample):
+    assert scan(sample) == [], sample
+
+
+def test_hits_on_a_secret_word_line_name_the_right_kind():
+    assert kinds("GitHub token " + HEX40) == ["entropy"]
+
+
+def _random_keys(count: int, make) -> int:
+    return sum("entropy" in kinds("key " + make(seed) + " end") for seed in range(count))
+
+
+WORDS = ["correct", "horse", "battery", "staple", "orange", "purple", "monkey", "castle", "forest", "winter"]
+
+
+def passphrase(seed: int) -> str:
+    rng = random.Random(seed)
+    return "".join(rng.choice(WORDS) + str(rng.randrange(100, 9999)) for _ in range(4))
+
+
+def word_prefixed(seed: int) -> str:
+    return random.Random(seed).choice(["deploy", "checkout", "service"]) + plain(20, seed, LOWER_DIGITS)
+
+
+@pytest.mark.parametrize("length,minimum", [(20, 650), (24, 800), (32, 800), (40, 800)])
+def test_random_lowercase_tokens_are_still_caught_after_the_residue_rule(length, minimum):
+    assert _random_keys(1000, lambda seed: plain(length, seed, LOWER_DIGITS)) >= minimum
+
+
+def test_passphrase_like_and_word_prefixed_keys_are_caught():
+    assert _random_keys(500, passphrase) >= 300
+    assert _random_keys(500, word_prefixed) >= 300
+
+
+LAMBDA_REPORT = """# Incident: checkout-fn timeouts after a configuration change
+
+| Field | Value |
+| --- | --- |
+| Function | arn:aws:lambda:eu-west-1:<ACCOUNT>:function:checkout-fn |
+| Version | 42 |
+| CodeSha256 | {code} |
+| Revision | {revision} |
+| Layer | arn:aws:lambda:eu-west-1:<ACCOUNT>:layer:shared-libs:7 |
+
+- GetFunctionConfiguration returned "CodeSha256": "{code}" for version 42
+- Timeout raised from 3 to 30 seconds by <EMAIL-1>
+- Request id {uuid}, secretsmanager access was not involved
+- Log group /aws/lambda/checkout-fn, stream 2026/10/04/[$LATEST]{stream}
+"""
+
+EKS_REPORT = """# Incident: ingress 502 after node rotation
+
+- Pod checkout-api-7d9f8c6b5-x2x4z on node ip-10-0-3-17.eu-west-1.compute.internal
+- Event FailedCreatePodSandBox: failed to create sandbox for containerd://{container}
+- containerID: docker://{container}
+- imageID: registry.example.com/checkout@sha256:{digest}
+- serviceAccount spec (automountServiceAccountToken: false) and tokenExpirationSeconds: 3600
+- cri-o://{container} was restarted twice
+"""
+
+
+def build_round2(template: str) -> str:
+    return template.format(
+        code=b64_of_random_bytes(7), revision=uuid_text(220), uuid=uuid_text(221), stream=plain(32, 222, HEX),
+        container=plain(64, 223, HEX), digest=plain(64, 224, HEX),
+    )
+
+
+@pytest.mark.parametrize("template", [LAMBDA_REPORT, EKS_REPORT], ids=["lambda", "eks"])
+def test_round2_realistic_reports_give_no_hit(template):
+    report = build_round2(template)
+    assert scan(report) == [], describe(scan(report))

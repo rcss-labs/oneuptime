@@ -28,7 +28,9 @@ class Hit:
 ENTROPY_THREE_CLASSES = 4.0
 ENTROPY_TWO_CLASSES = 4.3
 ENTROPY_LOWERCASE = 3.6
+LINE_WINDOW = 160  # how far around a value its line is read, so one huge line stays cheap
 MIN_TOKEN_LENGTH = 24
+MIN_LOWERCASE_LENGTH = 20
 MIN_HEX_LENGTH = 40
 
 _ZERO_WIDTH = "​‌‍‎‏⁠⁡⁢⁣⁤﻿­᠎"
@@ -135,18 +137,27 @@ _PEM_RE = re.compile(r"-----BEGIN [A-Z0-9 ]+-----")
 _PUBLIC_PEM = ("CERTIFICATE", "PUBLIC KEY")
 _BASE64_LINE_RE = re.compile(r"^[ \t]*([A-Za-z0-9+/]{60,}={0,2})[ \t]*$", re.MULTILINE)
 
-_CHUNK_RE = re.compile(r"[A-Za-z0-9+/_-]{24,}={0,2}")
+_CHUNK_RE = re.compile(r"[A-Za-z0-9+/_-]{20,}={0,2}")
 _HEX_RE = re.compile(r"(?<![A-Za-z0-9])[0-9A-Fa-f]{40,}(?![A-Za-z0-9])")
 _UUID_RE = re.compile(r"^[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$")
 _AWS_ID_RE = re.compile(r"^(?:i|sg|vpc|subnet|eni|vol|ami|rtb|igw|nat|snap|lt|eipalloc|eipassoc|acl|pcx|tgw|vpce|fs|key)-[0-9a-f]{8,17}$")
 _RDS_ID_RE = re.compile(r"^(?:db|cluster)-[A-Z0-9]{26}$")
 _PREFIXED_ULID_RE = re.compile(r"^[A-Za-z]{2,10}_[0-9A-HJKMNP-TV-Z]{26}$")
 _COMMIT_CONTEXT_RE = re.compile(
-    r"(?<![A-Za-z])(?:commit|revision|git|sha\d*(?![A-Za-z])|image|tag|version|build|deploy)", re.IGNORECASE
+    r"(?<![A-Za-z0-9])(?:commit|revision|git|sha\d*|image|tag|version|build|deploy)(?![A-Za-z0-9])", re.IGNORECASE
 )
+# a secret word anywhere on the line, as a whole word or as the end of one, switches every exemption off
+_SECRET_CONTEXT_RE = re.compile(r"(?:token|key|secret|password|passwd|credential|auth)s?(?![A-Za-z])", re.IGNORECASE)
+_CONTAINER_SCHEME_RE = re.compile(r"(?:containerd|docker|cri-o)://$")
+_CONTAINER_KEY_RE = re.compile(r"(?:container|image)id[\"'`]?[ \t]*[:=|]", re.IGNORECASE)
+_KEY_AT_END_RE = re.compile(r"[\w.-]+$")
+_DIGEST_KEYS = ("sha256", "sha1", "md5", "digest", "checksum", "hash", "etag", "fingerprint", "thumbprint")
 _DIGEST_BEFORE_RE = re.compile(r"(?:sha(?:1|224|256|384|512)|md5):$", re.IGNORECASE)
 
-_SECRET_WORDS = {"password", "passwd", "pwd", "secret", "token", "apikey", "authorization", "cookie"}
+_SECRET_WORDS = (
+    "password", "passwd", "pwd", "passphrase", "secret", "token", "apikey", "authorization", "cookie",
+    "credential", "credentials",
+)
 _KEY_PREFIX_WORDS = {"api", "secret", "private", "access"}
 _NAME_PART_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
 # a key: a run of name characters that does not continue a longer word or an ARN, followed by a separator
@@ -159,11 +170,14 @@ _NAMED_VALUE_RE = re.compile(
 )
 _TABLE_ROW_RE = re.compile(r"\|[ \t]*(?P<name>[^|\n]{1,80}?)[ \t]*\|(?P<value>[^|\n]+?)(?=\|[ \t]*(?:\n|$)|\|)", re.MULTILINE)
 _PROSE_RE = re.compile(
-    r"(?<![\w])(?:password|passwd|pwd|secret|token|api[ _-]?key)[ \t]+is[ \t]+"
+    r"(?<![\w])(?:password|passwd|pwd|passphrase|secret|token|api[ _-]?key)[ \t]+"
+    r"(?:is(?:[ \t]+now|[ \t]+set[ \t]+to)?|(?:was[ \t]+)?(?:set|changed|reset)[ \t]+to)[ \t]+"
     r"(?P<value>`[^`\n]+`|\"[^\"\n]+\"|'[^'\n]+'|[^\s,;]+)",
     re.IGNORECASE,
 )
+_HTPASSWD_RE = re.compile(r"(?<![\w])htpasswd(?:[ \t]+-[A-Za-z]+)*[ \t]+(?P<user>\S+)[ \t]+(?P<value>\S+)", re.IGNORECASE)
 _NOT_A_VALUE = {"true", "false", "yes", "no", "ok", "none", "null", "redacted", "[redacted]"}
+_WORD_PATH_RE = re.compile(r"^/?[a-z]+(?:[-_][a-z]+)*(?:/[a-z]+(?:[-_][a-z]+)*)+$")
 _NUMBER_RE = re.compile(r"^[+-]?\d[\d.,_]*$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ][\d:.+-]*[Zz]?)?$")
 _MASK_RE = re.compile(r"^(?:[*#.\u2022-]{3,}|[xX]{3,})$")
@@ -184,7 +198,7 @@ def _is_secret_name(key: str) -> bool:
         parts.pop()
     if not parts:
         return False
-    if parts[-1] in _SECRET_WORDS:
+    if parts[-1] == "auth" or parts[-1].endswith(_SECRET_WORDS):  # also glued names: PGPASSWORD, githubtoken
         return True
     return parts[-1] == "key" and len(parts) > 1 and parts[-2] in _KEY_PREFIX_WORDS
 
@@ -192,14 +206,24 @@ def _is_secret_name(key: str) -> bool:
 def _is_not_a_secret_value(value: str) -> bool:
     """Empty, a flag, a number, a date, an ARN, a structure, a mask or a placeholder."""
     inner = value.strip().strip("\"'`").strip()
+    if inner[:1] in ("[", "{"):
+        return True
+    inner = inner.rstrip("),;.]}").rstrip("\"'`")
     return (
         not inner
+        or bool(_WORD_PATH_RE.match(inner))
         or inner.lower() in _NOT_A_VALUE
         or bool(_NUMBER_RE.match(inner) or _DATE_RE.match(inner) or _MASK_RE.match(inner))
         or bool(_ANY_PLACEHOLDER_RE.match(inner))
         or inner.lower().startswith("arn:")
-        or inner[0] in "[{"
     )
+
+
+_SEPARATOR_ROW_RE = re.compile(r"[^\n]*\n[ \t]*\|?[ \t]*:?-{3,}")
+
+
+def _is_header_row(text: str, row_end: int) -> bool:
+    return bool(_SEPARATOR_ROW_RE.match(text, row_end))
 
 
 def _named_values(text: str):
@@ -216,7 +240,9 @@ def _named_values(text: str):
     for row in _TABLE_ROW_RE.finditer(text):
         name = row.group("name").strip("`*_ \t")
         value = row.group("value")
-        if re.fullmatch(r"[\w.-]+", name) and _is_secret_name(name) and not _is_not_a_secret_value(value):
+        if _is_header_row(text, row.end()):
+            continue
+        if re.fullmatch(r"[\w. -]+", name) and _is_secret_name(name.replace(" ", "_")) and not _is_not_a_secret_value(value):
             lead = len(value) - len(value.lstrip(" \t`*"))
             yield row.start("value") + lead, row.end("value") - (len(value) - len(value.rstrip(" \t`*")))
     for sentence in _PROSE_RE.finditer(text):
@@ -225,6 +251,12 @@ def _named_values(text: str):
         if _is_not_a_secret_value(value) or (bare.isalpha() and bare in _PROSE_WORDS):
             continue
         yield sentence.start("value"), sentence.start("value") + len(value)
+    for command in _HTPASSWD_RE.finditer(text):
+        value = command.group("value")
+        if command.group("user").lower() in _PROSE_WORDS | {"is", "was", "file", "for", "command", "tool", "utility", "and", "or"}:
+            continue
+        if not _is_not_a_secret_value(value):
+            yield command.start("value"), command.end("value")
 
 
 _EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
@@ -253,8 +285,9 @@ def _looks_like_a_name(token: str) -> bool:
 def _is_lowercase_secret(token: str) -> bool:
     """Random lower case letters and digits: a mix of both, switching often, with spread-out characters."""
     digits = sum(c.isdigit() for c in token)
-    if sum(len(run) for run in _LOWER_WORD_RE.findall(token)) / len(token) >= 0.6:
-        return False  # mostly words stuck together
+    wordy = sum(len(run) for run in _LOWER_WORD_RE.findall(token))
+    if wordy / len(token) >= 0.6 and len(token) - wordy < 10:
+        return False  # words stuck together with hardly anything else
     if not 0.12 <= digits / len(token) <= 0.65:
         return False
     switches = sum(a.isdigit() != b.isdigit() for a, b in zip(token, token[1:]))
@@ -263,7 +296,7 @@ def _is_lowercase_secret(token: str) -> bool:
 
 def _is_high_entropy(token: str) -> bool:
     token = token.rstrip("=")
-    if len(token) < MIN_TOKEN_LENGTH or _UUID_RE.match(token) or _AWS_ID_RE.match(token):
+    if len(token) < MIN_LOWERCASE_LENGTH or _UUID_RE.match(token) or _AWS_ID_RE.match(token):
         return False
     if _RDS_ID_RE.match(token) or _PREFIXED_ULID_RE.match(token):
         return False
@@ -275,6 +308,8 @@ def _is_high_entropy(token: str) -> bool:
         return False
     if lower and not upper and token.isalnum():
         return _is_lowercase_secret(token)
+    if len(token) < MIN_TOKEN_LENGTH:
+        return False
     if "/" in token and not (lower and upper):
         return False
     if not (lower and upper) and not token.isalnum():
@@ -286,34 +321,63 @@ def _is_high_entropy(token: str) -> bool:
 
 
 def _line_of(text: str, start: int, end: int) -> str:
-    line_start = text.rfind("\n", 0, start) + 1
-    line_end = text.find("\n", end)
-    return text[line_start : len(text) if line_end < 0 else line_end]
+    """The line holding text[start:end], without that part itself."""
+    window_start = max(0, start - LINE_WINDOW)
+    line_start = text.rfind("\n", window_start, start) + 1 or window_start
+    line_end = text.find("\n", end, end + LINE_WINDOW)
+    return text[line_start:start] + " " + text[end : end + LINE_WINDOW if line_end < 0 else line_end]
+
+
+def _follows_digest_key(text: str, start: int) -> bool:
+    """The value is directly after a key such as CodeSha256, checksum or etag."""
+    tail = text[max(0, start - 80) : start].rstrip("\"'` \t")
+    if not tail or tail[-1] not in ":=|":
+        return False
+    key = _KEY_AT_END_RE.search(tail[:-1].rstrip("\"'` \t")[-60:])
+    return bool(key) and re.sub(r"[^a-z0-9]", "", key.group().lower()).endswith(_DIGEST_KEYS)
+
+
+def _is_known_identifier(text: str, start: int, end: int) -> bool:
+    """A git commit, a container id or a digest that ordinary evidence carries; never next to a secret word."""
+    length = end - start
+    if _follows_digest_key(text, start):
+        return not _SECRET_CONTEXT_RE.search(_line_of(text, start, end))
+    if length not in (40, 64):
+        return False
+    line = _line_of(text, start, end)
+    if length == 40:
+        known = _COMMIT_CONTEXT_RE.search(line)
+    else:
+        known = _CONTAINER_SCHEME_RE.search(text[max(0, start - 13) : start]) or _CONTAINER_KEY_RE.search(line)
+    return bool(known) and not _SECRET_CONTEXT_RE.search(line)
 
 
 def _entropy_spans(text: str):
     for match in _HEX_RE.finditer(text):
         if _DIGEST_BEFORE_RE.search(text[max(0, match.start() - 8) : match.start()]):
             continue
-        if match.end() - match.start() == 40 and _COMMIT_CONTEXT_RE.search(_line_of(text, match.start(), match.end())):
-            continue  # a git commit id in a sentence or table row about a deploy
+        if _is_known_identifier(text, match.start(), match.end()):
+            continue
         yield match.start(), match.end()
     for match in _CHUNK_RE.finditer(text):
         chunk = match.group()
         before = text[max(0, match.start() - 8) : match.start()]
         if _DIGEST_BEFORE_RE.search(before):
             continue
-        if "/" not in chunk:
-            if _is_high_entropy(chunk):
+        if "/" not in chunk or (not chunk.startswith("/") and "//" not in chunk):
+            if _is_high_entropy(chunk) and not _is_known_identifier(text, match.start(), match.end()):
                 yield match.start(), match.end()
-            continue
-        if not chunk.startswith("/") and "//" not in chunk and _is_high_entropy(chunk):
-            yield match.start(), match.end()
-            continue
+                continue
+            if "/" not in chunk:
+                continue
         offset = match.start()
+        known = None
         for segment in chunk.split("/"):
             if _is_high_entropy(segment):
-                yield offset, offset + len(segment)
+                if known is None:
+                    known = _is_known_identifier(text, match.start(), match.end())
+                if not known:
+                    yield offset, offset + len(segment)
             offset += len(segment) + 1
 
 
