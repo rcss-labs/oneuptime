@@ -92,7 +92,7 @@ Write `findings/<analyst>.json`. The file name without `.json` is the analyst na
 | `findings[].claim` | yes | Non-empty text: what the evidence shows |
 | `findings[].fact_ids` | yes | Non-empty list of citations (below) |
 | `findings[].excerpt` | yes | Text that appears in a cited fact (rules below) |
-| `findings[].provenance` | yes | `incident_time`, `current`, or `inferred` |
+| `findings[].provenance` | yes | `incident_time`, `current`, or `inferred` (use `inferred` for a fact of kind `derived`) |
 | `findings[].confidence` | yes | `high`, `medium`, or `low` |
 | `findings[].time` | no | When the event happened, as a time with a zone. Judging needs it on a supporting finding to pass the timing gate. |
 | `checked` | no | List of text: what was looked at, kept for the report. Items that are not text are dropped. |

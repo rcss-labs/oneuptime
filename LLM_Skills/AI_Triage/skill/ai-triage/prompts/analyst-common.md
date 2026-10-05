@@ -38,8 +38,13 @@ quoted exactly. Write it in the format given in `reference/formats.md` of the sk
 - The excerpt is copied character for character from one string of a cited fact
   (its summary, its excerpt, or a string in its data), 12 to 300 characters. Quote
   what was found, not the name of the thing that was asked about.
-- `provenance` is `incident_time` only when a cited fact of that kind contains your
-  excerpt, and then you give its `time`. Otherwise `current` or `inferred`.
+- `provenance` is one of three words. `incident_time`: a cited fact of that kind
+  contains your excerpt, and you give its `time`. `current`: the same for a fact of
+  kind `current`. `inferred`: everything else, including every fact of kind
+  `derived`. There is no provenance `derived`.
+- Claim only what the quoted words say. A claim that adds a revision, a time, or a
+  count that the quote does not hold is judged uncertain and weakens the cause it
+  was meant to support.
 - `confidence` is how directly the quoted words show the claim: high, medium, or low.
 
 Report, in this order of importance:

@@ -66,7 +66,8 @@ Do the steps in order. Work without stopping to ask, except where a step says to
    each with `prompts/analyst-common.md`, its domain prompt, and the case folder:
    changes and logs always; compute, data, and edge when the case has evidence in
    their domain. Analysts read evidence files and write `findings/<analyst>.json`.
-   They run no AWS command. Without subagents, do the domains yourself, one by one.
+   They run no AWS command. Without subagents, read `prompts/analyst-common.md` and
+   each domain prompt yourself and write each domain's file, one by one.
 6. **Check.** `run findings check --case-dir <case>`, then `run timeline --case-dir <case>`.
    The check exits 0 even when it refuses findings, so read `rejected` in its output.
    A refused finding is not evidence: have it corrected from the message, or drop it.
@@ -90,11 +91,15 @@ Do the steps in order. Work without stopping to ask, except where a step says to
    `report.json` set each label to the label the summary gives, copy its `typesafe`
    value into `coverage.typesafe`, and make `status`, `summary.top_cause`, and the
    hypothesis results agree with those labels. Change nothing else: any other edit
-   means judging again.
+   means judging again. A supporting finding that came back uncertain usually
+   claims more than its quote shows, and it holds its cause at probable: rewrite
+   that finding's claim to what the quoted words say, or take it off the cause's
+   list, then run the check and the judging again. Do that at most twice; after
+   that the label stands.
 10. **Render.** `run report validate --case-dir <case>`, fix what it lists, then
     `run report render --case-dir <case>`. It writes `report.md` and `work-order.json`.
 11. **Publish.** `run publish confluence --case-dir <case>` audits the report and
-    prints the page request. Dispatch one subagent with `prompts/redaction-audit.md`
+    prints the page request only when the audit is clean. Dispatch one subagent with `prompts/redaction-audit.md`
     to read `report.md`; without subagents, read it yourself against that prompt.
     When both are clean, create or update the Confluence page with exactly that
     file, then `run publish record-confluence ...`. Next,
