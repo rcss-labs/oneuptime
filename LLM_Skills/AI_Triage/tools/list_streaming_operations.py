@@ -20,8 +20,8 @@ import shutil
 import sys
 from pathlib import Path
 
-# The CLI's own command names that differ from the botocore model folder.
-CLI_SERVICE_NAMES = {"s3": "s3api"}
+# The CLI's own command names that differ from the botocore model folder (as `aws help` lists them).
+CLI_SERVICE_NAMES = {"s3": "s3api", "config": "configservice", "codedeploy": "deploy"}
 KNOWN_DATA_DIRS = (Path("/usr/local/aws-cli/awscli/botocore/data"),)
 _SPECIAL_CASE = re.compile("[A-Z]{2,}s$")
 _FIRST_CAP = re.compile("(.)([A-Z][a-z]+)")

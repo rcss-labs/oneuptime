@@ -225,10 +225,19 @@ def _is_accept_hits(arg: str) -> bool:
     return arg.startswith(ACCEPT_HITS_FLAG) or (len(head) > 2 and ACCEPT_HITS_FLAG.startswith(head))
 
 
-def _is_skill_dir(arg: str) -> bool:
-    """--skill-dir, with or without =value, or an abbreviation argparse would expand to it."""
+# Own-script options that point a script at other inputs or past a safety check; the engineer decides.
+REDIRECTING_FLAGS = {
+    SKILL_DIR_FLAG: "points the script at another skill folder, with its own config and service map",
+    "--config": "points the script at another config",
+    "--map": "points the script at another service map",
+    "--allow-replay": "publishes a replay run, whose evidence comes from recordings",
+}
+
+
+def _carries_flag(arg: str, flag: str) -> bool:
+    """The flag, with or without =value, or an abbreviation argparse would expand to it."""
     head = arg.split("=", 1)[0]
-    return len(head) > 2 and SKILL_DIR_FLAG.startswith(head)
+    return len(head) > 2 and flag.startswith(head)
 
 
 def _is_apply(arg: str) -> bool:
@@ -242,8 +251,9 @@ def _engineer_must_approve(name: str, args: tuple[str, ...]) -> str:
         return "map_suggest.py apply writes an entry to your service map"
     if name == "publish.py" and any(_is_accept_hits(arg) for arg in args):
         return "publish.py --accept-hits publishes although the audit found possible secrets"
-    if any(_is_skill_dir(arg) for arg in args):
-        return f"{name} --skill-dir points the script at another skill folder, with its own config and service map"
+    for flag, effect in REDIRECTING_FLAGS.items():
+        if any(_carries_flag(arg, flag) for arg in args):
+            return f"{name} {flag} {effect}"
     return ""
 
 

@@ -445,7 +445,7 @@ def test_a_path_like_value_under_another_option_asks(command, monkeypatch):
         f"aws ssm get-parameter --name ./x {OK}",
         f"aws ssm get-parameter --name ../x {OK}",
         f"aws ssm get-parameter --name file:///opt/x {OK}",
-        f"aws ssm get-parameter --cli-input-json fileb://x {OK}",
+        f"aws ssm get-parameter --document fileb://x {OK}",  # --cli-input-json is denied by its own rule
         f"aws ssm get-parameter --name /opt/a /opt/b {OK}",
     ],
 )
@@ -459,3 +459,62 @@ def test_names_that_do_not_look_like_paths_stay_allowed(monkeypatch):
     monkeypatch.setenv("HOME", "/Users/eng")
     for value in ("/app/db-host", "/service-role/", "tmp/2026"):
         assert verdict(f"aws ssm get-parameter --name {value} {OK}").kind == ALLOW
+
+
+# ---- final review fixes, item 3: reads that could return secrets or run something else ----
+
+from triage.guard_aws import AWS_SERVICE_NAMES  # noqa: E402
+
+import list_aws_services  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--cli-input-json '{\"Name\":\"/prod/db/password\",\"WithDecryption\":true}'", "--cli-input-yaml 'Name: x'",
+     "--cli-input-json={}", "--cli-input-j {}", "--cli-input-y x", "--cli-i {}"],
+)
+def test_cli_input_json_and_yaml_are_denied(flag):
+    result = verdict(f"aws ssm get-parameter {OK} {flag}")
+    assert result.kind == DENY and "cli-input" in result.reason
+
+
+@pytest.mark.parametrize("attribute", ["--attribute userData", "--attribute=userData", "--attribute USERDATA"])
+def test_ec2_user_data_is_denied(attribute):
+    result = verdict(f"aws ec2 describe-instance-attribute --instance-id i-1 {attribute} {OK}")
+    assert result.kind == DENY
+    assert verdict(f"aws ec2 describe-instance-attribute --instance-id i-1 --attribute instanceType {OK}").kind == ALLOW
+
+
+@pytest.mark.parametrize("operation", ["get-records --shard-iterator x", "get-shard-iterator --stream-arn a --shard-id s "
+                                       "--shard-iterator-type LATEST"])
+def test_dynamodb_stream_records_are_denied(operation):
+    assert verdict(f"aws dynamodbstreams {operation} {OK}").kind == DENY
+    assert verdict(f"aws dynamodbstreams describe-stream --stream-arn a {OK}").kind == ALLOW
+
+
+@pytest.mark.parametrize("service", ["myalias", "ecs-read", "whoami", "S3API"])
+def test_a_word_that_is_not_a_cli_service_is_denied(service):
+    result = verdict(f"aws {service} describe-anything {OK}")
+    assert result.kind == DENY and "not a service" in result.reason
+
+
+def test_real_services_and_cli_commands_are_known():
+    for name in ("ecs", "s3api", "s3", "logs", "configservice", "deploy", "configure", "sso", "dynamodbstreams"):
+        assert name in AWS_SERVICE_NAMES
+
+
+def test_the_committed_service_list_covers_the_installed_cli():
+    data_dir = list_streaming_operations.find_data_dir()
+    if data_dir is None:
+        pytest.skip("no AWS CLI service models were found on this machine, so the list cannot be regenerated")
+    missing = set(list_aws_services.service_names(data_dir)) - AWS_SERVICE_NAMES
+    assert not missing, f"add these to AWS_SERVICE_NAMES (run tools/list_aws_services.py): {sorted(missing)}"
+
+
+def test_the_service_tool_renames_like_the_cli(tmp_path):
+    for folder in ("s3", "config", "codedeploy", "ecs"):
+        (tmp_path / folder / "2020-01-01").mkdir(parents=True)
+        (tmp_path / folder / "2020-01-01" / "service-2.json").write_text("{}")
+    names = list_aws_services.service_names(tmp_path)
+    assert {"s3api", "configservice", "deploy", "ecs", "s3", "configure"} <= set(names)
+    assert "config" not in names and "codedeploy" not in names

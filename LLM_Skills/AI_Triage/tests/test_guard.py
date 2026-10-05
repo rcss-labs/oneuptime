@@ -730,3 +730,15 @@ def test_redirects_elsewhere_keep_their_answer(monkeypatch):
     assert kind(f"aws ecs list-clusters {AWS_OK} 2>&1 | head -3") == ALLOW
     assert decide("echo x > case.json", CONTEXT, cwd=CASE_RUN).kind == ASK
     assert decide("echo x > case.json", CONTEXT, cwd="/home/eng/project").kind == PASS
+
+
+# ---- final review fixes, item 3: own-script options that change what is read ----
+
+
+@pytest.mark.parametrize("args", ["--config /tmp/other.yaml", "--config=/tmp/x", "--map /tmp/map.yaml", "--map=/x",
+                                  "--allow-replay", "slack-message --case-dir c --allow-replay"])
+def test_own_script_config_map_and_allow_replay_ask(args):
+    for script in ("verify_access.py", "validate_map.py", "publish.py"):
+        verdict = decide(f"{PY} {SCRIPT}/{script} {args}", CONTEXT)
+        assert verdict.kind == ASK, (script, args)
+        assert args.split()[-1 if "allow" in args else 0].split("=")[0] in verdict.reason
