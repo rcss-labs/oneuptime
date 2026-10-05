@@ -81,8 +81,9 @@ Do the steps in order. Work without stopping to ask, except where a step says to
 8. **Draft.** Write `report.json` in the case folder (format and example in
    `reference/formats.md` and `templates/report.example.json`): symptoms, causes with
    their supporting and contradicting findings, every hypothesis including rejected
-   ones, and actions. An action names the exact resource, its current state, the
-   required state, the change, how to verify it, and how to roll it back. An
+   ones, and actions. An action names the exact resource (with its ARN and account
+   id, taken from the evidence), its current state, the required state, the change,
+   how to verify it, and how to roll it back. An
    unresolved report still lists each cause you tested, with the findings that
    contradict it; the judging step needs at least one cause.
 9. **Judge.** `run judge run --case-dir <case>`. Read `judgments/summary.json`. In
@@ -94,15 +95,21 @@ Do the steps in order. Work without stopping to ask, except where a step says to
     `run report render --case-dir <case>`. It writes `report.md` and `work-order.json`.
 11. **Publish.** `run publish confluence --case-dir <case>` audits the report and
     prints the page request. Dispatch one subagent with `prompts/redaction-audit.md`
-    to read `report.md`. When both are clean, create or update the Confluence page
-    with exactly that file, then `run publish record-confluence ...`. Next,
+    to read `report.md`; without subagents, read it yourself against that prompt.
+    When both are clean, create or update the Confluence page with exactly that
+    file, then `run publish record-confluence ...`. Next,
     `run publish slack-message --case-dir <case> --confluence-url <url>` prints the
-    proposed message: show it and ask the engineer whether to post it and where.
-    Post only on a yes, then `run publish record-slack ...`.
+    proposed message (leave the option out when no page was created): show it and
+    ask the engineer whether to post it and where. Post only on a yes, then
+    `run publish record-slack ...`. When Confluence is not connected, say so and
+    leave the report in the case folder.
 12. **Service map.** When the target came from discovery, `run map_suggest propose ...`,
     show the entry, and apply it only on a yes.
 13. **Hand over.** Tell the engineer: the status, the top cause with its label, the
-    actions, what was not checked, and where the case folder is.
+    actions with their labels, what was not checked, and where the case folder is.
+    When the cause is only probable, hand over its mitigation as a candidate, say
+    which finding or judgment is missing for confirmation, and let the engineer
+    decide; do not present it as recommended.
 
 ## Playbooks
 
