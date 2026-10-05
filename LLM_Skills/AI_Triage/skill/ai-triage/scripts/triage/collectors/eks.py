@@ -2,17 +2,21 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from typing import Any
 
 from triage.collectors import Collector
 from triage.collectors.common import in_window, parse_iso, split_csv, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME, MAX_EXCERPT
-from triage.window import format_time
+from triage.window import describe_offset, format_time
 
 MAX_NODEGROUPS = 10
 MAX_ADDONS = 20
 MAX_UPDATES = "20"
+MAX_UPDATE_NODEGROUPS = 5
+MAX_NODEGROUP_UPDATES = 3
+UPDATE_LOOKBACK = timedelta(hours=24)
 MAX_WORKLOADS = 10
 MAX_RESOURCE_CONTAINERS = 3
 MAX_CONTAINERS_PER_POD = 2
@@ -86,6 +90,52 @@ def _add_nodegroups(ctx: CollectContext, name: str, region: str) -> None:
             ),
             data={"arn": group["nodegroupArn"]} if group.get("nodegroupArn") else {},
         )
+    _add_nodegroup_updates(ctx, name, region, names)
+
+
+def _add_nodegroup_updates(ctx: CollectContext, cluster: str, region: str, names: list[str]) -> None:
+    """Updates of each nodegroup (AMI or version rollouts) created in the window or the day before it."""
+    if len(names) > MAX_UPDATE_NODEGROUPS:
+        ctx.evidence.add(
+            kind=DERIVED, resource=f"cluster/{cluster}",
+            summary=(
+                f"The cluster has {len(names)} nodegroups; updates were checked for only the first "
+                f"{MAX_UPDATE_NODEGROUPS} nodegroups"
+            ),
+        )
+    earliest = ctx.window.start - UPDATE_LOOKBACK
+    for group_name in names[:MAX_UPDATE_NODEGROUPS]:
+        listed = ctx.aws(
+            "eks", "list-updates", ["--name", cluster, "--nodegroup-name", group_name, "--max-items", MAX_UPDATES],
+            region=region,
+        )
+        ids = (listed or {}).get("updateIds", [])
+        if len(ids) > MAX_NODEGROUP_UPDATES:
+            ctx.evidence.add(
+                kind=DERIVED, resource=f"nodegroup/{cluster}/{group_name}",
+                summary=(
+                    f"Nodegroup {group_name} has {len(ids)} or more updates; only {MAX_NODEGROUP_UPDATES} were "
+                    "described and older ones may not be shown"
+                ),
+            )
+        for update_id in ids[:MAX_NODEGROUP_UPDATES]:
+            reply = ctx.aws(
+                "eks", "describe-update", ["--name", cluster, "--nodegroup-name", group_name, "--update-id", update_id],
+                region=region,
+            )
+            update = (reply or {}).get("update")
+            created = parse_iso((update or {}).get("createdAt"))
+            if created is None or not earliest <= created <= ctx.window.end:
+                continue
+            errors = "; ".join(f"{e.get('errorCode')}: {e.get('errorMessage')}" for e in update.get("errors") or [])
+            ctx.evidence.add(
+                kind=INCIDENT_TIME, resource=f"nodegroup/{cluster}/{group_name}", time=created, command=ctx.last_command,
+                summary=(
+                    f"Nodegroup {group_name} update {update.get('id')} ({update.get('type')}) is {update.get('status')}, "
+                    f"created {format_time(created)}, {describe_offset(created, ctx.window.start)} the window start"
+                    + (f"; errors: {errors}" if errors else "")
+                ),
+            )
 
 
 def _add_addons(ctx: CollectContext, name: str, region: str) -> None:

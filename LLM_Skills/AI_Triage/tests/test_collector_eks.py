@@ -1,6 +1,6 @@
 import json
 
-from fakes import access_denied
+from fakes import FakeAws, access_denied
 from helpers import FakeKubectl, assert_read_only, make_context
 from triage.collectors.eks import COLLECTOR
 
@@ -103,9 +103,26 @@ class LogKube(FakeKubectl):
         return 0, answer, ""
 
 
+class NodegroupUpdateAws(FakeAws):
+    """Answers nodegroup-level list-updates and describe-update from their own keys.
+
+    Keys: "list-updates nodegroup" and "describe-update nodegroup" (defaults: no updates).
+    """
+
+    def __call__(self, argv, timeout):
+        if argv[1] == "eks" and argv[2] in ("list-updates", "describe-update") and "--nodegroup-name" in argv:
+            self.calls.append(argv)
+            answer = self.answers.get(f"{argv[2]} nodegroup", {"updateIds": []} if argv[2] == "list-updates" else {})
+            if isinstance(answer, tuple):
+                return answer[0], "", answer[1]
+            return 0, json.dumps(answer), ""
+        return super().__call__(argv, timeout)
+
+
 def run(config_data, tmp_path, aws=None, kube=None, targets=None, logs=None):
-    ctx, fake_aws, _ = make_context(
-        config_data, tmp_path, aws or aws_answers(), collector="eks", kube_answers=kube or kube_answers())
+    answers = aws or aws_answers()
+    ctx, _, _ = make_context(config_data, tmp_path, answers, collector="eks", kube_answers=kube or kube_answers())
+    fake_aws = ctx.runner = NodegroupUpdateAws(answers)
     fake_kube = LogKube(kube or kube_answers(), logs or {})
     ctx.kube_runner = fake_kube
     COLLECTOR.run(ctx, {"cluster": CLUSTER, **(targets or {})})
@@ -700,3 +717,58 @@ def test_pod_that_never_restarted_does_not_get_a_resources_sentence(config_data,
     ctx, _, _ = run(config_data, tmp_path, kube=kube_answers(**{"get pods": {"items": [waiting]}}),
                     targets={"namespace": "web"})
     assert "limit" not in with_text(ctx, "Pod payments-api-abc is")[0].summary
+
+
+def ng_update(update_id="nu1", created="2026-10-04T09:30:00Z", status="Successful", kind="ConfigUpdate"):
+    return {"update": {"id": update_id, "status": status, "type": kind, "createdAt": created, "errors": []}}
+
+
+def ng_answers(update_reply, ids=("nu1",), **extra):
+    return aws_answers(**{"list-updates nodegroup": {"updateIds": list(ids)},
+                          "describe-update nodegroup": update_reply, **extra})
+
+
+def test_nodegroup_update_just_before_the_window_is_an_event(config_data, tmp_path):
+    ctx, aws, kube = run(config_data, tmp_path, ng_answers(ng_update(created="2026-10-04T09:30:00Z")))
+    fact = with_text(ctx, "Nodegroup workers update nu1")[0]
+    assert fact.kind == "incident_time" and fact.time == "2026-10-04T09:30:00Z"
+    assert "ConfigUpdate" in fact.summary and "Successful" in fact.summary and "30 minutes before the window start" in fact.summary
+    list_call = next(c for c in aws.calls if c[1:3] == ["eks", "list-updates"] and "--nodegroup-name" in c)
+    assert list_call[list_call.index("--nodegroup-name") + 1] == "workers" and list_call[list_call.index("--name") + 1] == CLUSTER
+    describe = next(c for c in aws.calls if c[1:3] == ["eks", "describe-update"] and "--nodegroup-name" in c)
+    assert describe[describe.index("--update-id") + 1] == "nu1"
+    assert_read_only(ctx, aws, kube)
+
+
+def test_nodegroup_update_inside_the_window_is_an_event(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, ng_answers(ng_update(created=IN_WINDOW, status="Failed")))
+    assert with_text(ctx, "Nodegroup workers update nu1")[0].time == IN_WINDOW
+
+
+def test_old_and_later_nodegroup_updates_are_dropped(config_data, tmp_path):
+    for created in ("2026-09-20T09:30:00Z", "2026-10-04T13:00:00Z"):
+        ctx, _, _ = run(config_data, tmp_path, ng_answers(ng_update(created=created)))
+        assert with_text(ctx, "Nodegroup workers update") == []
+
+
+def test_at_most_three_updates_per_nodegroup_with_a_note(config_data, tmp_path):
+    ctx, aws, _ = run(config_data, tmp_path, ng_answers(ng_update(), ids=[f"nu{n}" for n in range(6)]))
+    described = [c for c in aws.calls if c[1:3] == ["eks", "describe-update"] and "--nodegroup-name" in c]
+    assert len(described) == 3
+    note = with_text(ctx, "more updates")
+    assert len(note) == 1 and note[0].kind == "derived" and "workers" in note[0].summary
+
+
+def test_at_most_five_nodegroups_are_checked_for_updates(config_data, tmp_path):
+    names = [f"ng-{n}" for n in range(8)]
+    ctx, aws, _ = run(config_data, tmp_path, ng_answers(ng_update(), **{"eks list-nodegroups": {"nodegroups": names}}))
+    listed = [c for c in aws.calls if c[1:3] == ["eks", "list-updates"] and "--nodegroup-name" in c]
+    assert len(listed) == 5
+    assert with_text(ctx, "only the first 5 nodegroups")
+
+
+def test_access_denied_on_nodegroup_updates_is_one_error_and_the_rest_continues(config_data, tmp_path):
+    ctx, aws, kube = run(config_data, tmp_path, aws_answers(**{"list-updates nodegroup": access_denied("ListUpdates")}))
+    assert [e["code"] for e in ctx.evidence.errors] == ["AccessDeniedException"]
+    assert with_text(ctx, "Nodegroup workers is")
+    assert_read_only(ctx, aws, kube)
