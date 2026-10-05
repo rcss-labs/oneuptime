@@ -388,3 +388,241 @@ def test_one_megabyte_of_hostile_text_is_scanned_in_under_two_seconds():
 def test_fullwidth_letters_are_normalised_before_matching():
     text = "".join(chr(ord(c) + 0xFEE0) for c in "password") + "=hunter22"
     assert "named_value" in kinds(text)
+
+
+# ---------------------------------------------------------------- fix round 1
+
+UPPER_DIGITS = string.ascii_uppercase + string.digits
+CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+LOWER_DIGITS = string.ascii_lowercase + string.digits
+
+
+def plain(length: int, seed: int, alphabet: str) -> str:
+    rng = random.Random(seed)
+    return "".join(rng.choice(alphabet) for _ in range(length))
+
+
+ROUND1_POSITIVES = {
+    "named_value": [
+        "db_pass" + "word: " + "hunter" + "22",
+        "api" + "Key = " + "hunter" + "22",
+        "auth-tok" + "en: " + "hunter" + "22",
+        "AWS_SECRET_ACCESS" + "_KEY=" + "hunter" + "22",
+        "x-api" + "-key: " + "hunter" + "22",
+        "pass" + "word2: " + "hunter" + "22",
+        "| pass" + "word | " + "hunter" + "22 |",
+        "| DB_PASS" + "WORD | " + "Hunter" + "1234! |",
+        "| `tok" + "en` | `" + "hunter" + "22` |",
+        "the pass" + "word is " + "hunter" + "22",
+        "the pass" + "word is `" + "swordfish" + "`.",
+        "the API tok" + "en: " + "Hunter" + "22x was pasted",
+        "we found the sec" + "ret: " + "hunter" + "22 in the log",
+    ],
+    "vendor_token": [
+        "key " + "S" + "K" + plain(32, 60, HEX),
+        "key " + "A" + "C" + plain(32, 61, HEX),
+        "redis://:" + rand(12, 62) + "@cache",
+        "redis://:" + rand(12, 63) + "@cache.example.com:6379",
+    ],
+    "entropy": [
+        "stage " + plain(40, 64, HEX) + " end",
+        "commit " + plain(41, 65, HEX),
+        "value " + plain(32, 66, LOWER_DIGITS),
+    ],
+    "phone": ["call %2B44%a02079460958"],
+}
+
+
+@pytest.mark.parametrize(
+    "kind,sample",
+    [(k, s) for k, v in ROUND1_POSITIVES.items() for s in v],
+)
+def test_round1_positive_shapes(kind, sample):
+    assert kind in kinds(sample), sample
+
+
+ROUND1_NEGATIVES = [
+    "arn:aws:secretsmanager:eu-west-1:<ACCOUNT>:secret:prod/db-AbCdEf",
+    "secrets: [{name: db, valueFrom: arn}]",
+    '"secrets": [{"name": "DB", "valueFrom": "x"}]',
+    "secretKeyRef: {name: db, key: password}",
+    "tokenExpirationSeconds: 3600",
+    "tokens: 512",
+    "max_tokens = 4096",
+    "password_last_changed: 2026-09-01",
+    "password_last_changed: 2026-09-01T10:04:00Z",
+    "secretsmanager: enabled-by-the-platform-team",
+    "token: 1700000000",
+    "password: arn:aws:secretsmanager:eu-west-1:<ACCOUNT>:secret:x",
+    "token: [a, b]",
+    "token: {a: b}",
+    "password: ***",
+    "password: ********",
+    "password: xxxx",
+    "token: <REDACTED>",
+    "token: REDACTED",
+    "api_key: <PLACEHOLDER>",
+    "| password | 512 |",
+    "| Name | Value |",
+    "| secretsmanager | prod |",
+    "| token | <TOKEN-1> |",
+    "the password is rotated every 90 days",
+    "the password is stored in the vault",
+    "req_" + plain(26, 70, CROCKFORD),
+    "X-Request-Id: req_" + plain(26, 71, CROCKFORD),
+    "db-" + plain(26, 72, UPPER_DIGITS),
+    "DbiResourceId | db-" + plain(26, 73, UPPER_DIGITS) + " |",
+    "commit " + plain(40, 74, HEX),
+    "Commit | " + plain(40, 75, HEX),
+    "image tag " + plain(40, 76, HEX),
+    "deployment of " + plain(40, 77, HEX),
+    "revision: " + plain(40, 78, HEX),
+    "git sha " + plain(40, 79, HEX),
+    "S" + "K" + plain(31, 80, HEX),
+    "S" + "K" + plain(33, 81, HEX),
+    "S" + "K" + "z" * 32,
+    "redis://cache.example.com:6379",
+    "redis://:<SECRET-1>@cache",
+    "call +44 20 79",
+]
+
+
+@pytest.mark.parametrize("sample", ROUND1_NEGATIVES)
+def test_round1_negative_shapes_give_no_hit(sample):
+    assert scan(sample) == [], sample
+
+
+def test_a_prefixed_hex_key_glued_to_a_letter_is_not_a_vendor_token():
+    assert "vendor_token" not in kinds("x" + "S" + "K" + plain(32, 82, HEX))
+
+
+def wrapped(token: str, cut: int, gap: str) -> str:
+    return "see " + token[:cut] + gap + token[cut:] + " end"
+
+
+@pytest.mark.parametrize("gap", ["\n", "\n  ", "\r\n    ", " \n\t", "\n> "])
+def test_vendor_tokens_split_by_a_line_wrap_are_found_at_the_line_they_start(gap):
+    tokens = ["AK" + "IA" + "X" * 16, pad("gh" + "p_", 36, 90), pad("gl" + "pat-", 20, 91, B64URL)]
+    for token in tokens:
+        if gap == "\n> ":
+            continue  # a quote marker is not indentation
+        hits = scan("first\n" + wrapped(token, 10, gap))
+        assert [(h.kind, h.line) for h in hits] == [("vendor_token", 2)], (token[:4], gap)
+
+
+def test_ordinary_text_across_a_line_wrap_is_not_a_token():
+    assert scan("the checkout service\nrestarted twice\n  and recovered") == []
+    assert scan("AK" + "IA\nshort") == []
+
+
+@pytest.mark.parametrize("length", [24, 32, 40])
+def test_random_lowercase_tokens_are_caught_at_eighty_percent_or_better(length):
+    caught = sum("entropy" in kinds(f"key {plain(length, seed, LOWER_DIGITS)} end") for seed in range(500))
+    assert caught / 500 >= 0.8
+
+
+def identifier_corpus():
+    rng = random.Random(5)
+    words = ["checkout", "payment", "api", "worker", "release", "hotfix", "latency", "cluster", "nodegroup", "queue",
+             "service", "deploy", "ingress", "backend", "primary", "replica", "autoscaling", "timeout"]
+    for _ in range(1500):
+        parts = [rng.choice(words) for _ in range(rng.randrange(2, 5))]
+        yield "".join(parts) + str(rng.choice([2, 3, 20261004, 7, 42, 1004]))
+        yield "".join(parts[:2]) + "v" + str(rng.randrange(1, 9)) + "".join(parts[2:])
+        yield "".join(parts) + plain(rng.randrange(5, 10), rng.randrange(10**6), LOWER_DIGITS)[:8] + "".join(parts[:1])
+
+
+def test_lowercase_rule_gives_no_hit_on_identifier_like_strings():
+    offenders = [i for i in identifier_corpus() if len(i) >= 24 and scan("id " + i + " ok")]
+    assert offenders == []
+
+
+def test_non_utf8_percent_escapes_are_decoded_as_latin_1():
+    hit = scan("call %2B44%a02079460958")
+    assert [h.kind for h in hit] == ["phone"]
+
+
+def test_allowed_account_aliases_is_documented_as_the_allowed_account_ids():
+    assert "12-digit account ids" in (scan.__doc__ or "")
+
+
+ECS_REPORT = """# Incident: bad deploy of checkout on ECS
+
+| Field | Value |
+| --- | --- |
+| Cluster | arn:aws:ecs:eu-west-1:<ACCOUNT>:cluster/checkout-prod |
+| Service | arn:aws:ecs:eu-west-1:<ACCOUNT>:service/checkout-prod/checkout-api |
+| Task | arn:aws:ecs:eu-west-1:<ACCOUNT>:task/checkout-prod/{task} |
+| Task id | {task} |
+| Target group | arn:aws:elasticloadbalancing:eu-west-1:<ACCOUNT>:targetgroup/checkout-tg/{tg} |
+| Commit | {commit} |
+| Image | <ACCOUNT>.dkr.ecr.eu-west-1.amazonaws.com/checkout@sha256:{digest} |
+| Image tag | 2026.10.04-{commit8} |
+| Principal | {principal}:deploy-session |
+| Trace | 1-{epoch}-{trace} |
+
+- CloudTrail event {uuid} UpdateService by <EMAIL-1>
+- Deployment ecs-svc/{deployment} reached steady state failed
+- Log stream checkout-api/checkout/{task}
+"""
+
+CERT_REPORT = """# Incident: expired certificate on the public load balancer
+
+- Certificate arn:aws:acm:eu-west-1:<ACCOUNT>:certificate/{uuid} expired at 2026-10-04T00:00:00Z
+- Listener arn:aws:elasticloadbalancing:eu-west-1:<ACCOUNT>:listener/app/public/{lb}/{listener}
+- Validation record _{label}.shop.example.com CNAME _{label2}.acm-validations.aws.
+- Serial {serial}
+- SHA-256 fingerprint {fingerprint}
+- Hosted zone /hostedzone/Z{zone} change /change/C{change}
+
+```
+notAfter=Oct  4 00:00:00 2026 GMT
+verify error:num=10:certificate has expired
+```
+"""
+
+RDS_REPORT = """# Incident: RDS connection exhaustion
+
+- DB arn:aws:rds:eu-west-1:<ACCOUNT>:db:orders-prod
+- DbiResourceId | db-{dbi} |
+- Endpoint orders-prod.cluster-abc123.eu-west-1.rds.amazonaws.com
+- Parameter group default.postgres15, max_connections 5000
+- Secret arn:aws:secretsmanager:eu-west-1:<ACCOUNT>:secret:orders/prod/db-{suffix}
+- secrets: managed by the platform
+- HPA checkout-api scaled 4 -> 20, pods checkout-api-7d9f8c6b5-x2x4z, checkout-api-7d9f8c6b5-q8w7e
+- Snapshot rds:orders-prod-2026-10-04-02-00
+- Hikari: HikariPool-1 - Connection is not available, request timed out after 30000ms
+- Logs Insights query {uuid}
+"""
+
+
+def build_report(template: str) -> str:
+    rng = random.Random(11)
+    hexrun = lambda n: "".join(rng.choice(HEX) for _ in range(n))  # noqa: E731
+    fields = {
+        "task": hexrun(32), "tg": hexrun(16), "commit": hexrun(40), "commit8": hexrun(8), "digest": hexrun(64),
+        "principal": "AR" + "OA" + "".join(rng.choice(UPPER_DIGITS) for _ in range(17)),
+        "epoch": "6" + hexrun(7), "trace": hexrun(24), "uuid": "123e4567-e89b-12d3-a456-" + "4266" + "14174000",
+        "deployment": "ecs-svc-" + hexrun(8), "lb": hexrun(16), "listener": hexrun(16), "label": hexrun(32),
+        "label2": hexrun(32), "serial": ":".join(hexrun(2) for _ in range(16)),
+        "fingerprint": ":".join(hexrun(2).upper() for _ in range(32)), "zone": "".join(rng.choice(UPPER_DIGITS) for _ in range(19)),
+        "change": "".join(rng.choice(UPPER_DIGITS) for _ in range(19)),
+        "dbi": "".join(rng.choice(UPPER_DIGITS) for _ in range(26)), "suffix": "AbCdEf",
+    }
+    return template.format(**fields)
+
+
+@pytest.mark.parametrize("template", [ECS_REPORT, CERT_REPORT, RDS_REPORT], ids=["ecs", "certificate", "rds"])
+def test_realistic_reports_give_no_hit(template):
+    report = build_report(template)
+    assert scan(report) == [], describe(scan(report))
+
+
+def test_one_megabyte_with_wraps_tables_and_names_is_scanned_in_under_two_seconds():
+    pieces = ["| password | ", "token: ", "the password is ", "AK" + "IA" + "\n  ", "\n", "| a | b |\n", "db_secret=",
+              "x" * 40, "ab12" * 10, "%a0", "\n    ", "ghp_"]
+    rng = random.Random(9)
+    text = "".join(rng.choice(pieces) for _ in range(60_000))[:1_000_000]
+    start = time.perf_counter()
+    scan(text)
+    assert time.perf_counter() - start < 2.0
