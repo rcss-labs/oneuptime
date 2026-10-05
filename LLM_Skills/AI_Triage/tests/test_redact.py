@@ -976,7 +976,9 @@ def test_pw_cred_creds_are_secret_words(key):
 
 
 def test_creds_value_redacted_in_text():
-    assert Redactor().text(f"CREDS=admin:{PW} ok") == "CREDS=<SECRET-1> ok"
+    # an environment-dump line: the value runs to the end of the line (round 4)
+    assert Redactor().text(f"CREDS=admin:{PW} ok") == "CREDS=<SECRET-1>"
+    assert Redactor().text(f"x CREDS=admin:{PW} ok") == "x CREDS=<SECRET-1> ok"
 
 
 @pytest.mark.parametrize(
@@ -1633,3 +1635,22 @@ def test_key_like_tokens_inside_urls_and_paths(template, expected):
 )
 def test_identifiers_that_are_not_key_material_are_kept(source):
     assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "pwd=x;", "password: x\n", "name: DB_PASSWORD\n", "- value: x\n  name: DB_PASSWORD\n", '{"name":"db_password",',
+        '{"name":"db_password","meta":{},"value":"x"}', "password is x ", "set password to x ", "\\u0041",
+        "<password>x</password>", '<a key="password" value="x"/>', "\tpassword\tx\n", '"AUTH" "x" ',
+        "echo x | docker login ", "mysql -px ", "redis-cli AUTH x ", "PASSWORD 'x' ",
+        "ParameterKey=DBPassword,ParameterValue=x ", "+1 555 ", "Ab3" * 10 + " ",
+    ],
+)
+def test_one_megabyte_rule_shapes_are_fast(shape):
+    source = shape * (MEGABYTE // len(shape))
+    for call in (Redactor().text, lambda s: Redactor().value({"m": s}), audit_text):
+        started = time.perf_counter()
+        call(source)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 2, (shape, elapsed)

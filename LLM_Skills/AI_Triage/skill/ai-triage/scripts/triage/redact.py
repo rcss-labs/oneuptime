@@ -46,6 +46,14 @@ STEM_WORD_EXCEPTIONS = frozenset({"passed", "passing", "bypass", "passenger", "p
 SHORT_SECRET_STEMS = frozenset({
     "key", "keys", "pwd", "pw", "psw", "pswd", "psk", "sk", "pat", "pin", "otp", "mfa", "jwt", "sig",
     "salt", "pepper", "nonce", "seed", "dsn", "cert", "code",
+    # beyond ruling 11, from the re-review's leak shapes: refresh_tok, and card and identity numbers
+    "tok", "ssn", "cvv", "cvc", "iban", "card",
+})
+# "code" names a status, not a one-time code, after these qualifiers (statusCode, exit_code).
+NON_SECRET_CODE_QUALIFIERS = frozenset({
+    "status", "exit", "error", "err", "response", "http", "return", "reason", "result", "country",
+    "currency", "language", "lang", "zip", "postal", "region", "event", "sql", "elb", "target",
+    "state", "iso", "area", "op", "program", "char", "unicode", "color", "colour", "product",
 })
 # These short stems also match at the end of a part (apikey, mysqlpwd).
 END_SECRET_STEMS = ("key", "keys", "pwd")
@@ -67,6 +75,8 @@ REFERENCE_SUFFIXES = frozenset({
 NAME_ENDINGS = REFERENCE_SUFFIXES | frozenset({
     "source", "endpoint", "flow", "requests", "remaining", "state", "schema", "usage", "spec",
     "metadata", "fingerprint", "ms", "latency",
+    # a secret word qualifying a network or an error thing: PrivateIpAddress, KeyError
+    "address", "addresses", "ip", "ips", "dns", "duration", "error", "exception",
 })
 PERSONAL_WORDS = frozenset({"user", "usr", "username", "login", "email", "mail", "owner", "phone", "msisdn", "ssn"})
 AUTHORIZATION_WORDS = frozenset({"authorization", "proxyauthorization"})
@@ -121,6 +131,8 @@ def _secret_part(parts: tuple[str, ...], raw: tuple[str, ...], index: int) -> bo
         return True
     if part in KEY_WORDS:  # a bare "key" is a lookup key (S3 Key=, a tag Key)
         return len(parts) > 1 and not (index > 0 and _is_key_kind(raw[index - 1]))
+    if part == "code" and index > 0 and parts[index - 1] in NON_SECRET_CODE_QUALIFIERS:
+        return False
     if part in SHORT_SECRET_STEMS:
         return True
     for stem in END_SECRET_STEMS:
@@ -142,7 +154,20 @@ def looks_secret_key(key: str) -> bool:
     if not parts or parts[-1] in NAME_ENDINGS:
         return False
     raw = tuple(part for part in _components(key) if part.rstrip("0123456789"))
-    return any(_secret_part(parts, raw, index) for index in range(len(parts)))
+    return any(_secret_part(parts, raw, index) for index in range(len(parts))) or _odd_case_secret(key)
+
+
+def _odd_case_secret(key: str) -> bool:
+    """PaSsWoRd, PASSword: odd casing cuts a stem into camel pieces, so each chunk between
+    separators is also checked whole when its camel split left pieces of three letters or fewer."""
+    for chunk in re.split(r"[^A-Za-z0-9]+", key):
+        pieces = [piece for piece in _CAMEL_BOUNDARY_RE.sub(" ", chunk).split() if piece.isalpha()]
+        if len(pieces) < 2 or not any(len(piece) <= 3 for piece in pieces):
+            continue
+        whole = chunk.lower().rstrip("0123456789")
+        if whole not in STEM_WORD_EXCEPTIONS and any(stem in whole for stem in LONG_SECRET_STEMS):
+            return True
+    return False
 
 
 @functools.lru_cache(maxsize=8192)
@@ -265,14 +290,29 @@ AWS_SECRET_KEY_RE = re.compile(r"(?<![\w/+=-])[A-Za-z0-9/+]{40}(?![\w/+=-])")
 JWT_RE = re.compile(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+")
 
 KV_START_RE = re.compile(
-    r"""(?<![\w.\-/:@])(?P<key>-{0,2}[A-Za-z_][\w.\-]*)(?P<quote>\\?["']?)(?P<sep>[ \t]*(?:=>|=|:)[ \t]*)"""
+    r"""(?<![\w.\-/@])(?<![\w/:]:)(?P<key>-{0,2}[A-Za-z_][\w.\-]*)(?P<quote>\\?["']?\]?)"""
+    r"""(?P<sep>[ \t]*(?:=>|:=|=|:)[ \t]*)"""
 )
-XML_PAIR_RE = re.compile(r"<(?P<key>[A-Za-z_][\w.\-]*)>(?P<value>[^<\n]+)</(?P=key)>")
+_XML_NAME = r"(?:[A-Za-z_][\w.\-]*:)?[A-Za-z_][\w.\-]*"
+XML_PAIR_RE = re.compile(r"<(?P<key>" + _XML_NAME + r")(?:[ \t][^<>]*)?>(?P<value>[^<]+)</(?P=key)>")
+XML_CDATA_RE = re.compile(r"<(?P<key>" + _XML_NAME + r")(?:[ \t][^<>]*)?>\s*<!\[CDATA\[(?P<value>.*?)\]\]>\s*</(?P=key)>", re.DOTALL)
+XML_TAG_RE = re.compile(r"<" + _XML_NAME + r"(?P<attrs>(?:\s+" + _XML_NAME + r"""\s*=\s*(?:"[^"]*"|'[^']*'))+)\s*/?>""")
+XML_ATTR_RE = re.compile(r"(?P<name>" + _XML_NAME + r""")\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""")
+XML_NAME_VALUE_RE = re.compile(
+    r"<(?P<nk>Name|Key|name|key)>(?P<name>[^<]{1,200})</(?P=nk)>\s*<(?P<vk>Value|value)>(?P<value>[^<]*)</(?P=vk)>"
+)
 LITERAL_VALUES = frozenset({"null", "true", "false", "yes", "no", "none", "ok"})
 _VALUE_END_RE = re.compile(r"""[),"]| \(|'(?=[\s,;)\]}]|$)""")
 _SCHEME_AND_TOKEN_RE = re.compile(r"(?P<scheme>[A-Za-z][\w-]*)(?P<gap>[ \t]+)(?P<token>\S.*)", re.DOTALL)
 _BLOCK_SCALAR_RE = re.compile(r"[|>][+-]?\d?")
 _BARE_VALUE_RE = re.compile(r"""[^\s&,;"'}\]\[{]+""")
+# After a delimiter, a bare value goes on unless the next thing is another key=.
+_NEXT_PAIR_RE = re.compile(r"""[ \t]*[\w.\-\[\]]+=""")
+_DIGIT_GROUP_RE = re.compile(r"\d+(?![^\s&,;])")
+# An environment dump line: KEY=value runs to the end of the line, spaces included.
+_ENV_LINE_KEY_RE = re.compile(r"[ \t]*(?:export[ \t]+)?[A-Z][A-Z0-9_]*$")
+TAB_PAIR_RE = re.compile(r"(?:^|(?<=\t))(?P<key>[A-Za-z_][\w.\-]*)\t+(?P<value>[^\t\r\n]+)", re.MULTILINE)
+PHP_VAR_DUMP_RE = re.compile(r'\["(?P<key>[^"\n]{1,100})"\]=>\s*string\(\d+\)\s*"(?P<value>[^"\n]*)"')
 
 
 _SQL_QUOTED = r"""(?:'(?P<sq>(?:[^'\\\n]|\\.|'')*)'|"(?P<dq>(?:[^"\\\n]|\\.)*)")"""
@@ -301,7 +341,8 @@ _SQL_CALL_RE = re.compile(r"[A-Za-z_]\w*\(")
 def _sql_spans(text: str) -> list[Span]:
     if "assword" not in text and "ASSWORD" not in text and "dentified" not in text.lower():
         return []
-    return _group_rule(SQL_PASSWORD_RE, "sq", "dq")(text)
+    spans = _group_rule(SQL_PASSWORD_RE, "sq", "dq")(text)
+    return [span for span in spans if not PLACEHOLDER_RE.fullmatch(text[span[0]:span[1]].strip("'\""))]
 
 
 def _shorthand_spans(text: str) -> list[Span]:
@@ -382,6 +423,9 @@ def _line_start(text: str, position: int) -> int:
 
 def _quoted_span(text: str, start: int) -> Span | None:
     """The inside of a quoted value starting at start, honouring escapes; None if not quoted."""
+    if text.startswith(("\'\'\'", '"""'), start):  # TOML or Python triple-quoted, may span lines
+        closing = text.find(text[start:start + 3], start + 3)
+        return (start + 3, len(text) if closing == -1 else closing)
     if text.startswith(("\\\"", "\\'"), start):
         limit = _line_end(text, start)
         closing = "\\" + text[start + 1]
@@ -453,8 +497,62 @@ def _kv_value_span(
             if delimiter:
                 end = delimiter.start()
         return (start, end) if end > start else None
+    return _bare_value_span(text, start)
+
+
+def _bare_value_span(text: str, start: int) -> Span | None:
+    """An unquoted value: it ends at whitespace, or at & , ; when another key= follows."""
     bare = _BARE_VALUE_RE.match(text, start)
-    return bare.span() if bare else None
+    if not bare:
+        return None
+    end = bare.end()
+    while end < len(text):
+        if text[end] in "&,;" and not _NEXT_PAIR_RE.match(text, end + 1):
+            more = _BARE_VALUE_RE.match(text, end + 1)
+            if more:
+                end = more.end()
+                continue
+        elif text[end] == " " and text[start:end].replace("-", "").replace(" ", "").isdigit():
+            more = _DIGIT_GROUP_RE.match(text, end + 1)  # a card or account number in groups
+            if more:
+                end = more.end()
+                continue
+        break
+    return (start, end)
+
+
+def _xml_local(name: str) -> str:
+    return name.rsplit(":", 1)[-1]
+
+
+def _xml_spans(text: str) -> list[Span]:
+    """Secret element bodies (namespaced, multi-line, CDATA), attributes and Name/Value pairs."""
+    spans: list[Span] = []
+    for match in XML_CDATA_RE.finditer(text):
+        if looks_secret_key(_xml_local(match.group("key"))):
+            spans.append(match.span("value"))
+    for match in XML_PAIR_RE.finditer(text):
+        if looks_secret_key(_xml_local(match.group("key"))):
+            start, end = match.span("value")
+            while start < end and text[start].isspace():
+                start += 1
+            while end > start and text[end - 1].isspace():
+                end -= 1
+            spans.append((start, end))
+    for match in XML_TAG_RE.finditer(text):
+        attributes = {}
+        for attr in XML_ATTR_RE.finditer(text, match.start("attrs"), match.end("attrs")):
+            group = "dq" if attr.group("dq") is not None else "sq"
+            attributes[_xml_local(attr.group("name")).lower()] = (attr.group(group), attr.span(group))
+        named = next((attributes[k][0] for k in ("key", "name") if k in attributes), None)
+        for name, (value, span) in attributes.items():
+            secret_value = name == "value" and named is not None and looks_secret_key(named)
+            if (secret_value or (name not in ("key", "name") and looks_secret_key(name))) and not _harmless_secret_value(value):
+                spans.append(span)
+    for match in XML_NAME_VALUE_RE.finditer(text):
+        if looks_secret_key(match.group("name")):
+            spans.append(match.span("value"))
+    return spans
 
 
 def _key_value_spans(text: str) -> list[Span]:
@@ -468,8 +566,15 @@ def _key_value_spans(text: str) -> list[Span]:
         if not _kv_candidate_is_secret(key, quote, sep):
             position = match.end("key")
             continue
-        key_column = match.start("key") - _line_start(text, match.start("key"))
+        line_start = _line_start(text, match.start("key"))
+        key_column = match.start("key") - line_start
         span = _kv_value_span(text, match.end(), quote, sep, key_column=key_column)
+        if (span and sep.strip() == "=" and not quote and text[match.end()] not in "\"'"
+                and _ENV_LINE_KEY_RE.match(text, line_start, match.start("key") + len(key))):
+            end = _line_end(text, span[0])
+            while end > span[0] and text[end - 1] in " \t\r":
+                end -= 1
+            span = (span[0], max(span[1], end))
         position = max(match.end(), span[1]) if span else match.end()
         if not span or not _usable(text, span):
             continue
@@ -477,10 +582,17 @@ def _key_value_spans(text: str) -> list[Span]:
         if _SCHEME_AND_PLACEHOLDER_RE.fullmatch(value) or _harmless_secret_value(value) or _SQL_CALL_RE.fullmatch(value):
             continue  # a SQL PASSWORD(...) call: the SQL rule masks its argument
         spans.append(span)
-    for match in XML_PAIR_RE.finditer(text):
-        if looks_secret_key(match.group("key")) and _usable(text, match.span("value")):
-            spans.append(match.span("value"))
-    return _merge(spans)
+    if "\t" in text:
+        for match in TAB_PAIR_RE.finditer(text):
+            if looks_secret_key(match.group("key")) and not _harmless_secret_value(match.group("value").strip()):
+                spans.append(match.span("value"))
+    if "]=>" in text:
+        for match in PHP_VAR_DUMP_RE.finditer(text):
+            if looks_secret_key(match.group("key")):
+                spans.append(match.span("value"))
+    if "<" in text:
+        spans.extend(_xml_spans(text))
+    return _merge([span for span in spans if _usable(text, span)])
 
 
 _NAME_KEY = r"(?:name|Name|Key|ParameterKey)"
@@ -551,7 +663,8 @@ def _flag_spans(text: str) -> list[Span]:
 # Commands whose credentials sit in short flags. Regions run to the end of the command: the line, a
 # ; | or && separator, the next command word, or 2000 characters.
 _COMMAND_RE = re.compile(
-    r"(?<![\w.-])(?P<command>curl|wget|mysqldump|mysqladmin|mysql|docker[ \t]+login|sshpass|redis-cli|put-parameter)(?![\w-])"
+    r"(?<![\w.-])(?P<command>curl|wget|mysqldump|mysqladmin|mysql|mariadb-dump|mariadb|docker[ \t]+login|sshpass|redis-cli"
+    r"|put-parameter|htpasswd|ldapsearch|ldapmodify|ldapadd|ldapdelete|ldapwhoami|ldappasswd|smbclient)(?![\w-])"
 )
 _COMMAND_END_RE = re.compile(r";|\||&&")
 _TOKEN = r"""(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)"""
@@ -563,7 +676,11 @@ _SPACED_P_RE = re.compile(r"(?<!\S)-p[ \t]*(?P<value>" + _TOKEN + r")")
 _REDIS_A_RE = re.compile(r"(?<!\S)-a[ \t]+(?P<value>" + _TOKEN + r")")
 _PARAMETER_VALUE_RE = re.compile(r"(?<!\S)--value(?:=|[ \t]+)(?P<value>" + _TOKEN + r")")
 _COMMANDS_WITH_USER_FLAG = ("curl", "wget")
-_COMMANDS_WITH_ATTACHED_P = ("mysql", "mysqladmin", "mysqldump")
+_COMMANDS_WITH_ATTACHED_P = ("mysql", "mysqladmin", "mysqldump", "mariadb", "mariadb-dump")
+_REDIS_AUTH_RE = re.compile(r"(?<!\S)(?i:auth)[ \t]+(?P<first>" + _TOKEN + r")(?:[ \t]+(?P<second>" + _TOKEN + r"))?")
+_LDAP_W_RE = re.compile(r"(?<!\S)-w[ \t]*(?P<value>" + _TOKEN + r")")
+_SMB_USER_RE = re.compile(r"(?<!\S)(?:-U|--user(?:=|[ \t]+))[ \t]*(?P<value>" + _TOKEN + r")")
+_ARGUMENT_RE = re.compile(_TOKEN)
 
 
 def _token_inner(text: str, start: int, end: int) -> Span:
@@ -609,6 +726,24 @@ def _command_spans(text: str) -> list[Span]:
         elif command == "redis-cli":
             for found in _REDIS_A_RE.finditer(text, match.end(), limit):
                 spans.append(_token_inner(text, found.start("value"), found.end("value")))
+            for found in _REDIS_AUTH_RE.finditer(text, match.end(), limit):
+                group = "second" if found.group("second") else "first"
+                spans.append(_token_inner(text, found.start(group), found.end(group)))
+        elif command == "htpasswd":  # htpasswd -b FILE USER PASSWORD
+            arguments = list(_ARGUMENT_RE.finditer(text, match.end(), limit))
+            if any(a.group().startswith("-") and "b" in a.group() for a in arguments):
+                positional = [a for a in arguments if not a.group().startswith("-")]
+                if len(positional) >= 3:
+                    spans.append(_token_inner(text, positional[2].start(), positional[2].end()))
+        elif command.startswith("ldap"):
+            for found in _LDAP_W_RE.finditer(text, match.end(), limit):
+                spans.append(_token_inner(text, found.start("value"), found.end("value")))
+        elif command == "smbclient":  # -U user%password
+            for found in _SMB_USER_RE.finditer(text, match.end(), limit):
+                inner = _token_inner(text, found.start("value"), found.end("value"))
+                percent = text.find("%", inner[0], inner[1])
+                if percent != -1:
+                    spans.append((percent + 1, inner[1]))
         elif command == "put-parameter":  # fail closed: any parameter value may be a secret
             for found in _PARAMETER_VALUE_RE.finditer(text, match.end(), limit):
                 spans.append(_token_inner(text, found.start("value"), found.end("value")))
@@ -732,9 +867,207 @@ def _yaml_argument_spans(text: str) -> list[Span]:
     return _merge([span for span in spans if _usable(text, span)])
 
 
+# --- name/value pairs the strict patterns miss ---------------------------------------------
+
+_LOOSE_NAME_RE = re.compile(
+    r"""(?P<q>\\?["']?)(?:name|Name|key|Key|ParameterKey)(?P=q)[ \t]*[:=][ \t]*(?P<nq>\\?["']?)"""
+    r"""(?P<name>[^"'\\\s,{}\[\]()=:]{1,200})(?P=nq)(?=[ \t]*[,}\n\r)]|[ \t]*$)"""
+)
+_LOOSE_TOKEN_RE = re.compile(
+    r"""[{}\[\]]|(?P<vk>(?<![\w-])\\?["']?(?:value|Value|ParameterValue)\\?["']?[ \t]*[:=](?!=)[ \t]*)"""
+)
+LOOSE_WINDOW = 2000
+
+
+def _loose_value_span(text: str, start: int) -> Span | None:
+    if start >= len(text) or text[start] in "{[\r\n":
+        return None
+    quoted = _quoted_span(text, start)
+    if quoted:
+        return quoted
+    match = re.compile(r"""[^\s,}\])"']+""").match(text, start)
+    return match.span() if match else None
+
+
+def _loose_name_value_spans(text: str) -> list[Span]:
+    """The value of a name/value object whose name is secret, wherever the value key sits in the
+    same object: after nested objects, many other pairs or non-literal values, or before the name.
+    Brackets are counted so that only keys of the same object are paired."""
+    if "alue" not in text:
+        return []
+    spans: list[Span] = []
+    for match in _LOOSE_NAME_RE.finditer(text):
+        if not looks_secret_key(match.group("name")):
+            continue
+        depth, found = 0, None
+        for token in _LOOSE_TOKEN_RE.finditer(text, match.end(), min(len(text), match.end() + LOOSE_WINDOW)):
+            if token.group("vk"):
+                if depth == 0:
+                    found = token.end()
+                    break
+            elif token.group() in "{[":
+                depth += 1
+            else:
+                depth -= 1
+                if depth < 0:
+                    break
+        if found is None:  # the value key may come before the name in the same object
+            depth, opening = 0, max(0, match.start() - LOOSE_WINDOW)
+            tokens = list(_LOOSE_TOKEN_RE.finditer(text, opening, match.start()))
+            for token in reversed(tokens):
+                if token.group("vk"):
+                    if depth == 0:
+                        found = token.end()
+                        break
+                elif token.group() in "}]":
+                    depth += 1
+                else:
+                    depth -= 1
+                    if depth < 0:
+                        break
+        if found is not None:
+            span = _loose_value_span(text, found)
+            if span and _BLOCK_SCALAR_RE.fullmatch(text[span[0]:span[1]]):
+                continue  # a YAML block scalar: the YAML rules mask its lines
+            if span and _usable(text, span) and not _harmless_secret_value(text[span[0]:span[1]]):
+                spans.append(span)
+    return spans
+
+
+_YAML_KEY_LINE_RE = re.compile(r"^(?P<dash>[ \t]*-[ \t]+)?(?P<indent>[ \t]*)(?P<key>[\w.\-]+):(?:[ \t]+(?P<value>[^\r\n]*))?[ \t]*\r?$", re.MULTILINE)
+
+
+def _yaml_item_spans(text: str) -> list[Span]:
+    """YAML list items with a secret `name:` and a `value:` key anywhere in the same item.
+
+    One linear pass: an item is a run of consecutive key lines in one column, and a `- ` line
+    starts a new one.
+    """
+    if "name:" not in text and "key:" not in text and "Name:" not in text and "Key:" not in text:
+        return []
+    items: list[tuple[list[str], list[tuple[int, Span]]]] = []  # (secret names, value lines)
+    current_column, current = None, None
+    for match in _YAML_KEY_LINE_RE.finditer(text):
+        column = len(match.group("dash") or "") + len(match.group("indent"))
+        if current is None or match.group("dash") is not None or column != current_column:
+            current, current_column = ([], []), column
+            items.append(current)
+        key, value = match.group("key"), match.group("value")
+        if value is None:
+            continue
+        if key in ("name", "Name", "key", "Key"):
+            current[0].append(value.strip().strip("\"'"))
+        elif key in ("value", "Value"):
+            current[1].append((column, match.span("value")))
+    spans: list[Span] = []
+    for names, values in items:
+        if not values or not any(looks_secret_key(name) for name in names):
+            continue
+        for column, value_span in values:
+            span = _kv_value_span(text, value_span[0], "", ": ", stop_at_delimiters=False, key_column=column)
+            if span and _usable(text, span) and not _harmless_secret_value(text[span[0]:span[1]]):
+                spans.append(span)
+    return spans
+
+
+# --- sentences and more commands -----------------------------------------------------------
+
+_SENTENCE_STOP_WORDS = frozenset({
+    "incorrect", "invalid", "required", "expired", "missing", "empty", "wrong", "not", "too", "null",
+    "none", "valid", "correct", "set", "ok", "true", "false", "being", "now", "still", "the", "a", "an",
+    "also", "changed", "reset", "blank", "weak", "strong", "short", "long", "old", "new", "mandatory",
+    "optional", "accepted", "rejected", "locked", "revoked", "used", "unknown", "undefined", "present",
+    "absent", "configured", "stale", "needed", "provided", "different", "same", "unchanged", "updated",
+    "<redacted>", "redacted", "hidden", "masked", "nil", "undefined.", "expiring", "rotated", "ready",
+})
+SENTENCE_IS_RE = re.compile(
+    r"""(?i)\b(?:password|passwd|passphrase|secret|token|api[ _-]?key|pin)[ \t]+(?:is|was)[ \t]+[:=]?[ \t]*"""
+    r"""(?:'(?P<sq>[^'\n]+)'|"(?P<dq>[^"\n]+)"|(?P<bare>[^\s'",;]+))"""
+)
+SENTENCE_SET_RE = re.compile(
+    r"""(?i)\b(?:set|setting|sets|change[sd]?|changing|reset|resetting|update[sd]?|updating)[ \t]+(?:the[ \t]+)?"""
+    r"""(?:[\w-]+[ \t]+){0,2}?(?:password|passwd|secret|token|pin)[ \t]+(?:to|=)[ \t]+"""
+    r"""(?:'(?P<sq>[^'\n]+)'|"(?P<dq>[^"\n]+)"|(?P<bare>[^\s,;]+))"""
+)
+
+
+def _sentence_spans(text: str) -> list[Span]:
+    """password is X; setting password to 'X'."""
+    lowered_hint = ("assw" in text or "ecret" in text or "oken" in text or "ASSW" in text or "pin" in text
+                    or "PIN" in text or "pi" in text.lower())
+    if not lowered_hint:
+        return []
+    spans = []
+    for pattern in (SENTENCE_IS_RE, SENTENCE_SET_RE):
+        for match in pattern.finditer(text):
+            group = next(g for g in ("sq", "dq", "bare") if match.group(g) is not None)
+            value = match.group(group)
+            if group == "bare" and (value.lower().rstrip(".") in _SENTENCE_STOP_WORDS or value.rstrip(".") == ""
+                                    or "(" in value):
+                continue  # "(": a SQL PASSWORD(...) call, masked by the SQL rule
+            if _usable(text, match.span(group)) and not _harmless_secret_value(value):
+                start, end = match.span(group)
+                while group == "bare" and end > start and text[end - 1] in ".)":
+                    end -= 1
+                spans.append((start, end))
+    return spans
+
+
+REDIS_LOG_AUTH_RE = re.compile(r'(?i)"AUTH"[ \t]+"(?P<first>[^"\n]*)"(?:[ \t]+"(?P<second>[^"\n]*)")?')
+STDIN_LOGIN_RE = re.compile(
+    r"""(?<![\w-])(?:echo|printf)[ \t]+(?:-[a-z]+[ \t]+)*(?:(?:'%s'|"%s")[ \t]+)?(?P<value>""" + _TOKEN + r""")"""
+    r"""[ \t]*\|[ \t]*(?:sudo[ \t]+)?[\w./-]*(?:docker|podman|helm|oras|crane|skopeo|nerdctl)[ \t]+(?:registry[ \t]+)?login\b"""
+)
+
+
+def _more_command_spans(text: str) -> list[Span]:
+    spans = []
+    if "AUTH" in text or "auth" in text:
+        for match in REDIS_LOG_AUTH_RE.finditer(text):
+            group = "second" if match.group("second") is not None else "first"
+            spans.append(match.span(group))
+    if "login" in text:
+        for match in STDIN_LOGIN_RE.finditer(text):
+            spans.append(_token_inner(text, match.start("value"), match.end("value")))
+    return [span for span in spans if _usable(text, span)]
+
+
+_ESCAPED_UNICODE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def _escaped_unicode_spans(text: str) -> list[Span]:
+    """Run the rules on a view with \\uXXXX escapes decoded, and map what they find back."""
+    if "\\u" not in text or not _ESCAPED_UNICODE_RE.search(text):
+        return []
+    pieces, starts, ends, position = [], [], [], 0
+    for match in _ESCAPED_UNICODE_RE.finditer(text):
+        for index in range(position, match.start()):
+            pieces.append(text[index])
+            starts.append(index)
+            ends.append(index + 1)
+        pieces.append(chr(int(match.group(1), 16)))
+        starts.append(match.start())
+        ends.append(match.end())
+        position = match.end()
+    for index in range(position, len(text)):
+        pieces.append(text[index])
+        starts.append(index)
+        ends.append(index + 1)
+    decoded = "".join(pieces)
+    spans = []
+    for category, rule in SECRET_RULES:
+        if category in ("escaped_unicode", "percent_encoded"):
+            continue
+        for start, end in rule(decoded):
+            if end > start:
+                spans.append((starts[start], ends[end - 1]))
+    return [span for span in _merge(spans) if _usable(text, span)]
+
+
 # (audit category, rule), in redaction order.
 SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("percent_encoded", lambda text: _percent_spans(text, emails=False)),
+    ("escaped_unicode", _escaped_unicode_spans),
     ("private_key", _pem_spans),
     ("sql_password", _sql_spans),
     ("url_credential", _group_rule(URL_CREDENTIAL_RE, "secret")),
@@ -742,10 +1075,13 @@ SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("secret_key_value", _key_value_spans),
     ("secret_name_value", _name_value_spans),
     ("cli_shorthand", _shorthand_spans),
+    ("secret_loose_name_value", lambda text: _merge(_loose_name_value_spans(text) + _yaml_item_spans(text))),
+    ("secret_sentence", _sentence_spans),
     ("secret_flag", _flag_spans),
     ("secret_command", _command_spans),
     ("secret_argument_list", lambda text: _merge(_yaml_argument_spans(text) + _json_array_argument_spans(text))),
     ("webhook_url", _webhook_spans),
+    ("secret_command_log", _more_command_spans),
     ("aws_access_key", lambda text: [m.span() for m in AWS_KEY_RE.finditer(text)]),
     ("vendor_token", lambda text: [m.span() for m in VENDOR_TOKEN_RE.finditer(text)]),
     ("aws_secret_key", _aws_secret_key_spans),
@@ -827,7 +1163,8 @@ def _percent_spans(text: str, emails: bool) -> list[Span]:
 # --- emails, phone numbers and addresses ---------------------------------------------------
 
 EMAIL_RE = re.compile(
-    r"(?<![\w.%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])"
+    r"(?<![\w.%+-])(?:[\w.%+-]+|\"[^\"\n@]{1,64}\")@[^\W_](?:[\w-]*[^\W_])?(?:\.[^\W_](?:[\w-]*[^\W_])?)*"
+    r"\.[^\W\d_]{2,}(?![\w-])"
 )
 _SCP_PATH_AFTER_RE = re.compile(r":[A-Za-z~./_]")
 PHONE_RE = re.compile(r"(?<![\w+:./-])\+\d(?:[ .\-()]{0,2}\d){7,14}(?![\d])")
