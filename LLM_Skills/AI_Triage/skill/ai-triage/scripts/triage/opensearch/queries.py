@@ -106,9 +106,14 @@ def _shorten(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _asked(ctx: QueryContext, index: str, query: str | None, filters: dict[str, str] | None) -> dict:
-    """What a windowed fact was queried with, so that a count is never read as covering more than it did."""
-    return {"index": index, "query": query, "filters": dict(filters or {}), "window": ctx.window.iso()}
+def _asked(
+    ctx: QueryContext, index: str, query: str | None, filters: dict[str, str] | None, **extra: Any
+) -> dict:
+    """What a windowed fact was queried with, kept in one place: data["asked"].
+
+    Summaries and excerpts never repeat these values, so that quoting the tool's own query is not evidence.
+    """
+    return {"index": index, "query": query, "filters": dict(filters or {}), "window": ctx.window.iso(), **extra}
 
 
 def _flag_partial(ctx: QueryContext, answer: dict, index: str, command: str) -> None:
@@ -134,10 +139,11 @@ def _total_hits(response: dict) -> int:
     return int(total.get("value", 0) if isinstance(total, dict) else total)
 
 
-def _add_empty_fact(ctx: QueryContext, index: str, command: str) -> None:
+def _add_empty_fact(ctx: QueryContext, index: str, command: str, asked: dict) -> None:
     ctx.evidence.add(
         kind=DERIVED, resource=index, command=command,
-        summary=f"No documents matched in {index} {_window_text(ctx)}",
+        summary=f"No documents matched in the window {_window_text(ctx)} (index, query and filters are recorded under asked)",
+        data={"asked": asked},
     )
 
 
@@ -204,7 +210,7 @@ def indices(ctx: QueryContext, index: str | None = None) -> None:
     ctx.evidence.add(
         kind=CURRENT, resource=f"cluster/{ctx.cluster.name}", command=command,
         summary=f"{len(rows)} indices" + (f": {counts_text}" if counts_text else ""),
-        data={"counts": {name: counts[name] for name in ordered}},
+        data={"counts": {name: counts[name] for name in ordered}, **({"asked": {"index": index}} if index else {})},
     )
     unhealthy = sorted(
         (row for row in rows if row.get("health") != "green"),
@@ -292,12 +298,13 @@ def mapping(ctx: QueryContext, index: str) -> None:
     for body in answer.values():
         _flatten_properties((body.get("mappings") or {}).get("properties") or {}, "", fields)
     listed = dict(list(fields.items())[:MAX_MAPPING_FIELDS])
-    summary = f"{index} has {len(fields)} fields"
+    summary = f"The index has {len(fields)} fields"
     if len(fields) > len(listed):
         summary += f", {len(listed)} listed"
         ctx.evidence.truncated = True
     ctx.evidence.add(
-        kind=CURRENT, resource=index, command=command, summary=summary, data={"fields": listed},
+        kind=CURRENT, resource=index, command=command, summary=summary,
+        data={"fields": listed, "asked": {"index": index}},
         excerpt=", ".join(f"{name}:{kind}" for name, kind in listed.items()),
     )
 
@@ -308,14 +315,10 @@ def count(ctx: QueryContext, index: str, query: str | None = None, filters: dict
     body = {"query": _query_body(ctx, query, filters)["query"]}
     answer, command = _send(ctx, Request("POST", f"{index}/_count", body=body))
     number = answer.get("count", 0)
-    summary = f"{number} documents in {index} {_window_text(ctx)}"
-    if query:
-        summary += f" matching {query}"
-    if filters:
-        summary += " with " + ", ".join(f"{key}={value}" for key, value in filters.items())
     ctx.evidence.add(
-        kind=DERIVED, resource=index, command=command, summary=summary,
-        data={"count": number, **_asked(ctx, index, query, filters)},
+        kind=DERIVED, resource=index, command=command,
+        summary=f"{number} documents matched in the window (query and filters are recorded under asked)",
+        data={"count": number, "asked": _asked(ctx, index, query, filters)},
     )
 
 
@@ -328,10 +331,10 @@ def histogram(
     body = _query_body(ctx, query, filters, size=0, aggs=aggs)
     answer, command = _send(ctx, Request("POST", f"{index}/_search", body=body))
     found = [b for b in answer["aggregations"][HISTOGRAM_NAME]["buckets"] if b["doc_count"] > 0]
-    asked = _asked(ctx, index, query, filters)
+    asked = _asked(ctx, index, query, filters, interval=interval)
     _flag_partial(ctx, answer, index, command)
     if not found:
-        _add_empty_fact(ctx, index, command)
+        _add_empty_fact(ctx, index, command, asked)
         return
     kept = found
     if len(found) > MAX_BUCKET_FACTS:
@@ -342,7 +345,7 @@ def histogram(
         ctx.evidence.add(
             kind=INCIDENT_TIME, time=start, resource=index, command=command,
             summary=f"{bucket['doc_count']} documents in the {interval} bucket starting {start}",
-            data={"count": bucket["doc_count"], "interval": interval, **asked},
+            data={"count": bucket["doc_count"], "asked": asked},
         )
     peak = max(found, key=lambda bucket: bucket["doc_count"])
     peak_start = format_time(datetime.fromtimestamp(peak["key"] / 1000, tz=timezone.utc))
@@ -350,7 +353,7 @@ def histogram(
     ctx.evidence.add(
         kind=DERIVED, resource=index, command=command,
         summary=f"Peak: {peak['doc_count']} documents in the {interval} bucket starting {peak_start}, {total} documents in all",
-        data={"count": peak["doc_count"], "bucket_start": peak_start, "total": total, "interval": interval, **asked},
+        data={"count": peak["doc_count"], "bucket_start": peak_start, "total": total, "asked": asked},
     )
 
 
@@ -383,17 +386,16 @@ def top_messages(
         _top_messages_from_hits(ctx, index, query, filters, field)
         return
     _flag_partial(ctx, answer, index, command)
+    asked = _asked(ctx, index, query, filters, method="terms aggregation")
     if not found:
-        _add_empty_fact(ctx, index, command)
+        _add_empty_fact(ctx, index, command, asked)
         return
-    asked = _asked(ctx, index, query, filters)
     for bucket in found[:MAX_TOP_MESSAGES]:
         message = ctx.evidence.redactor.text(_as_text(bucket["key"]))
         ctx.evidence.add(
             kind=DERIVED, resource=index, command=command, excerpt=message,
             summary=f"{bucket['doc_count']} occurrences of: {_shorten(message, MAX_SUMMARY_MESSAGE)}",
-            data={"message": _shorten(message, MAX_DATA_MESSAGE), "count": bucket["doc_count"],
-                  "method": "terms aggregation", **asked},
+            data={"message": _shorten(message, MAX_DATA_MESSAGE), "count": bucket["doc_count"], "asked": asked},
         )
 
 
@@ -409,21 +411,20 @@ def _top_messages_from_hits(
     answer, command = _send(ctx, Request("POST", f"{index}/_search", body=body))
     _flag_partial(ctx, answer, index, command)
     hits = answer.get("hits", {}).get("hits", [])
+    asked = _asked(ctx, index, query, filters, method=f"grouped sample of {len(hits)} hits")
     if not hits:
-        _add_empty_fact(ctx, index, command)
+        _add_empty_fact(ctx, index, command, asked)
         return
     if _total_hits(answer) > len(hits):
         ctx.evidence.truncated = True
     redactor = ctx.evidence.redactor
     # Redact first: normalising first would break the patterns that recognise keys and tokens.
     groups = Counter(_group_key(redactor, hit, field) for hit in hits)
-    asked = _asked(ctx, index, query, filters)
     for message, number in groups.most_common(MAX_TOP_MESSAGES):
         ctx.evidence.add(
             kind=DERIVED, resource=index, command=command, excerpt=message,
             summary=f"{number} of {len(hits)} sampled hits: {_shorten(message, MAX_SUMMARY_MESSAGE)}",
-            data={"message": _shorten(message, MAX_DATA_MESSAGE), "count": number,
-                  "method": f"grouped sample of {len(hits)} hits", **asked},
+            data={"message": _shorten(message, MAX_DATA_MESSAGE), "count": number, "asked": asked},
         )
 
 
@@ -437,13 +438,13 @@ def search(
     answer, command = _send(ctx, Request("POST", f"{index}/_search", body=body))
     _flag_partial(ctx, answer, index, command)
     hits = answer.get("hits", {}).get("hits", [])
+    asked = _asked(ctx, index, query, filters)
     if not hits:
-        _add_empty_fact(ctx, index, command)
+        _add_empty_fact(ctx, index, command, asked)
         return
     if _total_hits(answer) > len(hits):
         ctx.evidence.truncated = True
     cluster = ctx.cluster
-    asked = _asked(ctx, index, query, filters)
     for hit in hits:
         source = hit.get("_source") or {}
         raw_time = _lookup(source, cluster.time_field)
@@ -456,9 +457,10 @@ def search(
             value = _lookup(source, name)
             if value is not None:
                 data[name] = value
-        where = hit.get("_index") or index
+        where = hit.get("_index") or index  # the resource name; the summary uses only what the hit reports
+        reported = hit.get("_index")
         ctx.evidence.add(
             kind=INCIDENT_TIME if moment else DERIVED, time=moment, resource=where, command=command,
-            summary=f"{level} log line in {where}" if level is not None else f"Log line in {where}",
+            summary=(f"{level} log line" if level is not None else "Log line") + (f" in {reported}" if reported else ""),
             data={**data, "asked": asked}, excerpt=_as_text(_lookup(source, cluster.message_field)),
         )

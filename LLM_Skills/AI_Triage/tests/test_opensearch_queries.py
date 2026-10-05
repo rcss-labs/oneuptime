@@ -220,7 +220,8 @@ def test_mapping_flattens_fields_and_types(cluster):
     assert fact.kind == "current"
     assert fact.data["fields"] == {"@timestamp": "date", "message": "text", "message.keyword": "keyword",
                                    "kubernetes.pod": "keyword"}
-    assert fact.summary == "app-logs-* has 4 fields"
+    assert fact.summary == "The index has 4 fields"
+    assert fact.data["asked"] == {"index": INDEX}
     assert "kubernetes.pod:keyword" in fact.excerpt
     assert_all_pass_policy(transport, cluster)
 
@@ -232,7 +233,7 @@ def test_mapping_caps_at_two_hundred_fields(cluster):
     queries.mapping(ctx, INDEX)
     (fact,) = ctx.evidence.facts
     assert len(fact.data["fields"]) == 200
-    assert fact.summary == "app-logs-* has 250 fields, 200 listed"
+    assert fact.summary == "The index has 250 fields, 200 listed"
     assert ctx.evidence.truncated is True
 
 
@@ -248,18 +249,18 @@ def test_count_sends_only_a_query_and_states_the_number(cluster):
         "must": [{"query_string": {"query": "level:ERROR", "allow_leading_wildcard": False, "lenient": True}}]}}}
     (fact,) = ctx.evidence.facts
     assert fact.kind == "derived"
-    assert fact.summary == (
-        "1234 documents in app-logs-* between 2026-10-04T10:00:00Z and 2026-10-04T11:00:00Z "
-        "matching level:ERROR with service=checkout"
-    )
+    assert fact.summary == "1234 documents matched in the window (query and filters are recorded under asked)"
     assert fact.data["count"] == 1234
+    assert fact.data["asked"] == {"index": INDEX, "query": "level:ERROR", "filters": {"service": "checkout"},
+                                  "window": {"start": START, "end": END}}
+    assert set(fact.data) == {"count", "asked"}
     assert_all_pass_policy(transport, cluster)
 
 
 def test_count_without_filters_says_all_documents(cluster):
     ctx, _ = make_context(cluster, {"app-logs-*/_count": {"count": 0}})
     queries.count(ctx, INDEX)
-    assert ctx.evidence.facts[0].summary.endswith("2026-10-04T11:00:00Z")
+    assert ctx.evidence.facts[0].summary.startswith("0 documents matched in the window")
 
 
 # histogram
@@ -332,8 +333,8 @@ def test_top_messages_uses_a_keyword_terms_aggregation(cluster):
     first, second = ctx.evidence.facts
     assert first.kind == "derived"
     assert first.summary == "30 occurrences of: db timeout"
-    assert {k: first.data[k] for k in ("message", "count", "method")} == {
-        "message": "db timeout", "count": 30, "method": "terms aggregation"}
+    assert {k: first.data[k] for k in ("message", "count")} == {"message": "db timeout", "count": 30}
+    assert first.data["asked"]["method"] == "terms aggregation" and "method" not in first.data
     assert second.data["count"] == 5
     assert_all_pass_policy(transport, cluster)
 
@@ -360,8 +361,9 @@ def test_top_messages_falls_back_to_grouping_hits_when_the_cluster_errors(cluste
     assert "aggs" not in transport.requests[1].body
     assert transport.requests[1].body["size"] == 50
     first, second = ctx.evidence.facts
-    assert {k: first.data[k] for k in ("message", "count", "method")} == {
-        "message": "timeout after # ms for request #", "count": 2, "method": "grouped sample of 3 hits"}
+    assert {k: first.data[k] for k in ("message", "count")} == {
+        "message": "timeout after # ms for request #", "count": 2}
+    assert first.data["asked"]["method"] == "grouped sample of 3 hits" and "method" not in first.data
     assert first.summary == "2 of 3 sampled hits: timeout after # ms for request #"
     assert second.data["message"] == "disk full on node #"
     assert_all_pass_policy(transport, cluster)
@@ -559,10 +561,13 @@ def test_windowed_facts_record_what_was_asked(cluster):
     ctx, _ = make_context(cluster, {"app-logs-*/_search": buckets((MS_10_00, 3))})
     queries.histogram(ctx, INDEX, query="level:ERROR", filters={"service": "checkout"})
     for fact in ctx.evidence.facts:
-        assert fact.data["index"] == INDEX
-        assert fact.data["query"] == "level:ERROR"
-        assert fact.data["filters"] == {"service": "checkout"}
-        assert fact.data["window"] == {"start": START, "end": END}
+        asked = fact.data["asked"]
+        assert asked["index"] == INDEX
+        assert asked["query"] == "level:ERROR"
+        assert asked["filters"] == {"service": "checkout"}
+        assert asked["window"] == {"start": START, "end": END}
+        assert asked["interval"] == "5m"
+        assert not {"index", "query", "filters", "window", "interval"} & set(fact.data)
 
 
 def test_search_and_top_messages_facts_record_what_was_asked(cluster):
@@ -573,7 +578,7 @@ def test_search_and_top_messages_facts_record_what_was_asked(cluster):
     assert asked["query"] == "m" and asked["filters"] == {"a": "b"} and asked["index"] == INDEX
     ctx, _ = make_context(cluster, {"app-logs-*/_search": terms(("m", 1))})
     queries.top_messages(ctx, INDEX, query="m")
-    assert ctx.evidence.facts[0].data["query"] == "m"
+    assert ctx.evidence.facts[0].data["asked"]["query"] == "m"
 
 
 def test_the_invocation_becomes_the_fact_command(cluster):
@@ -615,3 +620,70 @@ def test_top_messages_flags_a_partial_answer_once_when_it_falls_back_to_hits(clu
     ctx, _ = make_context(cluster, {"app-logs-*/_search": Sequence([first, second])})
     queries.top_messages(ctx, INDEX)
     assert len([f for f in ctx.evidence.facts if "partial" in f.summary]) == 1
+
+
+def test_real_hit_fields_named_like_asked_keys_keep_their_names(cluster):
+    source = {"@timestamp": START, "message": "boom", "method": "POST /pay", "request": "upstream reset"}
+    answer = {"hits": {"total": {"value": 1}, "hits": [{"_index": "app-logs-1", "_source": source}]}}
+    ctx, _ = make_context(cluster, {"app-logs-*/_search": answer})
+    queries.search(ctx, INDEX, filters={"method": "POST /pay", "request": "upstream reset"})
+    data = ctx.evidence.facts[0].data
+    assert data["method"] == "POST /pay" and data["request"] == "upstream reset"
+
+
+SENTINEL = "zz" + "sentinel" + "qq"
+
+
+def _sentinel_answers():
+    mapping_answer = {"app-logs-1": {"mappings": {"properties": {"message": {"type": "text"}}}}}
+    hits = {"hits": {"total": {"value": 1}, "hits": [hit("plain message")]}}
+    return {
+        "_cluster/health": {"status": "green"},
+        "_nodes/stats/jvm,fs,os,thread_pool": {"nodes": {"n1": {"name": "data-1"}}},
+        ("GET", "_cat/indices"): [{"health": "yellow", "index": "app-logs-1", "status": "open"}],
+        ("GET", f"_cat/indices/app-logs-{SENTINEL}"): [{"health": "yellow", "index": "app-logs-1", "status": "open"}],
+        "_cat/shards": [{"index": "app-logs-1", "shard": "0", "prirep": "p", "state": "UNASSIGNED"}],
+        "_cluster/allocation/explain": {"index": "app-logs-1", "shard": 0, "primary": True,
+                                        "current_state": "unassigned"},
+        f"app-logs-{SENTINEL}/_mapping": mapping_answer,
+        f"app-logs-{SENTINEL}/_count": {"count": 0},
+    } | {
+        f"app-logs-{SENTINEL}/_search": Sequence([]),
+    }
+
+
+@pytest.mark.parametrize("name", [
+    "health", "nodes", "indices", "shards", "allocation_explain", "mapping",
+    "count", "histogram", "top_messages", "top_messages_fallback", "search", "empty_histogram", "empty_search",
+])
+def test_no_summary_excerpt_or_data_repeats_free_text_input(cluster, name):
+    index = f"app-logs-{SENTINEL}"
+    query, filters = f"msg:{SENTINEL}", {f"field_{SENTINEL}": f"value-{SENTINEL}"}
+    answers = _sentinel_answers()
+    search_path = f"{index}/_search"
+    hits = {"hits": {"total": {"value": 1}, "hits": [hit("plain message")]}}
+    answers[search_path] = {
+        "histogram": buckets((MS_10_00, 3)), "empty_histogram": buckets(),
+        "top_messages": terms(("plain message", 2)), "empty_search": {"hits": {"total": {"value": 0}, "hits": []}},
+        "top_messages_fallback": Sequence([(400, {}), hits]), "search": hits,
+    }.get(name, hits)
+    ctx, transport = make_context(cluster, answers)
+    calls = {
+        "health": lambda: queries.health(ctx), "nodes": lambda: queries.nodes(ctx),
+        "indices": lambda: queries.indices(ctx, index), "shards": lambda: queries.shards(ctx),
+        "allocation_explain": lambda: queries.allocation_explain(ctx),
+        "mapping": lambda: queries.mapping(ctx, index),
+        "count": lambda: queries.count(ctx, index, query, filters),
+        "histogram": lambda: queries.histogram(ctx, index, "5m", query, filters),
+        "empty_histogram": lambda: queries.histogram(ctx, index, "5m", query, filters),
+        "top_messages": lambda: queries.top_messages(ctx, index, query, filters, f"field_{SENTINEL}"),
+        "top_messages_fallback": lambda: queries.top_messages(ctx, index, query, filters, f"field_{SENTINEL}"),
+        "search": lambda: queries.search(ctx, index, query, filters),
+        "empty_search": lambda: queries.search(ctx, index, query, filters),
+    }
+    calls[name]()
+    assert ctx.evidence.facts
+    for fact in ctx.evidence.facts:
+        outside_asked = {key: value for key, value in fact.data.items() if key != "asked"}
+        assert SENTINEL not in json.dumps([fact.summary, fact.excerpt, outside_asked]), fact.summary
+    assert_all_pass_policy(transport, cluster)
