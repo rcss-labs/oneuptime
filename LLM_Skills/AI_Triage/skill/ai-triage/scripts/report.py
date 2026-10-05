@@ -24,6 +24,7 @@ from triage.report import (
     mark_stale,
     render_is_current,
     render_report,
+    strip_local_paths,
     validate_report,
     validate_work_order,
     write_render_marker,
@@ -93,7 +94,7 @@ def _render(case_dir: Path, config, now: datetime, inputs: dict) -> int:
     work_order = build_work_order(report, case, now, checked=load_checked(case_dir)[0])
     work_order["coverage_gaps"] += [
         f"Evidence error {gap['code']}: {entry['command'] or entry['file']}" for gap in gaps for entry in gap["entries"]]
-    work_order = Redactor().value(work_order)
+    work_order = Redactor().value(strip_local_paths(work_order, case))
     problems = validate_work_order(work_order)
     if problems:
         raise InvalidReport([f"work order: {problem}" for problem in problems])

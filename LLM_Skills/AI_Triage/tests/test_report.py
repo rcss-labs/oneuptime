@@ -1,5 +1,6 @@
 import copy
 import json
+from pathlib import Path
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from triage.report import (
     build_work_order,
     check_case_inputs,
     coverage_from_evidence,
+    display_case_folder,
     render_report,
     validate_report,
     validate_work_order,
@@ -742,7 +744,7 @@ def test_map_changes_are_listed(case_dir, case):
 
 def test_run_details(case_dir, case):
     details = section(render(VALID_REPORT, case_dir, case), "## 9. Run details")
-    for needle in ("jane-doe", "14", "0.1.0", case["case_dir"], "2026-10-04T11:30:00Z"):
+    for needle in ("jane-doe", "14", "0.1.0", "cases/INC-123/20261004-110000", "2026-10-04T11:30:00Z"):
         assert needle in details
 
 
@@ -1775,3 +1777,37 @@ def test_a_report_that_validates_does_not_fail_in_render_for_a_shape_reason(case
 def judged_problems_without_fixture(case_dir, config):
     findings, input_problems = check_case_inputs(case_dir)
     return input_problems + validate_report(VALID_REPORT, load_case(case_dir), findings, config)
+
+
+# no absolute local paths
+
+def test_the_case_folder_is_shown_relative_to_the_cases_root(case):
+    assert display_case_folder(case) == "cases/INC-123/20261004-110000"
+
+
+def test_a_case_folder_not_under_a_cases_root_shows_its_last_two_components(case):
+    other = {**case, "case_dir": "/home/pavel/work/some-folder/run-1"}
+    assert display_case_folder(other) == "some-folder/run-1"
+    assert display_case_folder({**case, "case_dir": "relative"}) == "relative"
+    assert display_case_folder({**case, "case_dir": 5}) == "-"
+
+
+def test_the_incident_folder_name_is_matched_the_way_case_folders_are_named(case):
+    odd = {**case, "incident": {**case["incident"], "number": "INC 7/x"}, "case_dir": "/r/INC-7-x/20261004-110000"}
+    assert display_case_folder(odd) == "cases/INC-7-x/20261004-110000"
+
+
+def test_no_absolute_path_reaches_the_report(case_dir, case, tmp_path):
+    home = str(Path.home())
+    text = render(VALID_REPORT, case_dir, case)
+    assert str(tmp_path) not in text and home not in text and str(case_dir) not in text
+    assert "- Case folder: cases/INC-123/20261004-110000" in section(text, "## 9. Run details")
+
+
+def test_a_path_in_collected_text_is_shown_without_its_local_prefix(case_dir, case):
+    path = next((case_dir / "evidence").glob("ecs-*.json"))
+    document = json.loads(path.read_text())
+    document["facts"][0]["command"] = f"aws ecs describe-tasks --cli-input-json {case_dir}/in.json {Path.home()}/x"
+    path.write_text(json.dumps(document))
+    text = render(VALID_REPORT, case_dir, case)
+    assert str(case_dir) not in text and str(Path.home()) not in text

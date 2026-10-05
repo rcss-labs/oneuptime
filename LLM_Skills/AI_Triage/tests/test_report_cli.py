@@ -508,3 +508,15 @@ def test_a_leftover_marker_temporary_file_is_removed_by_the_next_render(skill_di
     (case_dir / "render.json.tmp").write_text("left over")
     render_ok(skill_dir, case_dir)
     assert not (case_dir / "render.json.tmp").exists()
+
+
+# no absolute local paths in either output
+
+def test_neither_output_holds_an_absolute_local_path(skill_dir, case_dir, tmp_path):
+    from pathlib import Path
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    for name in ("report.md", "work-order.json"):
+        text = (case_dir / name).read_text()
+        assert str(tmp_path) not in text and str(Path.home()) not in text and str(case_dir) not in text, name
+        assert "/private/" not in text and "/var/folders" not in text, name

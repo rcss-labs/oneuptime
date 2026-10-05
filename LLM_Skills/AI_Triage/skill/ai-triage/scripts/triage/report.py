@@ -10,7 +10,7 @@ import json
 import os
 import re
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 from triage.compose import LABEL_ORDER, cap_label, number
@@ -938,6 +938,41 @@ def _cell(value: Any) -> str:
     return _inline(value).replace("|", "\\|")
 
 
+def display_case_folder(case: dict) -> str:
+    """The case folder without any local path: "cases/<incident folder>/<run folder>" under a cases root,
+    otherwise its last two path components."""
+    folder = case.get("case_dir") if isinstance(case, dict) else None
+    if not isinstance(folder, str) or not folder:
+        return "-"
+    parts = [part for part in PurePath(folder).parts if part not in ("/", "\\") and not part.endswith(":\\")]
+    incident = case.get("incident") if isinstance(case.get("incident"), dict) else {}
+    number = incident.get("number")
+    expected = re.sub(r"[^A-Za-z0-9_-]", "-", number) if isinstance(number, str) else None
+    tail = "/".join(parts[-2:])
+    return f"cases/{tail}" if len(parts) >= 2 and parts[-2] == expected else tail or "-"
+
+
+def strip_local_paths(value: Any, case: dict) -> Any:
+    """Text with this run's absolute case folder, its cases root, and the home folder replaced by short forms.
+
+    Works on text, lists, and dictionaries (values only). Nothing else about the value changes.
+    """
+    if isinstance(value, str):
+        folder = case.get("case_dir") if isinstance(case, dict) else None
+        if isinstance(folder, str) and folder:
+            value = value.replace(folder, display_case_folder(case))
+            root = str(PurePath(folder).parent.parent)
+            if root not in ("", ".", "/"):
+                value = value.replace(root, "cases")
+        home = str(Path.home())
+        return value.replace(home, "~") if home not in ("", "/") else value
+    if isinstance(value, list):
+        return [strip_local_paths(item, case) for item in value]
+    if isinstance(value, dict):
+        return {key: strip_local_paths(item, case) for key, item in value.items()}
+    return value
+
+
 def _read_checked(case: dict) -> dict:
     try:
         checked = json.loads((Path(case["case_dir"]) / "findings" / "checked.json").read_text())
@@ -1205,7 +1240,7 @@ def _render_run(report: dict, case: dict, now: datetime) -> list[str]:
     run = report["run"]
     return ["## 9. Run details", "", _field("Engineer", run["engineer"]),
             _field("Duration", f"{run['duration_minutes']} minutes"), _field("Skill version", case["skill_version"]),
-            _field("Case folder", case["case_dir"]), _field("Report rendered", format_time(now))]
+            _field("Case folder", display_case_folder(case)), _field("Report rendered", format_time(now))]
 
 
 def render_report(report: dict, case: dict, findings: dict[str, dict], timeline_rows: list[dict],
@@ -1232,7 +1267,7 @@ def render_report(report: dict, case: dict, findings: dict[str, dict], timeline_
         _render_run(report, case, now),
     ]
     text = "\n\n".join("\n".join(block) for block in blocks) + "\n"
-    return Redactor().text(text)
+    return Redactor().text(strip_local_paths(text, case))
 
 
 # --- the render marker: which inputs the outputs were rendered from ---------------------------
