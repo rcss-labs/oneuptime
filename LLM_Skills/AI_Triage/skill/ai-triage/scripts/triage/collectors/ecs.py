@@ -16,6 +16,7 @@ MAX_CHANGES = 50
 MAX_CHANGE_LENGTH = 300
 CHANGE_CUT_MARKER = "… [change cut]"
 IMAGE = "image"
+MIN_IMAGE_PART = 100
 
 
 def _short_name(arn: str) -> str:
@@ -153,16 +154,39 @@ def _container_changes(name: str, old: dict, new: dict) -> list[Change]:
     return changes
 
 
+def _image_parts(reference: str, length: int) -> list[str]:
+    """A reference cut into parts of at most length characters, each ending at a / : or @ where one falls
+    in the second half of the part. Joined in order, the parts give the reference back."""
+    parts = []
+    while len(reference) > length:
+        cut = max(reference[:length].rfind(mark) for mark in "/:@") + 1
+        if cut <= length // 2:
+            cut = length
+        parts.append(reference[:cut])
+        reference = reference[cut:]
+    return parts + [reference]
+
+
+def _image_lines(prefix: str, label: str, reference: str) -> list[str]:
+    """One line for a reference, or numbered parts when that line would pass the evidence string cap."""
+    line = f"{prefix} image {label} {reference}"
+    if len(line) <= MAX_DATA_STRING:
+        return [line]
+    header_length = len(f"{prefix} image {label}, part 99 of 99: ")
+    parts = _image_parts(reference, max(MIN_IMAGE_PART, MAX_DATA_STRING - header_length))
+    return [f"{prefix} image {label}, part {n} of {len(parts)}: {part}" for n, part in enumerate(parts, 1)]
+
+
 def _change_lines(change: Change) -> list[str]:
     """The data lines of one change. An image change is never cut: when one line would be longer than the
-    evidence layer keeps a string, it is written as two lines with one whole image reference each."""
+    evidence layer keeps a string, each reference gets its own lines, split into numbered parts when needed."""
     kind, text = change
     if kind == IMAGE:
         if len(text) <= MAX_DATA_STRING:
             return [text]
         head, _, new = text.partition(" -> ")
         prefix, _, old = head.rpartition(" image ")
-        return [f"{prefix} image was {old}", f"{prefix} image is now {new}"]
+        return _image_lines(prefix, "was", old) + _image_lines(prefix, "is now", new)
     if len(text) <= MAX_CHANGE_LENGTH:
         return [text]
     return [text[: MAX_CHANGE_LENGTH - len(CHANGE_CUT_MARKER)] + CHANGE_CUT_MARKER]

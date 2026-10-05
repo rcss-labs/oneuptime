@@ -470,3 +470,19 @@ def test_c1_secret_never_reaches_the_document(config_data, tmp_path):
     current = next(f for f in ctx.evidence.facts if f.kind == "current" and "Task definition" in f.summary)
     assert current.data["environment"]["DB_PASS1"].startswith(("<hidden", "<SECRET"))
     assert secret not in ctx.evidence.to_json()
+
+
+
+def test_an_image_reference_of_577_characters_is_recoverable_whole(config_data, tmp_path):
+    repo = "111111111111.dkr.ecr.eu-west-1.amazonaws.com/" + "checkout-service/" * 26 + "app"
+    repo += "x" * (577 - len(f"{repo}:2@sha256:" + "b" * 64))
+    old_image = f"{repo}:1@sha256:" + "a" * 64
+    new_image = f"{repo}:2@sha256:" + "b" * 64
+    assert len(new_image) == 577
+    _, diff = _diff_for(config_data, tmp_path, container(image=old_image), container(image=new_image))
+    assert all(len(line) <= 500 for line in diff.data["changes"])
+    was = [line for line in diff.data["changes"] if " image was" in line]
+    now = [line for line in diff.data["changes"] if " image is now" in line]
+    assert "".join(line.partition(": ")[2] for line in was) == old_image
+    assert "".join(line.partition(": ")[2] for line in now) == new_image
+    assert "part 1 of 2" in was[0] and "part 2 of 2" in was[1]
