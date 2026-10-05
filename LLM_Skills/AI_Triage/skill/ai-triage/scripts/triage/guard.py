@@ -250,8 +250,12 @@ def _own_script_verdict(segment: Segment, name: str) -> Verdict:
 def decide(command: str, context: GuardContext | None, context_error: str = "", cwd: str = "") -> Verdict:
     """Return allow, deny, ask, or pass for a whole command line run in cwd."""
     verdict = _decide_command(command, context, context_error)
+    try:
+        segments = split_command(command)
+    except Unparseable:
+        return verdict  # never allowed, so it needs no tripwire
     skill_dir, cases_dir = (context.skill_dir, context.cases_dir) if context else ("", "")
-    tripwire = protected_write_tripwire(command, skill_dir, cases_dir, cwd)
+    tripwire = protected_write_tripwire(segments, skill_dir, cases_dir, cwd)
     return strictest([verdict, Verdict(ASK, tripwire)]) if tripwire else verdict
 
 

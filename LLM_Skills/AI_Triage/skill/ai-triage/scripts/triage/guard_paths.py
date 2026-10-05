@@ -9,18 +9,22 @@ Names are compared without regard to letter case or Unicode normalization,
 because macOS file systems usually ignore both.
 
 protected_write_tripwire is the Bash side, and it is a tripwire, not a
-boundary: it only looks for a write-looking word next to a protected path in
-the command text, so that an obvious hand edit is put to the engineer. The real
-limits on Bash are the shell scanner (no redirect to a file is ever allowed)
-and the normal permission flow for every command the guard does not know.
+boundary: it reads the parsed command, and asks when a segment's command word
+is a known file-changing tool and one of its arguments resolves to a protected
+path, so that an obvious hand edit is put to the engineer. Quoted text and
+other commands' option values cannot trigger it. The real limits on Bash are
+the shell scanner (no redirect to a file is ever allowed, and an unparseable
+command is never allowed) and the normal permission flow for every command the
+guard does not know.
 """
 from __future__ import annotations
 
 import os
-import re
 import unicodedata
 from dataclasses import dataclass
+from typing import Sequence
 
+from triage.shell_parse import Segment
 from triage.verdict import ASK, DENY, PASS, Verdict
 
 FILE_TOOLS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
@@ -44,15 +48,9 @@ STALE_SUFFIX = ".stale"
 STALE_WRITER = "judge.py"
 RUN_DEPTH = 2  # <case>/<run>
 
-WRITE_WORD_RE = re.compile(r"(?<![\w.-])(?:rm|mv|cp|tee|sed|truncate|dd|chmod|ln)(?![\w.-])")
-# A > that is not part of >>, a redirect to /dev/null, or a copy of descriptor 1 or 2.
-FILE_REDIRECT_RE = re.compile(r">(?!>|\s*/dev/null(?![\w./-])|&\s*[12](?![0-9]))")
-PATH_MARKERS = (".claude/skills/ai-triage", ".ai-triage/cases")
-# Names that point at run files when the command runs inside a protected folder.
-BARE_NAME_RE = re.compile(
-    r"(?<![\w.-])(?:evidence|judgments|checked\.json|audit\.json|case\.json|case\.md|report\.md|work-order\.json"
-    r"|slack-message\.md|timeline\.md)(?![\w-])|\.stale(?!\w)"
-)
+# Command words that change files; with a protected path among their arguments the engineer decides.
+WRITE_COMMANDS = frozenset({"rm", "mv", "cp", "tee", "sed", "truncate", "dd", "chmod", "chown", "ln", "link", "touch",
+                            "install", "rsync", "perl"})
 TRIPWIRE_REASON = ("the command may write a protected path (the skill folder or run files that only the skill's "
                    "scripts write); the engineer decides")
 
@@ -145,41 +143,34 @@ def decide_file_tool(tool: str, tool_input: object, cwd: object, roots: Protecte
     return Verdict(DENY, reason) if reason else Verdict(PASS)
 
 
-def _home_relative(path: str) -> str:
-    home = os.path.expanduser("~")
-    if home.startswith("~"):
-        return ""
-    for base in (home, os.path.realpath(home)):
-        if path.startswith(base.rstrip(os.sep) + os.sep):
-            return path[len(base.rstrip(os.sep)) + 1:]
-    return ""
+def protected_target(resolved: str, roots: ProtectedRoots) -> bool:
+    """A protected file, or a folder that holds protected files (a run or case folder, a root, or above one)."""
+    if not resolved.rstrip(os.sep) or protected_reason(resolved, roots):
+        return True
+    if any(root and _parts_below(root, resolved) is not None for root in (*roots.skill_dirs, roots.cases_dir)):
+        return True
+    parts = _parts_below(resolved, roots.cases_dir)
+    return parts is not None and len(parts) <= RUN_DEPTH
 
 
-def _path_markers(skill_dir: str, cases_dir: str, roots: ProtectedRoots) -> set[str]:
-    candidates = {os.path.expanduser(skill_dir), os.path.expanduser(cases_dir or DEFAULT_CASES_DIR),
-                  *roots.skill_dirs, roots.cases_dir}
-    markers = set(PATH_MARKERS)
-    for path in candidates:
-        if path and os.path.isabs(path):
-            markers.update({path, _home_relative(path)})
-    return {_comparable(marker) for marker in markers if marker}
+def _argument_paths(argument: str) -> list[str]:
+    # The word itself, and the value after = (dd of=PATH, --target-directory=PATH).
+    return [argument] + ([argument.split("=", 1)[1]] if "=" in argument else [])
 
 
-def _cwd_is_protected(cwd: object, roots: ProtectedRoots) -> bool:
-    if not isinstance(cwd, str) or not os.path.isabs(cwd) or "\x00" in cwd:
-        return False
-    resolved = os.path.realpath(cwd)
-    return any(_parts_below(resolved, root) is not None for root in (*roots.skill_dirs, roots.cases_dir) if root)
-
-
-def protected_write_tripwire(command: str, skill_dir: str, cases_dir: str, cwd: object = "") -> str:
-    """A reason to ask when the text pairs a write-looking word with a protected path, else ""."""
-    text = _comparable(command)
-    if not (WRITE_WORD_RE.search(text) or FILE_REDIRECT_RE.search(text)):
+def protected_write_tripwire(segments: Sequence[Segment], skill_dir: str, cases_dir: str, cwd: object = "") -> str:
+    """A reason to ask when a file-changing command names a protected path, else ""."""
+    writers = [segment for segment in segments if segment.argv and os.path.basename(segment.argv[0]) in WRITE_COMMANDS]
+    if not writers:
         return ""
     roots = protected_roots(skill_dir, cases_dir)
-    if any(marker in text for marker in _path_markers(skill_dir, cases_dir, roots)):
-        return TRIPWIRE_REASON
-    if BARE_NAME_RE.search(text) and _cwd_is_protected(cwd, roots):
-        return TRIPWIRE_REASON
+    for segment in writers:
+        for argument in segment.argv[1:]:
+            for candidate in _argument_paths(argument):
+                try:
+                    resolved = resolve_tool_path(candidate, cwd)
+                except UnresolvablePath:
+                    continue
+                if protected_target(resolved, roots):
+                    return TRIPWIRE_REASON
     return ""

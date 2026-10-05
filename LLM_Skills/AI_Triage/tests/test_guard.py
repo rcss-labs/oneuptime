@@ -559,16 +559,23 @@ CASE_RUN = "/home/eng/.ai-triage/cases/INC-1/20261004-101500"
     [
         f'rm -rf "$HOME/.ai-triage/cases/INC-1/20261004-101500/evidence"',
         f"cp /tmp/x {SKILL}/config/service-map.yaml",
-        "sed -i '' s/a/b/ ~/.claude/skills/ai-triage/scripts/triage/guard.py",
-        f"echo x > {CASE_RUN}/case.json",
-        f"echo x >> {CASE_RUN}/audit.json",
+        f"sed -i '' s/a/b/ {SKILL}/scripts/triage/guard.py",
         f"jq . x | tee {CASE_RUN}/findings/checked.json",
         f"mv /tmp/r.md {CASE_RUN}/report.md",
         f"truncate -s 0 {CASE_RUN}/judgments/q1.json",
         f"dd if=/dev/zero of={SKILL}/scripts/guard_hook.py",
         f"chmod 777 {SKILL}/scripts",
         f"ln -sf /tmp/evil {SKILL}/scripts/triage/guard.py",
-        f'cat "$HOME/.claude/skills/ai-triage/SKILL.md" > /tmp/copy',
+        f"/bin/rm {SKILL}/SKILL.md",
+        f"touch {CASE_RUN}/case.json",
+        f"install -m 644 /tmp/x {SKILL}/config/service-map.yaml",
+        f"rsync -a /tmp/x/ {CASE_RUN}/evidence/",
+        f"perl -pi -e s/candidate/confirmed/ {CASE_RUN}/findings/checked.json",
+        f"chown nobody {CASE_RUN}/audit.json",
+        f"link {CASE_RUN}/case.json /tmp/h",
+        f"rm -rf {CASE_RUN}",
+        "rm -rf /home/eng/.ai-triage",
+        f"cp --target-directory={SKILL}/scripts /tmp/x",
     ],
 )
 def test_a_write_word_next_to_a_protected_path_asks(command, monkeypatch):
@@ -638,3 +645,38 @@ def test_grep_is_not_on_the_filter_list():
     from triage.guard import FILTER_RULES
 
     assert "grep" not in FILTER_RULES
+
+
+
+# ---- fix round 5, ruling 4: the tripwire reads parsed segments ----------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"kubectl {KUBE_HOME} get pods -o json | jq '[.items[] | select(.status.containerStatuses[0].restartCount > 3)] | length'",
+        f"kubectl {KUBE_HOME} get pods -l app=rm",
+        f'{PY} {SCRIPT}/findings.py add --text "cp fails because the ln target is missing"',
+        f'{PY} {SCRIPT}/findings.py check --case-dir "$HOME/.ai-triage/cases/INC-1/20261004-101500" --note "latency > 2s"',
+        f"kubectl {KUBE_HOME} logs deploy/orders --since 30m --tail 200 | tail -20",
+    ],
+)
+def test_quoted_text_and_option_values_never_trip_the_tripwire(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert kind(command) == ALLOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"echo x > {CASE_RUN}/case.json",
+        f"echo x >> {CASE_RUN}/audit.json",
+        "sed -i '' s/a/b/ ~/.claude/skills/ai-triage/scripts/triage/guard.py",
+        f"cat {SKILL}/SKILL.md",
+        f"rm /tmp/{CASE_RUN.split('/')[-1]}/case.json",
+    ],
+)
+def test_what_the_tripwire_leaves_to_the_normal_flow(command, monkeypatch):
+    # A redirect to a file and an unparseable command are never allowed anyway; a read is not a write.
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert kind(command) == PASS
