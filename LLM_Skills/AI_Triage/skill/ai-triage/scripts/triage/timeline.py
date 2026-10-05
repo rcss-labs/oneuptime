@@ -22,7 +22,7 @@ _SOURCE_RANK = {"incident": 0, "oneuptime": 1}
 
 
 def _read_json(path: Path) -> dict:
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     return data if isinstance(data, dict) else {}
 
 
@@ -147,7 +147,7 @@ def build_timeline(case_dir: Path) -> list[dict]:
         note = _row("", "timeline", text)
         note["offset"] = ""
         rows.append(note)
-    (case_dir / TIMELINE_NAME).write_text(json.dumps(rows, indent=2) + "\n")
+    (case_dir / TIMELINE_NAME).write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
     return rows
 
 

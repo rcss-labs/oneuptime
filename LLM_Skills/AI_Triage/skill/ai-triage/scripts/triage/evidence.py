@@ -267,9 +267,9 @@ class Evidence:
     def write(self, case_dir: Path, suffix: str = "") -> Path:
         path = self.path_for(case_dir, suffix)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.to_json() + "\n")
+        path.write_text(self.to_json() + "\n", encoding="utf-8")
         return path
 
 
 def load_evidence(path: Path) -> dict:
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))

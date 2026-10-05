@@ -30,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         case_dir = resolve_case_dir(args.case_dir, load_config(default_config_path(args.skill_dir)))
-        case = json.loads((case_dir / "case.json").read_text())
+        case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
         check_replay(case if isinstance(case, dict) else {})
     except (ConfigError, CaseError) as error:
         print("; ".join(error.errors), file=sys.stderr)

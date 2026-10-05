@@ -38,7 +38,7 @@ def default_questions_path(skill_dir: Path) -> Path:
 
 def load_questions(path: Path) -> dict[str, dict]:
     try:
-        document = json.loads(Path(path).read_text())
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise QuestionError([f"cannot read the question file {path}: {error}"]) from error
     if not isinstance(document, dict):

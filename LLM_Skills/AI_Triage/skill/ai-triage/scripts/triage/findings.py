@@ -356,7 +356,7 @@ def _finding_problems(
 
 def _read_finding_file(path: Path, case_dir: Path) -> tuple[dict | None, str]:
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except OSError as error:
         return None, f"cannot be read: {error.strerror or error}"
     except ValueError:
@@ -413,14 +413,14 @@ def check_findings(case_dir: Path) -> dict:
                 result["requests"].append(redactor.value({"analyst": analyst, **request}))
     findings_dir = case_dir / "findings"
     findings_dir.mkdir(exist_ok=True)
-    (findings_dir / CHECKED_NAME).write_text(json.dumps(result, indent=2) + "\n")
+    (findings_dir / CHECKED_NAME).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     return result
 
 
 def valid_findings(case_dir: Path) -> dict[str, dict]:
     """Finding id to finding, from the last check. Empty when no check has run."""
     try:
-        checked = json.loads((case_dir / "findings" / CHECKED_NAME).read_text())
+        checked = json.loads((case_dir / "findings" / CHECKED_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return {item["id"]: item for item in checked.get("valid", [])}

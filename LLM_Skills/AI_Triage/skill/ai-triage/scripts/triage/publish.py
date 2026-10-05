@@ -449,7 +449,7 @@ def write_publish_state(cases_root: Path, section: str, entry: dict) -> None:
     state[section] = entry
     temporary = cases_root / f"{PUBLISH_STATE_NAME}.tmp-{os.getpid()}"
     try:
-        temporary.write_text(json.dumps(state, indent=2) + "\n")
+        temporary.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
         os.replace(temporary, path)
     except OSError as error:
         temporary.unlink(missing_ok=True)

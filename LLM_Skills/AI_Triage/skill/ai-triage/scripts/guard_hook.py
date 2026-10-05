@@ -72,7 +72,7 @@ def _file_tool_verdict(tool: str, payload: dict, skill_dir: Path) -> Verdict:
 def _configured_oneuptime_server(skill_dir: Path) -> str | None:
     """oneuptime.mcp_server from the raw config file, when it is set."""
     try:
-        data = yaml.safe_load(default_config_path(skill_dir).read_text())
+        data = yaml.safe_load(default_config_path(skill_dir).read_text(encoding="utf-8"))
         value = data["oneuptime"]["mcp_server"]
     except (OSError, yaml.YAMLError, KeyError, TypeError):
         return None

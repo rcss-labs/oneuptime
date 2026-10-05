@@ -153,7 +153,7 @@ def check_replay(case: dict) -> None:
 
 def skill_version(skill_dir: Path) -> str:
     path = skill_dir / "VERSION"
-    return path.read_text().strip() if path.is_file() else "unknown"
+    return path.read_text(encoding="utf-8").strip() if path.is_file() else "unknown"
 
 
 def _match_record(result: Any) -> dict:
@@ -212,7 +212,7 @@ def create_case(incident: dict, config: TriageConfig, service_map: ServiceMap, n
     try:
         for sub in SUBFOLDERS:
             (case_dir / sub).mkdir()
-        (case_dir / "incident.json").write_text(json.dumps(safe_incident, indent=2) + "\n")
+        (case_dir / "incident.json").write_text(json.dumps(safe_incident, indent=2) + "\n", encoding="utf-8")
     except OSError as error:
         raise CaseError([f"{case_dir}: cannot write the case ({error.strerror or error})"]) from error
     save_case(case_dir, case)
@@ -283,7 +283,7 @@ def load_case(case_dir: Path) -> dict:
     if not path.is_file():
         raise CaseError([f"{path}: file not found"])
     try:
-        case = json.loads(path.read_text())
+        case = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise CaseError([f"{path}: cannot be read as JSON ({error})"]) from error
     _check_case_shape(case, path)
@@ -293,8 +293,8 @@ def load_case(case_dir: Path) -> dict:
 def save_case(case_dir: Path, case: dict) -> None:
     """Write case.json and render case.md from it."""
     try:
-        (case_dir / "case.json").write_text(json.dumps(case, indent=2) + "\n")
-        (case_dir / "case.md").write_text(render_case(case))
+        (case_dir / "case.json").write_text(json.dumps(case, indent=2) + "\n", encoding="utf-8")
+        (case_dir / "case.md").write_text(render_case(case), encoding="utf-8")
     except OSError as error:
         raise CaseError([f"{case_dir}: cannot write the case ({error.strerror or error})"]) from error
 
@@ -377,7 +377,7 @@ def render_case(case: dict) -> str:
         "target": _describe_target(case["target"]),
     }
     # One pass, so a value that contains {{name}} is never expanded.
-    return re.sub(r"\{\{(\w+)\}\}", lambda found: values.get(found.group(1), found.group(0)), TEMPLATE_PATH.read_text())
+    return re.sub(r"\{\{(\w+)\}\}", lambda found: values.get(found.group(1), found.group(0)), TEMPLATE_PATH.read_text(encoding="utf-8"))
 
 
 def _store_target(case_dir: Path, target: dict) -> dict:

@@ -84,7 +84,7 @@ def _load_entries(directory: Path, name: str, kind: str) -> list[dict[str, Any]]
     if not path.is_file():
         return []
     try:
-        entries = json.loads(path.read_text())
+        entries = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise FixtureError(f"cannot read {path}: {error}") from error
     if not isinstance(entries, list):

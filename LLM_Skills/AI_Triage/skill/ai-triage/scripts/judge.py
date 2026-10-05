@@ -100,7 +100,7 @@ def _locate(args: argparse.Namespace, config, judge: Judge | None) -> int:
 
 def _adhoc(args: argparse.Namespace, config, judge: Judge | None) -> int:
     try:
-        document = json.loads(args.question_file.read_text())
+        document = json.loads(args.question_file.read_text(encoding="utf-8"))
     except OSError as error:
         raise JudgmentError([f"{args.question_file}: {error.strerror or error}"]) from error
     except ValueError as error:

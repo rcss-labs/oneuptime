@@ -162,7 +162,7 @@ def _shell_environment(skill_dir: Path, snapshots_dir: Path) -> Check:
         if not snapshots:
             return Check(name, SKIPPED, f"not checked: no shell snapshot in {snapshots_dir}")
         newest = max(snapshots, key=lambda entry: entry.stat().st_mtime)
-        text = newest.read_text(errors="replace")
+        text = newest.read_text(errors="replace", encoding="utf-8")
     except OSError as error:
         return Check(name, SKIPPED, f"not checked: {snapshots_dir} could not be read ({error.strerror or error})")
     problems = shell_snapshot_problems(text, guarded_command_words(skill_dir))
@@ -205,7 +205,7 @@ def _cli_aliases(home: str) -> Check | None:
     if not path.is_file():
         return None
     try:
-        names = _alias_names(path.read_text(errors="replace"))
+        names = _alias_names(path.read_text(errors="replace", encoding="utf-8"))
     except OSError as error:
         return Check("AWS CLI aliases", WARN, f"{path} exists but could not be read ({error.strerror or error})")
     if not names:

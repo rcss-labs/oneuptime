@@ -85,7 +85,7 @@ def _fail(message: str) -> int:
 
 def _read_json(path: Path):
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except OSError as error:
         raise CaseError([f"{path}: {error.strerror or error}"]) from error
     except ValueError as error:

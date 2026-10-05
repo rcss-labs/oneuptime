@@ -433,7 +433,7 @@ def _last_line(text: str) -> str:
 
 def _counts(path: Path) -> tuple[int | None, int | None]:
     try:
-        document = json.loads(path.read_text())
+        document = json.loads(path.read_text(encoding="utf-8"))
         return len(document["facts"]), len(document["errors"])
     except (OSError, ValueError, KeyError, TypeError):
         return None, None

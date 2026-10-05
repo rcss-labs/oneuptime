@@ -108,7 +108,7 @@ class JudgmentStore:
             "kind": kind, "subject": subject, "state": state, "questions": questions,
             "answers": reply.answers, "model": reply.model, "request_id": reply.request_id, "usage": reply.usage,
         }
-        path.write_text(json.dumps(_json_safe(record), indent=2, allow_nan=False) + "\n")
+        path.write_text(json.dumps(_json_safe(record), indent=2, allow_nan=False) + "\n", encoding="utf-8")
         return path
 
 
@@ -356,7 +356,7 @@ def describe_candidates(case: dict, service_map: ServiceMap) -> dict[str, str]:
 def incident_state(case_dir: Path) -> dict:
     path = Path(case_dir) / "incident.json"
     try:
-        incident = json.loads(path.read_text())
+        incident = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise JudgmentError([f"{path}: cannot be read ({error})"]) from error
     return {name: incident.get(name, "" if name in ("title", "description") else []) for name in
@@ -368,7 +368,7 @@ def incident_state(case_dir: Path) -> dict:
 def load_report_draft(case_dir: Path, reserved_ids: frozenset[str] = frozenset()) -> dict:
     path = Path(case_dir) / "report.json"
     try:
-        report = json.loads(path.read_text())
+        report = json.loads(path.read_text(encoding="utf-8"))
     except OSError as error:
         raise JudgmentError([f"{path}: cannot be read ({error.strerror or error})"]) from error
     except ValueError as error:
@@ -447,7 +447,7 @@ def _minimal_adhoc_entries(case_dir: Path) -> list:
     """The ad hoc list of a summary that only ad hoc questions wrote; empty when there is none."""
     for name in (SUMMARY_NAME, SUMMARY_NAME + ".stale"):
         try:
-            summary = json.loads((Path(case_dir) / "judgments" / name).read_text())
+            summary = json.loads((Path(case_dir) / "judgments" / name).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         if isinstance(summary, dict) and summary.get("judged") is False:
@@ -626,7 +626,7 @@ def _compose_summary(
 def write_summary(case_dir: Path, summary: dict) -> Path:
     path = Path(case_dir) / "judgments" / SUMMARY_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_json_safe(summary), indent=2, allow_nan=False) + "\n")
+    path.write_text(json.dumps(_json_safe(summary), indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return path
 
 
@@ -691,7 +691,7 @@ def load_checked_findings(case_dir: Path) -> dict[str, dict]:
     if not path.is_file():
         return {}
     try:
-        checked = json.loads(path.read_text())
+        checked = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raise DraftRuleError([f"findings/checked.json cannot be read as JSON; {again}"]) from None
     valid = checked.get("valid") if isinstance(checked, dict) else None
@@ -847,7 +847,7 @@ def _read_adhoc_summary(path: Path) -> dict | None:
     if not path.is_file():
         return None
     try:
-        summary = json.loads(path.read_text())
+        summary = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as error:
         raise JudgmentError([f"{path}: not valid JSON ({error})"]) from error
     if not isinstance(summary, dict):

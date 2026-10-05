@@ -62,7 +62,7 @@ def _load_report(case_dir: Path):
     if not path.is_file():
         raise CaseError([f"{path}: file not found"])
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except RecursionError as error:
         raise InvalidReport(["report.json: nested deeper than 50 levels"]) from error
     except ValueError as error:
@@ -83,7 +83,7 @@ def _write_both(case_dir: Path, text: str, work_order: dict, inputs: dict) -> No
     """Write both files to temporary names, move both into place, then write the marker."""
     contents = {"report.md": text, "work-order.json": json.dumps(work_order, indent=2) + "\n"}
     for name, content in contents.items():
-        (case_dir / f"{name}.tmp").write_text(content)
+        (case_dir / f"{name}.tmp").write_text(content, encoding="utf-8")
     for name in OUTPUT_NAMES:
         os.replace(case_dir / f"{name}.tmp", case_dir / name)
     write_render_marker(case_dir, inputs)

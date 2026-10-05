@@ -55,7 +55,7 @@ def _save_problem(path: Path, config: TriageConfig) -> str | None:
         return f"--save {target} is a folder"
     if target.exists():
         try:
-            earlier = json.loads(target.read_text())
+            earlier = json.loads(target.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             earlier = None
         if not isinstance(earlier, dict) or set(earlier) != OUTPUT_KEYS:
@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     if args.save:
         target = args.save.expanduser().resolve()
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text + "\n")
+        target.write_text(text + "\n", encoding="utf-8")
     print(text)
     return 0 if found else 1
 

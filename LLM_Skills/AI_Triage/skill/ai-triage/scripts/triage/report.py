@@ -394,7 +394,7 @@ def load_summary(case: dict) -> tuple[dict | None, str | None]:
     if not path.is_file():
         return None, None
     try:
-        summary = json.loads(path.read_text())
+        summary = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         summary = None
     if not isinstance(summary, dict) or not isinstance(summary.get("causes"), dict):
@@ -757,7 +757,7 @@ def load_checked(case_dir: Path) -> tuple[dict, list[str]]:
     if not path.is_file():
         return {}, []
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         return {}, [f"{where}: cannot be read as JSON"]
     if not isinstance(data, dict):
@@ -820,7 +820,7 @@ def _case_shape_problems(case_dir: Path) -> list[str]:
     """Wrong types in the parts of case.json that render reads."""
     where = "case.json"
     try:
-        case = json.loads((Path(case_dir) / "case.json").read_text())
+        case = json.loads((Path(case_dir) / "case.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         return [f"{where}: cannot be read as JSON"]
     if not isinstance(case, dict):
@@ -1095,7 +1095,7 @@ def strip_local_paths(value: Any, case: dict) -> Any:
 
 def _read_checked(case: dict) -> dict:
     try:
-        checked = json.loads((Path(case["case_dir"]) / "findings" / "checked.json").read_text())
+        checked = json.loads((Path(case["case_dir"]) / "findings" / "checked.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, KeyError):
         return {}
     return checked if isinstance(checked, dict) else {}
@@ -1349,7 +1349,7 @@ def _render_actions(report: dict, summary: dict | None, checked: dict) -> list[s
 
 def _rejected_findings(case: dict) -> list[dict]:
     try:
-        checked = json.loads((Path(case["case_dir"]) / "findings" / "checked.json").read_text())
+        checked = json.loads((Path(case["case_dir"]) / "findings" / "checked.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, KeyError):
         return []
     rejected = checked.get("rejected") if isinstance(checked, dict) else None
@@ -1455,7 +1455,7 @@ def write_render_marker(case_dir: Path, inputs: dict[str, str | None]) -> None:
     """Record the hash of both outputs on disk and of the inputs they were rendered from."""
     case_dir = Path(case_dir)
     marker = {**{name: _sha256(case_dir / name) for name in OUTPUT_NAMES}, **inputs}
-    (case_dir / f"{MARKER_NAME}.tmp").write_text(json.dumps(marker, indent=2) + "\n")
+    (case_dir / f"{MARKER_NAME}.tmp").write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
     os.replace(case_dir / f"{MARKER_NAME}.tmp", case_dir / MARKER_NAME)
 
 
@@ -1491,7 +1491,7 @@ def mark_stale(case_dir: Path) -> tuple[list[str], list[str]]:
 
 def _marker_reasons(case_dir: Path) -> list[str]:
     try:
-        marker = json.loads((case_dir / MARKER_NAME).read_text())
+        marker = json.loads((case_dir / MARKER_NAME).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return [f"{MARKER_NAME} is missing or cannot be read"]
     if not isinstance(marker, dict):
