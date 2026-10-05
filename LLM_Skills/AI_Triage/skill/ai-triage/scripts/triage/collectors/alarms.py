@@ -19,7 +19,7 @@ MAX_HISTORY_PAGES = 5
 ALARM_TYPES = ["--alarm-types", "CompositeAlarm", "MetricAlarm"]
 
 
-def _describe(ctx: CollectContext, names: list[str], prefix: str | None) -> list[tuple[dict, str]]:
+def _describe(ctx: CollectContext, names: list[str], prefix: str | None, in_alarm: bool = False) -> list[tuple[dict, str]]:
     """The alarms found, each with the command that returned it."""
     alarms: dict[str, tuple[dict, str]] = {}
     queries = []
@@ -27,12 +27,19 @@ def _describe(ctx: CollectContext, names: list[str], prefix: str | None) -> list
         queries.append(["--alarm-names", *names[:MAX_ALARMS]])
     if prefix:
         queries.append(["--alarm-name-prefix", prefix, "--max-items", str(MAX_ALARMS)])
+    if in_alarm:
+        queries.append(["--state-value", "ALARM", "--max-items", str(MAX_ALARMS)])
     for args in queries:
         reply = ctx.aws("cloudwatch", "describe-alarms", [*args, *ALARM_TYPES])
         if (reply or {}).get("NextToken") and "--alarm-name-prefix" in args:
             ctx.evidence.add(
                 kind=DERIVED, resource="alarms", command=ctx.last_command,
                 summary=f"More alarms match the prefix than the {MAX_ALARMS} shown",
+            )
+        if (reply or {}).get("NextToken") and "--state-value" in args:
+            ctx.evidence.add(
+                kind=DERIVED, resource="alarms", command=ctx.last_command,
+                summary=f"More alarms are in the ALARM state than the {MAX_ALARMS} shown",
             )
         for alarm in (reply or {}).get("MetricAlarms", []) + (reply or {}).get("CompositeAlarms", []):
             alarms.setdefault(alarm.get("AlarmName", ""), (alarm, ctx.last_command))
@@ -136,12 +143,14 @@ def _first_alarm_text(fired: list[tuple[datetime, str, bool]]) -> str | None:
 
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     names, prefix = split_csv(targets.get("alarm_names")), (targets.get("name_prefix") or "").strip() or None
-    for key in ("alarm_names", "name_prefix"):
-        if key in targets and not (names if key == "alarm_names" else prefix):
+    in_alarm = (targets.get("in_alarm") or "").strip().lower() == "true"
+    usable = {"alarm_names": names, "name_prefix": prefix, "in_alarm": in_alarm}
+    for key, value in usable.items():
+        if key in targets and not value:
             ctx.evidence.add_error("", INVALID_TARGET, f"target {key} has no usable value, so it was not used")
-    if not names and not prefix:
+    if not any(usable.values()):
         return
-    alarms = _describe(ctx, names, prefix)
+    alarms = _describe(ctx, names, prefix, in_alarm)
     if not alarms:
         ctx.evidence.add(kind=CURRENT, resource="alarms", summary="No alarms were found for the given names or prefix")
         return
@@ -177,9 +186,9 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
 
 COLLECTOR = Collector(
     name="alarms",
-    description="CloudWatch alarm state, state changes in the window, and which alarm fired first",
+    description="CloudWatch alarm state, state changes in the window, and which alarm fired first; in_alarm=true lists alarms now in ALARM",
     required=(),
-    optional=("alarm_names", "name_prefix"),
+    optional=("alarm_names", "name_prefix", "in_alarm"),
     run=collect,
-    one_of=("alarm_names", "name_prefix"),
+    one_of=("alarm_names", "name_prefix", "in_alarm"),
 )

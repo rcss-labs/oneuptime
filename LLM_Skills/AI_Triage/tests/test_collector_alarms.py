@@ -31,8 +31,8 @@ def run(config_data, tmp_path, answers, targets):
 def test_declares_its_targets():
     assert COLLECTOR.name == "alarms"
     assert COLLECTOR.required == ()
-    assert COLLECTOR.optional == ("alarm_names", "name_prefix")
-    assert COLLECTOR.one_of == ("alarm_names", "name_prefix")
+    assert COLLECTOR.optional == ("alarm_names", "name_prefix", "in_alarm")
+    assert COLLECTOR.one_of == ("alarm_names", "name_prefix", "in_alarm")
 
 
 def test_alarm_names_give_current_facts(config_data, tmp_path):
@@ -342,3 +342,31 @@ def test_history_still_cut_after_five_pages_does_not_name_the_first_alarm(config
     assert not [t for t in texts if t.startswith("The first alarm to go into ALARM in the window was")]
     cut = [t for t in texts if "cannot be named" in t]
     assert len(cut) == 1 and "endless" in cut[0] and "calm" not in cut[0].split("cut")[-1]
+
+
+def test_in_alarm_lists_alarms_by_state_with_the_cap(config_data, tmp_path):
+    answers = {"cloudwatch describe-alarms": {"MetricAlarms": [alarm("cpu-high")], "NextToken": "t"},
+               "cloudwatch describe-alarm-history": {"AlarmHistoryItems": [history(IN_WINDOW, "OK", "ALARM")]}}
+    ctx, aws = run(config_data, tmp_path, answers, {"in_alarm": "true"})
+    call = aws.called("cloudwatch", "describe-alarms")[0]
+    assert call[call.index("--state-value") + 1] == "ALARM"
+    assert call[call.index("--max-items") + 1] == "50"
+    assert "--alarm-names" not in call and "--alarm-name-prefix" not in call
+    assert any(f.kind == "current" and "cpu-high" in f.summary for f in ctx.evidence.facts)
+    assert any("changed from OK to ALARM" in f.summary for f in ctx.evidence.facts)
+    cap = [f for f in ctx.evidence.facts if f.kind == "derived" and "50" in f.summary and "ALARM" in f.summary and "more" in f.summary.lower()]
+    assert cap
+    assert_read_only(ctx, aws)
+
+
+def test_in_alarm_below_the_cap_has_no_cap_fact(config_data, tmp_path):
+    answers = {"cloudwatch describe-alarms": {"MetricAlarms": [alarm("cpu-high")]},
+               "cloudwatch describe-alarm-history": {"AlarmHistoryItems": []}}
+    ctx, _ = run(config_data, tmp_path, answers, {"in_alarm": "true"})
+    assert not [f for f in ctx.evidence.facts if "more" in f.summary.lower() and "50" in f.summary]
+
+
+def test_in_alarm_other_than_true_is_not_used(config_data, tmp_path):
+    ctx, aws = run(config_data, tmp_path, {}, {"in_alarm": "false"})
+    assert not aws.calls
+    assert ctx.evidence.errors[0]["code"] == "InvalidTarget"
