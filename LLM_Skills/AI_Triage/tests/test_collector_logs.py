@@ -306,3 +306,23 @@ def test_start_query_answer_without_a_query_id_is_an_evidence_error(config_data,
     assert [error["code"] for error in ctx.evidence.errors] == ["QueryNotStarted"]
     assert "queryId" in ctx.evidence.errors[0]["message"]
     assert not fake.called("logs", "get-query-results")
+
+
+def test_line_summary_names_the_pattern_and_the_stream(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, standard(), {"log_groups": GROUPS[0], "pattern": "refused"})
+    line = [f for f in ctx.evidence.facts if f.excerpt == "ERROR connection refused"][0]
+    assert "refused" in line.summary and "app/1" in line.summary
+
+
+def test_line_summary_cuts_a_long_pattern_at_sixty_characters(config_data, tmp_path):
+    pattern = "x" * 100
+    ctx, _, _ = run(config_data, tmp_path, standard(), {"log_groups": GROUPS[0], "pattern": pattern})
+    line = [f for f in ctx.evidence.facts if f.excerpt == "ERROR connection refused"][0]
+    assert "x" * 60 in line.summary and "x" * 61 not in line.summary
+
+
+def test_unreadable_time_line_summary_also_names_the_pattern(config_data, tmp_path):
+    lines = [row(**{"@timestamp": "garbage", "@logStream": "s1", "@message": "ERROR boom"})]
+    ctx, _, _ = run(config_data, tmp_path, standard(lines=lines), {"log_groups": GROUPS[0], "pattern": "boom"})
+    bad = [f for f in ctx.evidence.facts if f.excerpt == "ERROR boom"][0]
+    assert "boom" in bad.summary and "could not be read" in bad.summary

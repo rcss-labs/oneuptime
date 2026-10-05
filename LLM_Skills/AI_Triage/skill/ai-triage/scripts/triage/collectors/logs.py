@@ -18,6 +18,7 @@ QUERY_TIMEOUT = "QueryTimeout"
 QUERY_NOT_STARTED = "QueryNotStarted"
 _FAILED_STATUSES = ("Failed", "Cancelled", "Timeout")
 MAX_BUCKET_FACTS = 60
+MAX_PATTERN_TEXT = 60
 
 BUCKET_QUERY = "| stats count(*) as matches by bin(5m)"
 PATTERN_QUERY = "| pattern @message | sort @sampleCount desc | limit 15"
@@ -162,20 +163,21 @@ def _add_patterns(ctx: CollectContext, resource: str, rows: list[dict[str, str]]
         )
 
 
-def _add_lines(ctx: CollectContext, resource: str, rows: list[dict[str, str]]) -> None:
+def _add_lines(ctx: CollectContext, resource: str, rows: list[dict[str, str]], pattern: str) -> None:
+    shown = pattern if len(pattern) <= MAX_PATTERN_TEXT else pattern[:MAX_PATTERN_TEXT] + "…"
     for row in rows:
         moment = _insights_time(row.get("@timestamp"))
         stream = row.get("@logStream", "unknown")
         if moment is None:
             ctx.evidence.add(
                 kind=DERIVED, resource=resource, command=ctx.last_command,
-                summary=f"Matching log line in stream {stream}; its time could not be read",
+                summary=f"Log line matching {shown} in stream {stream}; its time could not be read",
                 excerpt=row.get("@message", ""),
             )
             continue
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=resource, time=moment, command=ctx.last_command,
-            summary=f"Matching log line in stream {stream}", excerpt=row.get("@message", ""),
+            summary=f"Log line matching {shown} in stream {stream}", excerpt=row.get("@message", ""),
         )
 
 
@@ -213,7 +215,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         _add_patterns(ctx, resource, patterns)
     lines = run_query(ctx, used, _query_text(escaped, LINES_QUERY))
     if lines is not None:
-        _add_lines(ctx, resource, lines)
+        _add_lines(ctx, resource, lines, pattern)
 
 
 COLLECTOR = Collector(
