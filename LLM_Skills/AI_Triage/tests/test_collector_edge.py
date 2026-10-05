@@ -322,10 +322,11 @@ def test_application_load_balancer_metrics(config_data, tmp_path):
     names = {(q["MetricStat"]["Metric"]["MetricName"], q["MetricStat"]["Stat"]) for q in sent}
     assert {("HTTPCode_Target_5XX_Count", "Sum"), ("TargetResponseTime", "Maximum"), ("RequestCount", "Sum"),
             ("RejectedConnectionCount", "Sum"), ("TargetConnectionErrorCount", "Sum"),
-            ("UnHealthyHostCount", "Maximum"), ("HealthyHostCount", "Minimum")} <= names
+            ("UnHealthyHostCount", "Maximum"), ("HealthyHostCount", "Minimum"),
+            ("ClientTLSNegotiationErrorCount", "Sum")} <= names
     host = next(q for q in sent if q["MetricStat"]["Metric"]["MetricName"] == "UnHealthyHostCount")
     assert {"Name": "TargetGroup", "Value": "targetgroup/web-tg/73e2d6bc24d8a067"} in host["MetricStat"]["Metric"]["Dimensions"]
-    assert by_summary(ctx, "HTTPCode_ELB_5XX_Count (Sum): peak 120")
+    assert [f.data["maximum"] for f in by_summary(ctx, "HTTPCode_ELB_5XX_Count (Sum)")] == [120]
 
 
 def test_network_load_balancer_uses_only_host_count_metrics(config_data, tmp_path):
@@ -334,7 +335,8 @@ def test_network_load_balancer_uses_only_host_count_metrics(config_data, tmp_pat
     ctx, aws, _ = run(config_data, tmp_path, healthy_answers(**{"elbv2 describe-load-balancers": nlb}))
     sent = queries(aws)
     assert {q["MetricStat"]["Metric"]["Namespace"] for q in sent} == {"AWS/NetworkELB"}
-    assert {q["MetricStat"]["Metric"]["MetricName"] for q in sent} == {"UnHealthyHostCount", "HealthyHostCount"}
+    assert {q["MetricStat"]["Metric"]["MetricName"] for q in sent} == {
+        "UnHealthyHostCount", "HealthyHostCount", "ClientTLSNegotiationErrorCount"}
     assert {"Name": "LoadBalancer", "Value": nlb_suffix} in sent[0]["MetricStat"]["Metric"]["Dimensions"]
 
 
@@ -484,3 +486,15 @@ def test_missing_arn_fields_write_no_arn_key_and_do_not_fail(config_data, tmp_pa
 def test_dns_facts_carry_the_zone_id_and_record_name(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, dns_answers(ALIAS_HERE), HOSTNAME)
     assert dns_facts(ctx)[0].data == {"hosted_zone_id": "ZLONG", "record_name": "www.example.com"}
+
+
+def test_tls_negotiation_errors_are_asked_for_application_and_network_load_balancers_only(config_data, tmp_path):
+    for kind, namespace in (("application", "AWS/ApplicationELB"), ("network", "AWS/NetworkELB")):
+        balancer = load_balancer(Type=kind)
+        _, aws, _ = run(config_data, tmp_path, healthy_answers(**{"elbv2 describe-load-balancers": balancer}))
+        tls = [q["MetricStat"] for q in queries(aws)
+               if q["MetricStat"]["Metric"]["MetricName"] == "ClientTLSNegotiationErrorCount"]
+        assert len(tls) == 1 and tls[0]["Stat"] == "Sum" and tls[0]["Metric"]["Namespace"] == namespace
+        assert [d["Name"] for d in tls[0]["Metric"]["Dimensions"]] == ["LoadBalancer"]
+    _, aws, _ = run(config_data, tmp_path, healthy_answers(**{"elbv2 describe-load-balancers": load_balancer(Type="gateway")}))
+    assert "ClientTLSNegotiationErrorCount" not in json.dumps(queries(aws))

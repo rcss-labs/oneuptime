@@ -27,6 +27,8 @@ LOAD_BALANCER_METRICS = (
     ("RejectedConnectionCount", "Sum"),
     ("TargetConnectionErrorCount", "Sum"),
 )
+# The only metric that shows a certificate problem as clients saw it (failed TLS handshakes).
+TLS_METRICS = (("ClientTLSNegotiationErrorCount", "Sum"),)
 HOST_COUNT_METRICS = (("UnHealthyHostCount", "Maximum"), ("HealthyHostCount", "Minimum"))
 
 
@@ -358,6 +360,10 @@ def _add_metrics(ctx: CollectContext, resource: str, balancer: dict, groups: lis
     specs = [] if kind in ("network", "gateway") else [
         MetricSpec(metric, namespace, metric, {"LoadBalancer": suffix}, stat) for metric, stat in LOAD_BALANCER_METRICS
     ]
+    if kind in ("network", "application"):
+        specs += [
+            MetricSpec(metric, namespace, metric, {"LoadBalancer": suffix}, stat) for metric, stat in TLS_METRICS
+        ]
     for group in groups[:MAX_TARGET_GROUPS]:
         dimensions = {"TargetGroup": group.get("TargetGroupArn", "").split(":")[-1], "LoadBalancer": suffix}
         specs += [
