@@ -7,6 +7,7 @@ import collections
 import copy
 import functools
 import hashlib
+import html
 import ipaddress
 import math
 import json
@@ -696,6 +697,20 @@ def _xml_spans(text: str) -> list[Span]:
     return spans
 
 
+def _odbc_braced_span(text: str, start: int) -> Span | None:
+    """The inside of an ODBC {...} value, where }} is an escaped brace; None when unclosed on the line."""
+    limit = _line_end(text, start)
+    index = start + 1
+    while index < limit:
+        if text[index] == "}":
+            if text.startswith("}}", index):
+                index += 2
+                continue
+            return (start + 1, index)
+        index += 1
+    return None
+
+
 def _key_value_spans(text: str) -> list[Span]:
     spans: list[Span] = []
     position = 0
@@ -710,7 +725,10 @@ def _key_value_spans(text: str) -> list[Span]:
             continue
         line_start = _line_start(text, match.start("key"))
         key_column = match.start("key") - line_start
-        span = _kv_value_span(text, match.end(), quote, sep, key_column=key_column)
+        if sep.strip() == "=" and text.startswith("{", match.end()) and ";" in text[match.start():match.start() + 4000]:
+            span = _odbc_braced_span(text, match.end())  # Pwd={p;w}: the ODBC escape for special characters
+        else:
+            span = _kv_value_span(text, match.end(), quote, sep, key_column=key_column)
         if (span and sep.strip() == "=" and not quote and text[match.end()] not in "\"'"
                 and _ENV_LINE_KEY_RE.match(text, line_start, match.start("key") + len(key))):
             end = _line_end(text, span[0])
@@ -817,7 +835,8 @@ def _flag_spans(text: str) -> list[Span]:
 # ; | or && separator, the next command word, or 2000 characters.
 _COMMAND_RE = re.compile(
     r"(?<![\w.-])(?P<command>curl|wget|mysqldump|mysqladmin|mysql|mariadb-dump|mariadb|docker[ \t]+login|sshpass|redis-cli"
-    r"|put-parameter|htpasswd|ldapsearch|ldapmodify|ldapadd|ldapdelete|ldapwhoami|ldappasswd|smbclient)(?![\w-])"
+    r"|put-parameter|htpasswd|ldapsearch|ldapmodify|ldapadd|ldapdelete|ldapwhoami|ldappasswd|smbclient"
+    r"|sqlcmd|mongosh|mongo)(?![\w-])"
 )
 _COMMAND_END_RE = re.compile(r";|\||&&")
 _TOKEN = r"""(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)"""
@@ -834,6 +853,24 @@ _REDIS_AUTH_RE = re.compile(r"(?<!\S)(?i:auth)[ \t]+(?P<first>" + _TOKEN + r")(?
 _LDAP_W_RE = re.compile(r"(?<!\S)-w[ \t]*(?P<value>" + _TOKEN + r")")
 _SMB_USER_RE = re.compile(r"(?<!\S)(?:-U|--user(?:=|[ \t]+))[ \t]*(?P<value>" + _TOKEN + r")")
 _ARGUMENT_RE = re.compile(_TOKEN)
+_SQLCMD_P_RE = re.compile(r"(?<!\S)-P[ \t]*(?P<value>" + _TOKEN + r")")
+
+
+def _is_argument_path(text: str, match: re.Match[str], previous: re.Match[str] | None) -> bool:
+    """/etc/nginx/htpasswd after another command on the same line is an argument, not a command."""
+    if previous is None or match.start() == 0 or text[match.start() - 1] != "/":
+        return False
+    line_start = _line_start(text, match.start())
+    if previous.start() < line_start:
+        return False
+    floor = max(line_start, match.start() - 512)
+    space = max(text.rfind(" ", floor, match.start()), text.rfind("\t", floor, match.start()))
+    if space == -1 and floor > line_start:
+        return True  # inside a very long token: an argument
+    cursor = space + 1 if space != -1 else floor
+    while cursor > line_start and text[cursor - 1] in " \t":
+        cursor -= 1
+    return cursor > line_start and text[cursor - 1] not in "|;&(`"
 
 
 def _token_inner(text: str, start: int, end: int) -> Span:
@@ -853,7 +890,11 @@ def _password_after_colon(text: str, start: int, end: int) -> Span | None:
 
 def _command_spans(text: str) -> list[Span]:
     """Credentials in a command string: curl -u user:pass, mysql -pPASS, docker login -p PASS."""
-    matches = list(_COMMAND_RE.finditer(text))
+    found = list(_COMMAND_RE.finditer(text))
+    matches = []
+    for match in found:
+        if not _is_argument_path(text, match, matches[-1] if matches else None):
+            matches.append(match)
     spans: list[Span] = []
     for index, match in enumerate(matches):
         _tick()
@@ -883,6 +924,12 @@ def _command_spans(text: str) -> list[Span]:
             for found in _REDIS_AUTH_RE.finditer(text, match.end(), limit):
                 group = "second" if found.group("second") else "first"
                 spans.append(_token_inner(text, found.start(group), found.end(group)))
+        elif command == "sqlcmd":
+            for found_p in _SQLCMD_P_RE.finditer(text, match.end(), limit):
+                spans.append(_token_inner(text, found_p.start("value"), found_p.end("value")))
+        elif command in ("mongosh", "mongo"):
+            for found_p in _SPACED_P_RE.finditer(text, match.end(), limit):
+                spans.append(_token_inner(text, found_p.start("value"), found_p.end("value")))
         elif command == "htpasswd":  # htpasswd -b FILE USER PASSWORD
             arguments = list(_ARGUMENT_RE.finditer(text, match.end(), limit))
             if any(a.group().startswith("-") and "b" in a.group() for a in arguments):
@@ -1221,19 +1268,22 @@ def _more_command_spans(text: str) -> list[Span]:
 _ESCAPED_UNICODE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 
-def _escaped_unicode_spans(text: str) -> list[Span]:
-    """Run the rules on a view with \\uXXXX escapes decoded, and map what they find back."""
-    if "\\u" not in text or not _ESCAPED_UNICODE_RE.search(text):
-        return []
+_HTML_ENTITY_RE = re.compile(r"&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z]{2,8});")
+_VIEW_RULES = ("escaped_unicode", "html_escaped", "percent_encoded")
+
+
+def _decoded_view_spans(text: str, pattern: re.Pattern[str], decode: Callable[[re.Match[str]], str]) -> list[Span]:
+    """Run the rules on a view of text with each pattern match decoded, and map what they find back."""
     pieces, starts, ends, position = [], [], [], 0
-    for match in _ESCAPED_UNICODE_RE.finditer(text):
+    for match in pattern.finditer(text):
         for index in range(position, match.start()):
             pieces.append(text[index])
             starts.append(index)
             ends.append(index + 1)
-        pieces.append(chr(int(match.group(1), 16)))
-        starts.append(match.start())
-        ends.append(match.end())
+        for char in decode(match):
+            pieces.append(char)
+            starts.append(match.start())
+            ends.append(match.end())
         position = match.end()
     for index in range(position, len(text)):
         pieces.append(text[index])
@@ -1242,7 +1292,7 @@ def _escaped_unicode_spans(text: str) -> list[Span]:
     decoded = "".join(pieces)
     spans = []
     for category, rule in SECRET_RULES:
-        if category in ("escaped_unicode", "percent_encoded"):
+        if category in _VIEW_RULES:
             continue
         for start, end in rule(decoded):
             if end > start:
@@ -1250,10 +1300,171 @@ def _escaped_unicode_spans(text: str) -> list[Span]:
     return [span for span in _merge(spans) if _usable(text, span)]
 
 
+def _escaped_unicode_spans(text: str) -> list[Span]:
+    """\\uXXXX escapes decoded (a JSON key written with an escape)."""
+    if "\\u" not in text or not _ESCAPED_UNICODE_RE.search(text):
+        return []
+    return _decoded_view_spans(text, _ESCAPED_UNICODE_RE, lambda m: chr(int(m.group(1), 16)))
+
+
+def _html_escaped_spans(text: str) -> list[Span]:
+    """HTML entities decoded: &quot;password&quot;:&quot;...&quot; and password&#61;..."""
+    if "&" not in text or not _HTML_ENTITY_RE.search(text):
+        return []
+    return _decoded_view_spans(text, _HTML_ENTITY_RE, lambda m: html.unescape(m.group()))
+
+
+# --- positional and unnamed shapes -------------------------------------------------------
+
+NETRC_RE = re.compile(
+    r"(?:\bmachine[ \t]+\S+[ \t]+(?:login[ \t]+\S+[ \t]+)?|\blogin[ \t]+\S+[ \t]+|^[ \t]*(?=password[ \t]+\S+[ \t]*$))"
+    r"password[ \t]+(?P<value>[^\s'\"]\S*)",  # a quoted value is SQL (ENCRYPTED PASSWORD '...'), not netrc
+    re.MULTILINE,
+)
+PGPASS_RE = re.compile(
+    r"^(?:[^\s:]+|\*):(?:\d{1,5}|\*):(?:[^\s:]+|\*):(?:[^\s:]+|\*):(?P<value>\S+)[ \t]*\r?$", re.MULTILINE
+)
+CHPASSWD_RE = re.compile(
+    r"""(?:(?:echo|printf)[ \t]+(?:-\w+[ \t]+)*['"]?[\w.@-]+:(?P<piped>[^'"\s|]+)['"]?[ \t]*\|[ \t]*(?:sudo[ \t]+)?chpasswd"""
+    r"""|chpasswd[ \t]*<<<[ \t]*['"]?[\w.@-]+:(?P<here>[^'"\s]+))"""
+)
+TERRAFORM_DIFF_RE = re.compile(
+    r'(?P<name>[\w.\-]+)[ \t]*=[ \t]*"(?P<old>[^"\n]*)"[ \t]*->[ \t]*"(?P<new>[^"\n]*)"'
+)
+MULTIPART_RE = re.compile(
+    r'form-data;[ \t]*name="(?P<name>[^"\r\n]{1,100})"[^\r\n]*\r?\n(?:[A-Za-z-]+:[^\r\n]*\r?\n)*\r?\n(?P<value>[^\r\n]+)'
+)
+ADD_MASK_RE = re.compile(r"::add-mask::(?P<value>[^\r\n]+)")
+_YAML_DOCUMENT_SPLIT_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
+_K8S_SECRET_KIND_RE = re.compile(r"^[ \t]*kind:[ \t]*[\"']?Secret[\"']?[ \t]*\r?$", re.MULTILINE)
+_K8S_DATA_RE = re.compile(r"^(?P<indent>[ \t]*)(?:data|stringData):[ \t]*\r?$", re.MULTILINE)
+_K8S_ENTRY_RE = re.compile(r"^(?P<indent>[ \t]+)(?P<key>[^:\r\n]+):(?:[ \t]+(?P<value>[^\r\n]*?))?[ \t]*\r?$", re.MULTILINE)
+
+
+def _k8s_secret_spans(text: str) -> list[Span]:
+    """Every value under data: and stringData: of a Kubernetes object whose kind is Secret."""
+    if "Secret" not in text or not _K8S_SECRET_KIND_RE.search(text):
+        return []
+    spans: list[Span] = []
+    position = 0
+    documents = []
+    for split in _YAML_DOCUMENT_SPLIT_RE.finditer(text):
+        documents.append((position, split.start()))
+        position = split.end()
+    documents.append((position, len(text)))
+    for start, end in documents:
+        if not _K8S_SECRET_KIND_RE.search(text, start, end):
+            continue
+        for block in _K8S_DATA_RE.finditer(text, start, end):
+            column = len(block.group("indent"))
+            cursor = block.end() + 1
+            while cursor < end:
+                entry = _K8S_ENTRY_RE.match(text, cursor, _line_end(text, cursor))
+                if not entry:
+                    line = text[cursor:_line_end(text, cursor)]
+                    if line.strip() and len(line) - len(line.lstrip()) <= column:
+                        break
+                    cursor = _line_end(text, cursor) + 1
+                    continue
+                if len(entry.group("indent")) <= column:
+                    break
+                if entry.group("value"):
+                    value_start = entry.start("value")
+                    span = _kv_value_span(text, value_start, "", ": ", stop_at_delimiters=False,
+                                          key_column=len(entry.group("indent")))
+                    if span:
+                        spans.append(span)
+                cursor = _line_end(text, cursor) + 1
+    return spans
+
+
+def _positional_spans(text: str) -> list[Span]:
+    """netrc, .pgpass, chpasswd input, Terraform plan diffs, multipart parts, ::add-mask::, Secret data."""
+    spans: list[Span] = []
+    if "password" in text:
+        spans.extend(m.span("value") for m in NETRC_RE.finditer(text))
+    if text.count(":") >= 4:
+        spans.extend(m.span("value") for m in PGPASS_RE.finditer(text))
+    if "chpasswd" in text:
+        for match in CHPASSWD_RE.finditer(text):
+            spans.append(match.span("piped" if match.group("piped") is not None else "here"))
+    if "->" in text:
+        for match in TERRAFORM_DIFF_RE.finditer(text):
+            if looks_secret_key(match.group("name")):
+                spans.extend((match.span("old"), match.span("new")))
+    if "form-data" in text:
+        spans.extend(m.span("value") for m in MULTIPART_RE.finditer(text) if looks_secret_key(m.group("name")))
+    if "::add-mask::" in text:
+        spans.extend(m.span("value") for m in ADD_MASK_RE.finditer(text))
+    spans.extend(_k8s_secret_spans(text))
+    return [span for span in _merge(spans) if _usable(text, span) and not _harmless_secret_value(text[span[0]:span[1]])]
+
+
+_TABLE_HEADER_CELL_RE = re.compile(r"[A-Za-z_][\w .\-]{0,40}")
+_MARKDOWN_RULE_RE = re.compile(r"^\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$")
+
+
+def _cells(line: str, base: int, delimiter: str) -> list[Span]:
+    """Cell spans of a delimited line (whitespace trimmed); a Markdown row drops its outer pipes."""
+    spans, start = [], 0
+    for index, char in enumerate(line + delimiter):
+        if char == delimiter:
+            cell_start, cell_end = start, index
+            while cell_start < cell_end and line[cell_start] in " \t":
+                cell_start += 1
+            while cell_end > cell_start and line[cell_end - 1] in " \t\r":
+                cell_end -= 1
+            spans.append((base + cell_start, base + cell_end))
+            start = index + 1
+    if delimiter == "|" and line.strip().startswith("|"):
+        spans = spans[1:-1] if line.rstrip().endswith("|") else spans[1:]
+    return spans
+
+
+def _table_spans(text: str) -> list[Span]:
+    """CSV, TSV and Markdown table cells under a header cell with a secret name."""
+    if "\n" not in text:
+        return []
+    spans: list[Span] = []
+    lines, position = [], 0
+    for line in text.split("\n"):
+        lines.append((position, line))
+        position += len(line) + 1
+    index = 0
+    while index < len(lines):
+        base, line = lines[index]
+        index += 1
+        delimiter = next((d for d in ("|", "\t", ",") if line.count(d) >= 1), None)
+        if delimiter is None:
+            continue
+        header = _cells(line, base, delimiter)
+        names = [text[a:b] for a, b in header]
+        if len(header) < 2 or not all(_TABLE_HEADER_CELL_RE.fullmatch(name) for name in names):
+            continue
+        secret_columns = [column for column, name in enumerate(names) if looks_secret_key(name)]
+        if not secret_columns:
+            continue
+        while index < len(lines):
+            row_base, row = lines[index]
+            if delimiter == "|" and _MARKDOWN_RULE_RE.match(row):
+                index += 1
+                continue
+            cells = _cells(row, row_base, delimiter)
+            if len(cells) != len(header):
+                break
+            for column in secret_columns:
+                start, end = cells[column]
+                if end > start and not _harmless_secret_value(text[start:end]):
+                    spans.append((start, end))
+            index += 1
+    return [span for span in spans if _usable(text, span)]
+
+
 # (audit category, rule), in redaction order.
 SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("percent_encoded", lambda text: _percent_spans(text, emails=False)),
     ("escaped_unicode", _escaped_unicode_spans),
+    ("html_escaped", _html_escaped_spans),
     ("private_key", _pem_spans),
     ("sql_password", _sql_spans),
     ("url_credential", _group_rule(URL_CREDENTIAL_RE, "secret")),
@@ -1268,6 +1479,8 @@ SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("secret_argument_list", lambda text: _merge(_yaml_argument_spans(text) + _json_array_argument_spans(text))),
     ("webhook_url", _webhook_spans),
     ("secret_command_log", _more_command_spans),
+    ("secret_positional", _positional_spans),
+    ("secret_table_column", _table_spans),
     ("aws_access_key", lambda text: [m.span() for m in AWS_KEY_RE.finditer(text)]),
     ("vendor_token", lambda text: [m.span() for m in VENDOR_TOKEN_RE.finditer(text)]),
     ("aws_secret_key", _aws_secret_key_spans),
@@ -1881,6 +2094,15 @@ class Redactor:
             new_key = self.text(key) if isinstance(key, str) else key
             if command_args is not None and key in command_args:
                 result[new_key] = self._walk_list(item, False, False, False, argv=command_args[key])
+            elif key in ("data", "stringData") and obj.get("kind") == "Secret" and not keep:
+                # every value of a Kubernetes Secret, whatever its key is called (DATABASE_URL too)
+                result[new_key] = (
+                    {
+                        self.text(data_key) if isinstance(data_key, str) else data_key: self._walk(data_value, True, True, False)
+                        for data_key, data_value in item.items()
+                    }
+                    if isinstance(item, dict) else self._walk(item, True, True, False)
+                )
             elif keep:
                 result[new_key] = self._walk(item, False, False, False, True)
             elif key == REFERENCE_KEY:

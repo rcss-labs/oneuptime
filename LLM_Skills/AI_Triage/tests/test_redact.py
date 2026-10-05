@@ -1877,3 +1877,84 @@ def test_round_five_error_code_in_value():
 )
 def test_round_five_secrets_next_to_those_words_stay_masked(source, expected):
     assert Redactor().text(source) == expected
+
+
+# Rulings 4 and 5: leaks and unnamed or positional shapes (a short punctuated password, which
+# the key-like token rule cannot catch on its own)
+
+PUNCT_PW = "Qa" + "!z9#" + "Lk"
+
+ROUND_FIVE_LEAKS = [
+    ("odbc-braces", "Driver={ODBC Driver 18};Server=db.example.com;Uid=app;Pwd={" + PUNCT_PW + ";x};Encrypt=yes"),
+    ("oracle-sqlplus", "sqlplus scott/" + PUNCT_PW + "@db.example.com:1521/ORCL"),
+    ("oracle-jdbc", "jdbc:oracle:thin:scott/" + PUNCT_PW + "@db.example.com:1521:ORCL"),
+    ("htpasswd-path", "htpasswd -b /etc/nginx/htpasswd admin " + PUNCT_PW),
+    ("htpasswd-path-c", "/usr/bin/htpasswd -bc /srv/auth/users admin " + PUNCT_PW),
+    ("k8s-secret-yaml", "apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\ndata:\n  DATABASE_URL: " + PUNCT_PW + "\n  other: x" + PUNCT_PW + "\ntype: Opaque"),
+    ("k8s-secret-stringdata", "kind: Secret\nstringData:\n  config.json: '" + PUNCT_PW + "'\n"),
+    ("k8s-secret-json", '{"apiVersion":"v1","kind":"Secret","data":{"DATABASE_URL":"' + PUNCT_PW + '"}}'),
+    ("netrc-line", "machine api.example.com login deploy password " + PUNCT_PW),
+    ("netrc-multiline", "machine api.example.com\n  login deploy\n  password " + PUNCT_PW + "\n"),
+    ("pgpass", "db.example.com:5432:app:app_user:" + PUNCT_PW),
+    ("pgpass-star", "*:*:*:postgres:" + PUNCT_PW),
+    ("sqlcmd", "sqlcmd -S db.example.com -U sa -P " + PUNCT_PW + " -Q 'select 1'"),
+    ("mongosh", "mongosh mongodb://db.example.com:27017 -u admin -p " + PUNCT_PW),
+    ("mongo", "mongo --host db.example.com -u admin -p " + PUNCT_PW + " admin"),
+    ("ldapsearch", "ldapsearch -x -D cn=admin -w " + PUNCT_PW + " -b dc=example"),
+    ("chpasswd-echo", "echo 'deploy:" + PUNCT_PW + "' | chpasswd"),
+    ("chpasswd-herestring", "chpasswd <<< \"deploy:" + PUNCT_PW + "\""),
+    ("terraform-diff", '      ~ master_password = "' + "old" + PUNCT_PW + '" -> "' + PUNCT_PW + '"'),
+    ("csv-table", "user,password,role\nbob," + PUNCT_PW + ",admin\nann,x" + PUNCT_PW + ",dev"),
+    ("markdown-table", "| user | password | role |\n|---|---|---|\n| bob | " + PUNCT_PW + " | admin |"),
+    ("html-json", "&quot;password&quot;:&quot;" + PUNCT_PW + "&quot;"),
+    ("html-equals", "password&#61;" + PUNCT_PW + "&amp;user=bob"),
+    ("html-xml", "&lt;password&gt;" + PUNCT_PW + "&lt;/password&gt;"),
+    ("multipart", 'Content-Disposition: form-data; name="password"\r\n\r\n' + PUNCT_PW + "\r\n--boundary"),
+    ("add-mask", "::add-mask::" + PUNCT_PW),
+]
+
+
+@pytest.mark.parametrize("name, source", ROUND_FIVE_LEAKS, ids=[case[0] for case in ROUND_FIVE_LEAKS])
+def test_round_five_leak_shapes(name, source):
+    out = Redactor().text(source)
+    assert PUNCT_PW not in out
+    assert Redactor().text(out) == out
+
+
+def test_kubernetes_secret_object_in_value():
+    obj = {"kind": "Secret", "metadata": {"name": "app"}, "data": {"DATABASE_URL": PUNCT_PW}, "type": "Opaque"}
+    out = Redactor().value(obj)
+    assert out["data"] == {"DATABASE_URL": "<SECRET-1>"} and out["metadata"] == {"name": "app"}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "kind: ConfigMap\ndata:\n  LOG_LEVEL: info\n",
+        "user,role\nbob,admin",
+        "| user | role |\n|---|---|\n| bob | admin |",
+        "&quot;user&quot;:&quot;bob&quot;",
+        "time=10:00:00 host=a:b:c:d",
+        '      ~ instance_type = "t3.small" -> "t3.large"',
+    ],
+)
+def test_round_five_harmless_neighbours_are_kept(source):
+    assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "user,password\nbob,x\n", "| a | password |\n", '&quot;password&quot;:&quot;x&quot;,', "kind: Secret\ndata:\n  a: b\n",
+        "machine h login u password p\n", "h:5432:d:u:p\n", "echo 'u:p' | chpasswd\n", 'x_password = "a" -> "b"\n',
+        'form-data; name="password"\n\nx\n', "::add-mask::x\n", "htpasswd -b /a/htpasswd u p\n", "sqlcmd -P x ",
+        "Pwd={x};", "/htpasswd ", "/htpasswd", "x /mysql/mysql",
+    ],
+)
+def test_one_megabyte_round_five_shapes_are_fast(shape):
+    source = shape * (MEGABYTE // len(shape))
+    for call in (Redactor().text, lambda s: Redactor().value({"m": s}), audit_text):
+        started = time.perf_counter()
+        call(source)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 2, (shape, elapsed)

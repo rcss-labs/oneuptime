@@ -19,6 +19,7 @@ PW2 = "Blue" + "Fox77" + "rain"
 PW_SPECIAL = "ab" + "&c;d" + "Ef9"               # holds query and statement delimiters
 PW_SPACES = "correct horse " + "battery st4ple"
 SHORT = "s3" + "cret" + "!"
+PWP = "Qa" + "!z9#" + "Lk"                          # short and punctuated: no token rule can see it
 
 
 def _hex(seed: int, length: int) -> str:
@@ -299,6 +300,23 @@ LEAKS = [
     ("cvv", "cvv: 123", "123"),
     ("ssn", f"ssn={SSN}", SSN),
     ("iban-name", "iban: DE89" + "3704 0044 0532 0130 00", "0532"),
+    # round 5: regressed, still-open and positional shapes, with a short punctuated password
+    ("odbc-braces", "Driver={ODBC Driver 18};Server=db;Uid=app;Pwd={" + PWP + "};", PWP),
+    ("oracle-user-slash", "sqlplus scott/" + PWP + "@db.example.com:1521/ORCL", PWP),
+    ("htpasswd-b-path", "htpasswd -b /etc/nginx/htpasswd admin " + PWP, PWP),
+    ("k8s-secret-data", "kind: Secret\ndata:\n  DATABASE_URL: " + PWP + "\n", PWP),
+    ("netrc", "machine api.example.com login deploy password " + PWP, PWP),
+    ("pgpass", "db.example.com:5432:app:app_user:" + PWP, PWP),
+    ("sqlcmd-P", "sqlcmd -S db -U sa -P " + PWP, PWP),
+    ("mongosh-p", "mongosh -u admin -p " + PWP, PWP),
+    ("ldapsearch-w-short", "ldapsearch -x -w " + PWP + " -b dc=example", PWP),
+    ("chpasswd", "echo 'deploy:" + PWP + "' | chpasswd", PWP),
+    ("terraform-plan", '  ~ db_password = "a" -> "' + PWP + '"', PWP),
+    ("csv-password-column", "user,password\nbob," + PWP, PWP),
+    ("markdown-password-column", "| user | password |\n|---|---|\n| bob | " + PWP + " |", PWP),
+    ("html-escaped-json", "&quot;password&quot;:&quot;" + PWP + "&quot;", PWP),
+    ("multipart-password", 'Content-Disposition: form-data; name="password"\r\n\r\n' + PWP + "\r\n--b", PWP),
+    ("add-mask", "::add-mask::" + PWP, PWP),
 ]
 
 assert len(LEAKS) >= 150, len(LEAKS)
