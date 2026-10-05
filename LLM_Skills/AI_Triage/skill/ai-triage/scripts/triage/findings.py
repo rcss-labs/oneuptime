@@ -18,6 +18,8 @@ MAX_MATCHED_TEXT = 500
 # was typed to look for.
 ASKED_KEY = "asked"
 MIN_WHOLE_VALUE = 3
+# Once every asked string is cut out of an excerpt, this much other text must remain for it to show a finding.
+MIN_FOUND_TEXT = 12
 PROVENANCES = ("incident_time", "current", "inferred")
 CONFIDENCES = ("high", "medium", "low")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -27,15 +29,16 @@ def _collapse(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text).strip()
 
 
-def _strings_in(value: object) -> list[str]:
-    """Every string anywhere in value, dict keys included."""
+def _strings_in(value: object, with_keys: bool = True) -> list[str]:
+    """Every string anywhere in value, dict keys included unless with_keys is False."""
     strings, pending = [], [value]
     while pending:
         item = pending.pop()
         if isinstance(item, str):
             strings.append(item)
         elif isinstance(item, dict):
-            strings.extend(str(key) for key in item)
+            if with_keys:
+                strings.extend(str(key) for key in item)
             pending.extend(item.values())
         elif isinstance(item, list):
             pending.extend(item)
@@ -59,13 +62,14 @@ def _comparable(text: str) -> str:
     return _collapse(text).lower()
 
 
-def asked_strings(fact: dict, file_asked: object = None) -> list[str]:
+def asked_strings(fact: dict, file_asked: object = None, with_keys: bool = True) -> list[str]:
     """What was asked for this fact, lower-cased with whitespace collapsed.
 
     Every string under the fact's data["asked"] (at any depth) and under its evidence file's top-level asked.
+    Keys count too (a filter field name is free text), unless with_keys is False.
     """
     sources = [*_asked_under(fact.get("data")), file_asked]
-    return [text for text in (_comparable(item) for source in sources for item in _strings_in(source)) if text]
+    return [text for text in (_comparable(item) for source in sources for item in _strings_in(source, with_keys)) if text]
 
 
 def evidence_documents(case_dir: Path, warnings: list[str] | None = None) -> list[tuple[str, dict]]:
@@ -179,15 +183,21 @@ def _around(text: str, needle: str) -> str:
     return text[start:start + MAX_MATCHED_TEXT]
 
 
-def _repeats_request(needle: str, asked: list[str]) -> bool:
-    """True when the excerpt sits inside one asked string, or is only asked strings joined by punctuation."""
+def _repeats_request(needle: str, asked: list[str], asked_values: list[str]) -> bool:
+    """True when the excerpt sits inside one asked string, or when cutting every asked value out of it leaves
+    fewer than MIN_FOUND_TEXT non-space characters (asked names with a few words around them).
+
+    Only values are cut: cutting key names such as "end" out of words would refuse real text.
+    """
     comparable = _comparable(needle)
     if any(comparable in text for text in asked):
         return True
     remainder = comparable
-    for text in sorted((text for text in asked if len(text) >= MIN_WHOLE_VALUE), key=len, reverse=True):
+    for text in sorted((text for text in asked_values if len(text) >= MIN_WHOLE_VALUE), key=len, reverse=True):
         remainder = remainder.replace(text, " ")
-    return not any(char.isalnum() for char in remainder)
+    if remainder == comparable:
+        return False
+    return len("".join(remainder.split())) < MIN_FOUND_TEXT
 
 
 def _matched_string(fact: dict, needle: str) -> str | None:
@@ -236,7 +246,8 @@ def _citation_problems(
             text = _matched_string(fact, needle)
             if text is None:
                 continue
-            if _repeats_request(needle, asked_strings(fact, (file_asked or {}).get(fact.get("file")))):
+            fact_file_asked = (file_asked or {}).get(fact.get("file"))
+            if _repeats_request(needle, asked_strings(fact, fact_file_asked), asked_strings(fact, fact_file_asked, with_keys=False)):
                 repeats = True
                 continue
             matching.append(fact)

@@ -604,3 +604,42 @@ def test_an_excerpt_made_only_of_several_asked_strings_and_punctuation_is_refuse
     reasons = reasons_of(check(case, [finding(fact_ids=["changes-0001"], excerpt="/aws/OutOfMemoryError, /aws/checkout-killed",
                                               provenance="inferred")]))
     assert any(REPEATS in reason for reason in reasons)
+
+
+# At least 12 characters of other text must remain once asked strings are removed (follow-up ruling)
+
+SKIPPED_GROUPS = {"log_groups": ["/aws/ecs/group-1", "/aws/checkout/OutOfMemoryError-killed"]}
+
+
+def test_an_asked_name_with_only_a_short_lead_in_is_refused(tmp_path):
+    case = _asked_fact(tmp_path, "6 log groups were given; skipped: /aws/checkout/OutOfMemoryError-killed", file_asked=SKIPPED_GROUPS)
+    reasons = reasons_of(check(case, [finding(fact_ids=["changes-0001"], excerpt="skipped: /aws/checkout/OutOfMemoryError-killed",
+                                              provenance="inferred")]))
+    assert any(REPEATS in reason for reason in reasons)
+
+
+def test_two_asked_names_with_a_short_word_between_are_refused(tmp_path):
+    case = _asked_fact(tmp_path, "groups /aws/ecs/group-1 and /aws/checkout/OutOfMemoryError-killed", file_asked=SKIPPED_GROUPS)
+    reasons = reasons_of(check(case, [finding(fact_ids=["changes-0001"],
+                                              excerpt="/aws/ecs/group-1 and /aws/checkout/OutOfMemoryError-killed", provenance="inferred")]))
+    assert any(REPEATS in reason for reason in reasons)
+
+
+def test_a_long_found_sentence_containing_an_asked_name_is_accepted(tmp_path):
+    summary = "No change was recorded for checkout-api between 2026-10-04T10:00:00Z and 2026-10-04T10:55:00Z"
+    case = _asked_fact(tmp_path, summary, file_asked={"resource_names": "checkout-api"})
+    assert check(case, [finding(fact_ids=["changes-0001"], excerpt=summary, provenance="inferred")])["rejected"] == []
+
+
+def test_an_asked_value_plus_twelve_found_characters_is_accepted_and_eleven_refused(tmp_path):
+    case = _asked_fact(tmp_path, "checkout-api exited code 137 abcdefgh", data={"service": "checkout-api"},
+                       file_asked={"service": "checkout-api"})
+    accepted = check(case, [finding(fact_ids=["changes-0001"], excerpt="checkout-api exited code 13", provenance="inferred")])
+    assert accepted["rejected"] == []
+    refused = check(case, [finding(fact_ids=["changes-0001"], excerpt="checkout-api exited code 1", provenance="inferred")])
+    assert any(REPEATS in reason for reason in reasons_of(refused))
+
+
+def test_a_short_whole_value_that_holds_no_asked_string_is_still_accepted(tmp_path):
+    case = _asked_fact(tmp_path, "Task stopped", data={"reason": "OOMKilled"}, file_asked={"service": "checkout-api"})
+    assert check(case, [finding(fact_ids=["changes-0001"], excerpt="OOMKilled", provenance="inferred")])["rejected"] == []

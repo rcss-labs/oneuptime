@@ -226,6 +226,8 @@ def test_reproduction_logs_skipped_group_cannot_be_quoted(skill_dir, case_dir):
     run_collector(skill_dir, case_dir, "logs", {"log_groups": ",".join(groups)}, logs_runner([LOG_ROW]))
     fact_id = fact_holding(case_dir, "skipped:")
     assert any(REPEATS in reason for reason in reasons_for(case_dir, fact_id, "OutOfMemoryError"))
+    excerpt = "skipped: /aws/checkout/OutOfMemoryError-killed"
+    assert any(REPEATS in reason for reason in reasons_for(case_dir, fact_id, excerpt))
 
 
 CHANGE_TARGETS = {
