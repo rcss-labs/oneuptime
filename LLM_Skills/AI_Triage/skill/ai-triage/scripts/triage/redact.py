@@ -77,6 +77,22 @@ NAME_ENDINGS = REFERENCE_SUFFIXES | frozenset({
     "metadata", "fingerprint", "ms", "latency",
     # a secret word qualifying a network or an error thing: PrivateIpAddress, KeyError
     "address", "addresses", "ip", "ips", "dns", "duration", "error", "exception",
+    # references to a secret (secretKeyRef, secretRef, valueFrom) and limits on a count
+    "ref", "refs", "from", "limit", "limits", "quota",
+})
+# A plain number is not a secret under a counted name: a plural of a secret word as the last
+# part (tokens, keys, secrets) or a counting word anywhere (max_tokens, num_keys).
+# "number" is not one: card_number, account_number hold the secret itself.
+COUNTING_WORDS = frozenset({"max", "min", "num", "total", "count", "limit", "remaining", "used", "avg"})
+# AWS IAM service prefixes: service:Operation is an action name, not a user:password pair.
+IAM_SERVICE_PREFIXES = frozenset({
+    "secretsmanager", "kms", "ssm", "sts", "iam", "s3", "ec2", "ecs", "ecr", "eks", "lambda", "logs",
+    "cloudwatch", "dynamodb", "rds", "sqs", "sns", "kinesis", "firehose", "elasticloadbalancing",
+    "autoscaling", "cloudformation", "events", "states", "apigateway", "execute-api", "es", "elasticache",
+    "route53", "acm", "cognito-idp", "cognito-identity", "cloudtrail", "codebuild", "codedeploy",
+    "codepipeline", "glue", "athena", "xray", "sso", "organizations", "tag", "ssm-messages", "ssmmessages",
+    "ec2messages", "kafka", "elasticfilesystem", "backup", "config", "guardduty", "wafv2", "cloudfront",
+    "rds-db", "redshift", "sagemaker", "bedrock", "appconfig", "servicediscovery", "application-autoscaling",
 })
 PERSONAL_WORDS = frozenset({"user", "usr", "username", "login", "email", "mail", "owner", "phone", "msisdn", "ssn"})
 AUTHORIZATION_WORDS = frozenset({"authorization", "proxyauthorization"})
@@ -214,9 +230,32 @@ def _looks_like_path(text: str) -> bool:
     return len(words) >= 2 or (text.startswith("/") and len(words) >= 1)
 
 
-def _harmless_secret_value(value: str) -> bool:
-    """Values that are not secrets even under a secret name: literals and plain absolute paths."""
-    return value.lower() in LITERAL_VALUES or _is_plain_path(value)
+_IAM_OPERATION_RE = re.compile(r"\*|[A-Z][A-Za-z0-9]*\*?")
+_PLAIN_NUMBER_RE = re.compile(r"[+-]?\d+(?:\.\d+)?")
+
+
+def _is_iam_action(value: str) -> bool:
+    service, colon, operation = value.partition(":")
+    return bool(colon) and service.lower() in IAM_SERVICE_PREFIXES and bool(_IAM_OPERATION_RE.fullmatch(operation))
+
+
+@functools.lru_cache(maxsize=8192)
+def is_counted_key(key: str) -> bool:
+    """tokens, max_tokens, num_keys: the value counts secrets rather than being one."""
+    parts = _name_parts(key)
+    if not parts:
+        return False
+    last = parts[-1]
+    plural = last.endswith("s") and len(last) > 3 and looks_secret_key(last[:-1])
+    return plural or any(part in COUNTING_WORDS for part in parts)
+
+
+def _harmless_secret_value(value: str, key: str | None = None) -> bool:
+    """Values that are not secrets even under a secret name: literals, plain absolute paths, IAM
+    actions, and a plain number under a counted name (password: 123456 stays masked)."""
+    if value.lower() in LITERAL_VALUES or _is_plain_path(value) or _is_iam_action(value):
+        return True
+    return key is not None and is_counted_key(key) and bool(_PLAIN_NUMBER_RE.fullmatch(value))
 
 
 # --- span rules: each returns the spans of text that are secret --------------------------
@@ -579,7 +618,13 @@ def _key_value_spans(text: str) -> list[Span]:
         if not span or not _usable(text, span):
             continue
         value = text[span[0]:span[1]]
-        if _SCHEME_AND_PLACEHOLDER_RE.fullmatch(value) or _harmless_secret_value(value) or _SQL_CALL_RE.fullmatch(value):
+        first_word = value.split(None, 1)[0] if value.strip() else value
+        if sep == ":" and key.lower() in IAM_SERVICE_PREFIXES and _IAM_OPERATION_RE.fullmatch(first_word):
+            continue  # secretsmanager:GetSecretValue is an IAM action name
+        if is_counted_key(key.lstrip("-")) and _PLAIN_NUMBER_RE.fullmatch(first_word.rstrip(",;")):
+            continue  # tokens: 512 counts tokens; an unquoted colon value runs on to the line end
+        if (_SCHEME_AND_PLACEHOLDER_RE.fullmatch(value) or _harmless_secret_value(value, key.lstrip("-"))
+                or _SQL_CALL_RE.fullmatch(value)):
             continue  # a SQL PASSWORD(...) call: the SQL rule masks its argument
         spans.append(span)
     if "\t" in text:
@@ -1659,6 +1704,9 @@ class Redactor:
                 )
             elif isinstance(key, str):
                 own = looks_secret_key(key)
+                if own and is_counted_key(key) and isinstance(item, (int, float)) and not isinstance(item, bool):
+                    result[new_key] = item  # max_tokens: 4096 counts tokens; password: 123456 is still masked
+                    continue
                 # Inside a secret value, keys that only name a reference (an ARN, a status) stay readable.
                 child_secret = own or (secret and not is_reference_key(key))
                 result[new_key] = self._walk(

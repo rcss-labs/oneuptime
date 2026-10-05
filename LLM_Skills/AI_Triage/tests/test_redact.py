@@ -1654,3 +1654,46 @@ def test_one_megabyte_rule_shapes_are_fast(shape):
         call(source)
         elapsed = time.perf_counter() - started
         assert elapsed < 2, (shape, elapsed)
+
+
+# Round 4 addendum: plural and counted names, IAM actions, reference names
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "tokens: 512", "max_tokens = 4096", "num_keys=12", "total_secrets: 3", "credentials: 2", "token_limit=100",
+        '{"max_tokens": 4096, "tokens": 512}',
+        '"Action": "secretsmanager:GetSecretValue"',
+        "AccessDenied: not authorized to perform secretsmanager:GetSecretValue on resource",
+        '"Action": ["kms:Decrypt", "ssm:GetParameter*", "sts:GetSessionToken", "secretsmanager:*"]',
+        "secretKeyRef: db-password", "secretRef: app-secrets", "secretName: tls-secret", "configMapKeyRef: app-token",
+        "valueFrom: api-token",
+    ],
+)
+def test_counted_names_iam_actions_and_reference_names_are_kept(source):
+    assert Redactor().text(source) == source
+    assert audit_text(source) == []
+
+
+def test_counted_and_reference_names_in_value():
+    obj = {"max_tokens": 4096, "tokens": 512, "Action": ["secretsmanager:GetSecretValue"], "secretKeyRef": "db"}
+    assert Redactor().value(obj) == obj
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("password: 123456", "password: <SECRET-1>"),
+        ("pin=1234", "pin=<SECRET-1>"),
+        ("api_token: 98765432", "api_token: <SECRET-1>"),
+        ("tokens: abc" + "Def123", "tokens: <SECRET-1>"),
+        ("token: admin:" + "Hunter2", "token: <SECRET-1>"),
+        ("card_number=4111" + "111111111111", "card_number=<SECRET-1>"),
+    ],
+)
+def test_numbers_under_a_plain_secret_name_stay_masked(source, expected):
+    assert Redactor().text(source) == expected
+
+
+def test_numbers_under_a_plain_secret_name_stay_masked_in_value():
+    assert Redactor().value({"password": 123456, "pin": 1234}) == {"password": "<SECRET-1>", "pin": "<SECRET-2>"}

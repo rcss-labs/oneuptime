@@ -370,6 +370,11 @@ HARMLESS = [
     ("dynamodb-key", "Key={'pk': {'S': 'order#123'}} ConsistentRead=True"),
     ("long-word-url", "https://wiki.example.com/" + "a" * 120),
     ("number-run", "id " + "1234567890" * 5),
+    ("tokens-count", "usage: tokens: 512 max_tokens = 4096"),
+    ("iam-action", "User is not authorized to perform: secretsmanager:GetSecretValue on resource db"),
+    ("iam-policy", '{"Effect": "Allow", "Action": ["kms:Decrypt", "secretsmanager:GetSecretValue"]}'),
+    ("secret-key-ref", "valueFrom:\n  secretKeyRef: db-password"),
+    ("secret-ref", "envFrom:\n- secretRef: app-secrets\n  secretName: tls-secret"),
 ]
 
 assert len(HARMLESS) >= 60, len(HARMLESS)
