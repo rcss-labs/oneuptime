@@ -333,9 +333,65 @@ def test_aws_values_that_look_like_paths_stay_allowed(value, monkeypatch):
     monkeypatch.setenv("HOME", "/home/eng")
     command = ("aws", "logs", "filter-log-events", "--log-group-name", value, "--profile", "triage-prod-main",
                "--region", "eu-west-1")
-    expected = DENY if value.startswith("/tmp") else ALLOW
-    assert check_aws(command, (), PROFILES).kind == expected
+    # a --log-group-name value may look like a path (adjusted ruling 1b), so even /tmpl... is allowed here
+    assert check_aws(command, (), PROFILES).kind == ALLOW
+    assert check_aws(("aws", "ecs", "describe-services", "--cluster", value) + command[5:], (), PROFILES).kind == (
+        DENY if value.startswith("/tmp") else ALLOW)
 
 
 def test_a_tls_bundle_given_as_a_local_path_is_denied():
     assert verdict(f"aws ecs list-clusters {OK} --ca-bundle /tmp/ca.pem").kind == DENY
+
+
+# ---- fix round 5, ruling 1b adjustment: log groups named after file paths -------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"aws logs filter-log-events --log-group-name /var/log/messages {OK}",
+        f"aws logs describe-log-streams --log-group-name /opt/app/logs/out.log {OK}",
+        f"aws logs filter-log-events --log-group-name=/var/log/app/error.log --log-stream-names /var/log/a /tmp/b {OK}",
+        f"aws logs describe-log-groups --log-group-name-prefix /var/log/ {OK}",
+        f"aws logs describe-log-groups --log-group-name-pattern /etc/x {OK}",
+        f"aws logs get-log-events --log-group-identifier /opt/a --log-stream-name /private/x {OK}",
+        f"aws logs start-query --log-group-names /var/log/a /opt/b --query-string q --start-time 1 --end-time 2 {OK}",
+        f"aws logs start-query --log-group-identifiers /var/log/a /Volumes/b --query-string q --start-time 1 --end-time 2 {OK}",
+        f"aws logs describe-log-streams --log-group-name g --log-stream-name-prefix /var/log/ {OK}",
+    ],
+)
+def test_log_group_and_stream_options_may_hold_file_like_names(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert verdict(command).kind == ALLOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"aws logs filter-log-events --log-group-name g {OK} /var/log/messages",
+        f"aws logs filter-log-events /var/log/messages --log-group-name g {OK}",
+        f"aws ssm get-parameter --name /var/log/messages {OK}",
+        f"aws ssm get-parameter --name=/opt/app/logs/out.log {OK}",
+        f"aws logs filter-log-events --log-group-name /home/eng/x {OK}",
+        f"aws logs filter-log-events --log-group-name=/home/eng/x {OK}",
+        f"aws logs filter-log-events --log-group-name ~/x {OK}",
+        f"aws logs filter-log-events --log-group-name ./x {OK}",
+        f"aws logs filter-log-events --log-group-name ../x {OK}",
+        f"aws logs filter-log-events --log-group-name file:///var/log/x {OK}",
+        f"aws logs filter-log-events --log-group-name fileb://x {OK}",
+        f"aws logs start-query --log-group-names /var/log/a /home/eng/b --query-string q {OK}",
+        f"aws logs filter-log-events --log-group-name /var/log/a /var/log/b {OK}",
+    ],
+)
+def test_the_log_exemption_never_covers_home_relative_files_or_positionals(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    result = verdict(command)
+    assert result.kind == DENY and "local path" in result.reason
+
+
+def test_a_log_group_under_home_given_with_dollar_home_is_denied(monkeypatch):
+    from triage.guard import GuardContext, decide
+
+    monkeypatch.setenv("HOME", "/home/eng")
+    context = GuardContext(frozenset({"triage-prod-main"}), "/k", frozenset(), frozenset(), "/s")
+    assert decide(f'aws logs filter-log-events --log-group-name "$HOME/x" {OK}', context).kind == DENY

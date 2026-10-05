@@ -145,6 +145,12 @@ STREAMING_OUTPUT_OPERATIONS = frozenset(
     }
 )
 # No aws argument may name a local file: it could be read (file://) or written (an outfile).
+# The CloudWatch agent names log groups after file paths (/var/log/messages), so these option values may look like
+# paths. The list options take every value up to the next option. Never a home, relative, or file:// value.
+LOG_NAME_OPTIONS = frozenset({"--log-group-name", "--log-group-name-prefix", "--log-group-name-pattern",
+                              "--log-group-identifier", "--log-stream-name", "--log-stream-name-prefix"})
+LOG_NAME_LIST_OPTIONS = frozenset({"--log-group-names", "--log-group-identifiers", "--log-stream-names"})
+NEVER_EXEMPT_PREFIXES = ("~", "./", "../", "file://", "fileb://")
 LOCAL_PATH_PREFIXES = ("/users/", "/home/", "/tmp", "/private/", "/var/", "/etc/", "/opt/", "/volumes/", "./", "../",
                        "~", "file://", "fileb://")
 LOCAL_READS = frozenset({("configure", "list"), ("configure", "list-profiles")})
@@ -206,9 +212,33 @@ def _is_local_path(value: str) -> bool:
     return lowered.startswith(LOCAL_PATH_PREFIXES)
 
 
+def _exempt_log_name(value: str) -> bool:
+    lowered = value.casefold()
+    home = os.environ.get("HOME", "").rstrip("/").casefold()
+    if home and (lowered == home or lowered.startswith(home + "/")):
+        return False
+    return not lowered.startswith(NEVER_EXEMPT_PREFIXES)
+
+
 def local_path_argument(args: Sequence[str]) -> str | None:
-    """The first argument, or value after =, that names a local path."""
+    """The first argument, or value after =, that names a local path (log group and stream names excepted)."""
+    exempt_next, exempt_list = False, False
     for word in args:
+        is_option = word.startswith("-")
+        is_log_value = not is_option and (exempt_next or exempt_list)
+        exempt_next = False
+        if is_option:
+            name, has_value, value = word.partition("=")
+            exempt_list = name in LOG_NAME_LIST_OPTIONS and not has_value
+            exempt_next = name in LOG_NAME_OPTIONS and not has_value
+            if has_value and name in LOG_NAME_OPTIONS | LOG_NAME_LIST_OPTIONS:
+                if _is_local_path(value) and not _exempt_log_name(value):
+                    return word
+                continue
+        if is_log_value:
+            if _is_local_path(word) and not _exempt_log_name(word):
+                return word
+            continue
         values = [word] + ([word.split("=", 1)[1]] if "=" in word else [])
         if any(_is_local_path(value) for value in values):
             return word
