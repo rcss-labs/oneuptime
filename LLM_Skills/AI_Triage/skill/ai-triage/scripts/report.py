@@ -6,7 +6,6 @@ Exit codes: 0 done, 1 the report is invalid (every problem is printed), 2 usage,
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -16,13 +15,18 @@ from pathlib import Path
 from triage.case import CaseError, load_case
 from triage.config import ConfigError, default_config_path, load_config
 from triage.report import (
+    OUTPUT_NAMES,
     build_work_order,
     check_case_inputs,
     coverage_from_evidence,
+    input_hashes,
     load_checked,
+    mark_stale,
+    render_is_current,
     render_report,
     validate_report,
     validate_work_order,
+    write_render_marker,
 )
 from triage.redact import Redactor
 from triage.timeline import build_timeline
@@ -72,71 +76,17 @@ def _validated(case_dir: Path, config) -> tuple[dict, dict, dict]:
     return report, case, findings
 
 
-OUTPUT_NAMES = ("report.md", "work-order.json")
-MARKER_NAME = "render.json"
-
-
-def _mark_stale(case_dir: Path) -> tuple[list[str], list[str]]:
-    """Rename every output of an earlier render to <name>.stale. Returns (renamed, names that could not be renamed).
-
-    One failure does not stop the others, and a leftover temporary name is cleared if it can be.
-    """
-    renamed, failed = [], []
-    marker = case_dir / MARKER_NAME
-    if marker.exists():
-        try:
-            os.replace(marker, case_dir / f"{MARKER_NAME}.stale")
-        except OSError:
-            pass
-    for name in OUTPUT_NAMES:
-        path = case_dir / name
-        if path.exists():
-            try:
-                os.replace(path, case_dir / f"{name}.stale")
-                renamed.append(f"{name}.stale")
-            except OSError:
-                failed.append(name)
-        try:
-            (case_dir / f"{name}.tmp").unlink(missing_ok=True)
-        except OSError:
-            pass
-    return renamed, failed
-
-
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _check_marker(case_dir: Path) -> str:
-    """Mark both outputs stale unless render.json vouches for the pair on disk. Returns the note, or "".
-
-    A render killed between its two moves leaves a new file beside an old one and no matching marker.
-    """
-    present = [name for name in OUTPUT_NAMES if (case_dir / name).exists()]
-    if not present:
-        return ""
-    try:
-        marker = json.loads((case_dir / MARKER_NAME).read_text())
-        matches = (isinstance(marker, dict) and len(present) == len(OUTPUT_NAMES)
-                   and all(marker.get(name) == _sha256(case_dir / name) for name in OUTPUT_NAMES))
-    except (OSError, ValueError):
-        matches = False
-    return "" if matches else _stale_note(case_dir)
-
-
-def _write_both(case_dir: Path, text: str, work_order: dict) -> None:
-    """Write both files to temporary names, then move both into place."""
+def _write_both(case_dir: Path, text: str, work_order: dict, inputs: dict) -> None:
+    """Write both files to temporary names, move both into place, then write the marker."""
     contents = {"report.md": text, "work-order.json": json.dumps(work_order, indent=2) + "\n"}
     for name, content in contents.items():
         (case_dir / f"{name}.tmp").write_text(content)
     for name in OUTPUT_NAMES:
         os.replace(case_dir / f"{name}.tmp", case_dir / name)
-    marker = {name: _sha256(case_dir / name) for name in OUTPUT_NAMES}
-    (case_dir / f"{MARKER_NAME}.tmp").write_text(json.dumps(marker, indent=2) + "\n")
-    os.replace(case_dir / f"{MARKER_NAME}.tmp", case_dir / MARKER_NAME)
+    write_render_marker(case_dir, inputs)
 
 
-def _render(case_dir: Path, config, now: datetime) -> int:
+def _render(case_dir: Path, config, now: datetime, inputs: dict) -> int:
     report, case, findings = _validated(case_dir, config)
     gaps = coverage_from_evidence(case_dir)
     text = render_report(report, case, findings, build_timeline(case_dir), gaps, now)
@@ -147,14 +97,14 @@ def _render(case_dir: Path, config, now: datetime) -> int:
     problems = validate_work_order(work_order)
     if problems:
         raise InvalidReport([f"work order: {problem}" for problem in problems])
-    _write_both(case_dir, text, work_order)
+    _write_both(case_dir, text, work_order, inputs)
     print(case_dir / "report.md")
     print(case_dir / "work-order.json")
     return 0
 
 
 def _stale_note(case_dir: Path) -> str:
-    renamed, failed = _mark_stale(case_dir)
+    renamed, failed = mark_stale(case_dir)
     parts = []
     if renamed:
         parts.append(f"the earlier outputs no longer match report.json and were renamed: {', '.join(renamed)}")
@@ -170,9 +120,13 @@ def main(argv: list[str] | None = None) -> int:
         if not args.case_dir.is_dir():
             raise CaseError([f"case folder not found: {args.case_dir}"])
         config = load_config(default_config_path(args.skill_dir))
-        marker_note = _check_marker(args.case_dir)
-        if marker_note:
-            print(marker_note, file=sys.stderr)
+        had_outputs = any((args.case_dir / name).exists() for name in OUTPUT_NAMES)
+        reasons = render_is_current(args.case_dir)
+        if had_outputs and reasons:
+            print("\n".join(reasons), file=sys.stderr)
+        if args.command == "render":
+            (args.case_dir / "render.json.tmp").unlink(missing_ok=True)
+        inputs = input_hashes(args.case_dir)
         now = None
         if args.command == "render":
             now = parse_time(args.now) if getattr(args, "now", None) else datetime.now(timezone.utc)
@@ -181,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
             _validated(args.case_dir, config)
             print("report is valid")
             return 0
-        return _render(args.case_dir, config, now)
+        return _render(args.case_dir, config, now, inputs)
     except InvalidReport as error:
         message, code = "\n".join(f"- {problem}" for problem in error.problems), 1
     except (ConfigError, CaseError) as error:

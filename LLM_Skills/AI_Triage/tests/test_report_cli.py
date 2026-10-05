@@ -7,8 +7,11 @@ import pytest
 import yaml
 
 from conftest import SKILL_SRC
-from test_report import VALID_REPORT, config, case_dir, case, findings  # noqa: F401  (fixtures)
-from triage.report import REQUIRED_HEADINGS, validate_work_order
+from fakes import FakeJudge
+from test_judge import QUESTIONS, make_responder
+from test_report import VALID_REPORT, config, case_dir, case, findings, judged, mutated  # noqa: F401  (fixtures)
+from triage.judge import run_judgments
+from triage.report import REQUIRED_HEADINGS, render_is_current, validate_work_order
 
 SCRIPT = SKILL_SRC / "scripts" / "report.py"
 NOW = "2026-10-04T11:30:00Z"
@@ -318,7 +321,10 @@ def test_a_render_writes_a_marker_with_the_hash_of_both_outputs(skill_dir, case_
     write_report(case_dir, VALID_REPORT)
     render_ok(skill_dir, case_dir)
     marker = json.loads((case_dir / "render.json").read_text())
-    assert marker == {"report.md": sha(case_dir / "report.md"), "work-order.json": sha(case_dir / "work-order.json")}
+    assert marker == {"report.md": sha(case_dir / "report.md"), "work-order.json": sha(case_dir / "work-order.json"),
+                      "report.json": sha(case_dir / "report.json"),
+                      "judgments/summary.json": sha(case_dir / "judgments" / "summary.json"),
+                      "findings/checked.json": sha(case_dir / "findings" / "checked.json")}
 
 
 @pytest.mark.parametrize("command", ["validate", "render"])
@@ -388,3 +394,117 @@ def test_a_process_killed_between_the_two_moves_leaves_nothing_current_looking(s
     result = run(skill_dir, "validate", "--case-dir", str(case_dir))
     assert result.returncode == 0 and "stale" in result.stderr
     assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
+
+
+# round 4: the outputs are tied to the inputs they were rendered from
+
+import random
+
+
+def lowered_report():
+    report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(label="candidate"))
+    report["status"], report["summary"]["top_cause"] = "unresolved", None
+    report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
+    return report
+
+
+def test_a_rejudged_and_lowered_report_makes_the_old_outputs_stale_at_validate(skill_dir, judged, config):
+    assert run(skill_dir, "render", "--case-dir", str(judged), "--now", NOW).returncode == 0
+    assert "(confirmed)" in (judged / "report.md").read_text()
+    again = run_judgments(judged, config, FakeJudge(make_responder(rank=(("C2", 0.72), ("C2", 0.72)))), QUESTIONS, random.Random(2))
+    assert again["causes"]["C1"]["label"] == "candidate"
+    write_report(judged, lowered_report())
+    result = run(skill_dir, "validate", "--case-dir", str(judged))
+    assert result.returncode == 0, result.stderr
+    assert "render" in result.stderr and "again" in result.stderr
+    assert not (judged / "report.md").exists() and not (judged / "work-order.json").exists()
+    assert "(confirmed)" in (judged / "report.md.stale").read_text()
+
+
+def test_an_untouched_case_stays_current_through_validate_render_validate(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    assert run(skill_dir, "validate", "--case-dir", str(case_dir)).stderr == ""
+    render_ok(skill_dir, case_dir)
+    assert render_is_current(case_dir) == []
+    result = run(skill_dir, "validate", "--case-dir", str(case_dir))
+    assert result.returncode == 0 and result.stderr == ""
+    assert render_is_current(case_dir) == []
+    assert (case_dir / "report.md").is_file() and not (case_dir / "report.md.stale").exists()
+
+
+def rendered(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    assert render_is_current(case_dir) == []
+
+
+@pytest.mark.parametrize("relative", ["report.json", "judgments/summary.json", "findings/checked.json"])
+def test_a_changed_input_makes_the_render_not_current(skill_dir, case_dir, relative):
+    rendered(skill_dir, case_dir)
+    path = case_dir / relative
+    path.write_text(path.read_text() + "\n ")
+    reasons = render_is_current(case_dir)
+    assert reasons and any(relative in reason for reason in reasons)
+    assert not (case_dir / "report.md").exists() and (case_dir / "report.md.stale").is_file()
+    assert (case_dir / "work-order.json.stale").is_file()
+
+
+def test_a_deleted_summary_makes_the_render_not_current(skill_dir, case_dir):
+    rendered(skill_dir, case_dir)
+    (case_dir / "judgments" / "summary.json").unlink()
+    assert any("summary.json" in reason for reason in render_is_current(case_dir))
+
+
+def test_a_missing_summary_is_recorded_as_null_and_stays_current(skill_dir, case_dir):
+    (case_dir / "judgments" / "summary.json").unlink()
+    write_report(case_dir, mutated(VALID_REPORT, lambda r: None))
+    report = lowered_report()
+    report["coverage"]["typesafe"] = "unavailable: judging was not run"
+    report["causes"][0]["label"] = "candidate"
+    write_report(case_dir, report)
+    render_ok(skill_dir, case_dir)
+    assert json.loads((case_dir / "render.json").read_text())["judgments/summary.json"] is None
+    assert render_is_current(case_dir) == []
+    (case_dir / "judgments" / "summary.json").write_text("{}")
+    assert render_is_current(case_dir) != []
+
+
+def test_a_marker_copied_from_another_render_is_not_current(skill_dir, case_dir):
+    rendered(skill_dir, case_dir)
+    first_marker = (case_dir / "render.json").read_text()
+    assert run(skill_dir, "render", "--case-dir", str(case_dir), "--now", "2026-10-04T12:00:00Z").returncode == 0
+    (case_dir / "render.json").write_text(first_marker)
+    assert render_is_current(case_dir) != []
+    assert (case_dir / "report.md.stale").is_file()
+
+
+@pytest.mark.parametrize("damage", ["{broken", "[]", "5", "null", '{"report.md": 5}', "\udcff"])
+def test_a_damaged_marker_is_a_reason_not_a_traceback(skill_dir, case_dir, damage):
+    rendered(skill_dir, case_dir)
+    (case_dir / "render.json").write_text(damage, errors="surrogateescape") if damage == "\udcff" else \
+        (case_dir / "render.json").write_text(damage)
+    reasons = render_is_current(case_dir)
+    assert isinstance(reasons, list) and reasons and all(isinstance(reason, str) for reason in reasons)
+    assert not (case_dir / "report.md").exists()
+
+
+def test_a_binary_marker_is_a_reason_not_a_traceback(skill_dir, case_dir):
+    rendered(skill_dir, case_dir)
+    (case_dir / "render.json").write_bytes(b"\xff\xfe\x00")
+    assert render_is_current(case_dir) != []
+
+
+def test_nothing_rendered_is_not_current_and_creates_nothing(skill_dir, case_dir):
+    reasons = render_is_current(case_dir)
+    assert reasons and not list(case_dir.glob("*.stale"))
+
+
+def test_a_missing_folder_is_a_reason_not_a_traceback(tmp_path):
+    assert render_is_current(tmp_path / "nowhere") != []
+
+
+def test_a_leftover_marker_temporary_file_is_removed_by_the_next_render(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    (case_dir / "render.json.tmp").write_text("left over")
+    render_ok(skill_dir, case_dir)
+    assert not (case_dir / "render.json.tmp").exists()

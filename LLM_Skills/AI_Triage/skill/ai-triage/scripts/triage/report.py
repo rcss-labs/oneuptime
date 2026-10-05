@@ -5,7 +5,9 @@ Validation is the quality gate: a report is rendered only when it is complete an
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -1231,3 +1233,102 @@ def render_report(report: dict, case: dict, findings: dict[str, dict], timeline_
     ]
     text = "\n\n".join("\n".join(block) for block in blocks) + "\n"
     return Redactor().text(text)
+
+
+# --- the render marker: which inputs the outputs were rendered from ---------------------------
+
+OUTPUT_NAMES = ("report.md", "work-order.json")
+INPUT_NAMES = ("report.json", "judgments/summary.json", "findings/checked.json")
+MARKER_NAME = "render.json"
+
+
+def _sha256(path: Path) -> str | None:
+    """The hash of a file, or None when it does not exist."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def input_hashes(case_dir: Path) -> dict[str, str | None]:
+    """The hash of report.json, the judgment summary, and checked.json. A missing file is None."""
+    return {name: _sha256(Path(case_dir) / name) for name in INPUT_NAMES}
+
+
+def write_render_marker(case_dir: Path, inputs: dict[str, str | None]) -> None:
+    """Record the hash of both outputs on disk and of the inputs they were rendered from."""
+    case_dir = Path(case_dir)
+    marker = {**{name: _sha256(case_dir / name) for name in OUTPUT_NAMES}, **inputs}
+    (case_dir / f"{MARKER_NAME}.tmp").write_text(json.dumps(marker, indent=2) + "\n")
+    os.replace(case_dir / f"{MARKER_NAME}.tmp", case_dir / MARKER_NAME)
+
+
+def mark_stale(case_dir: Path) -> tuple[list[str], list[str]]:
+    """Rename every output of an earlier render, and its marker, to <name>.stale.
+
+    Returns (renamed outputs, outputs that could not be renamed). One failure does not stop the others,
+    and leftover temporary names are cleared if they can be.
+    """
+    case_dir = Path(case_dir)
+    renamed, failed = [], []
+    marker = case_dir / MARKER_NAME
+    if marker.exists():
+        try:
+            os.replace(marker, case_dir / f"{MARKER_NAME}.stale")
+        except OSError:
+            pass
+    for name in OUTPUT_NAMES:
+        path = case_dir / name
+        if path.exists():
+            try:
+                os.replace(path, case_dir / f"{name}.stale")
+                renamed.append(f"{name}.stale")
+            except OSError:
+                failed.append(name)
+        for leftover in (f"{name}.tmp", f"{MARKER_NAME}.tmp"):
+            try:
+                (case_dir / leftover).unlink(missing_ok=True)
+            except OSError:
+                pass
+    return renamed, failed
+
+
+def _marker_reasons(case_dir: Path) -> list[str]:
+    try:
+        marker = json.loads((case_dir / MARKER_NAME).read_text())
+    except (OSError, ValueError):
+        return [f"{MARKER_NAME} is missing or cannot be read"]
+    if not isinstance(marker, dict):
+        return [f"{MARKER_NAME} is damaged"]
+    reasons = []
+    current = {**{name: _sha256(case_dir / name) for name in OUTPUT_NAMES}, **input_hashes(case_dir)}
+    for name, digest in current.items():
+        if name not in marker:
+            reasons.append(f"{MARKER_NAME} does not record {name}")
+        elif marker[name] != digest:
+            kind = "the rendered file" if name in OUTPUT_NAMES else "an input"
+            reasons.append(f"{name} ({kind}) is not what {MARKER_NAME} records")
+    return reasons
+
+
+def render_is_current(case_dir: Path) -> list[str]:
+    """Why the rendered outputs are not current, as reasons; an empty list means they are.
+
+    The outputs are current only when render.json matches report.md, work-order.json, report.json, the
+    judgment summary, and findings/checked.json. When they are not, both outputs that exist are renamed
+    to .stale and the last reason says so. This is the only side effect, and the function never raises.
+    """
+    try:
+        case_dir = Path(case_dir)
+        if not any((case_dir / name).exists() for name in OUTPUT_NAMES):
+            return ["report.md and work-order.json have not been rendered"]
+        reasons = _marker_reasons(case_dir)
+        if reasons:
+            renamed, failed = mark_stale(case_dir)
+            reasons.append("the outputs no longer match their inputs and were renamed"
+                           + (f" ({', '.join(renamed)})" if renamed else "")
+                           + "; the report must be rendered again"
+                           + (f" (could not rename: {', '.join(failed)})" if failed else ""))
+        return reasons
+    except Exception as error:  # a damaged folder is a reason, never a traceback
+        return [f"the render state could not be checked ({type(error).__name__}); the report must be rendered again"]
