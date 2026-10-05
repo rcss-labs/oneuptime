@@ -339,7 +339,9 @@ def test_asked_holds_every_target_as_given(skill_dir, fake_collector, tmp_path):
     argv = args(skill_dir, "--target", "thing=x", "--target", "extra=a, b", "--case-dir", str(case))
     assert collect.main(argv, runner=FakeAws({})) == 0
     document = json.loads(next((case / "evidence").iterdir()).read_text())
-    assert document["asked"]["targets"] == {"thing": "x", "extra": ["a", "b"]}
+    assert document["asked"]["targets"] == {"thing": "x", "extra": "a, b"}
+    # the fake collector declares no list targets, so a comma value is itemised as well
+    assert document["asked"]["target_items"] == {"extra": ["a", "b"]}
     assert document["asked"]["window"] == {"start": WINDOW_START, "end": WINDOW_END}
 
 
@@ -353,3 +355,19 @@ def test_asked_is_written_when_the_collector_fails(skill_dir, monkeypatch, tmp_p
     document = json.loads(next((case / "evidence").iterdir()).read_text())
     assert document["asked"]["targets"] == {"thing": "y"}
     assert document["errors"][0]["code"] == "CollectorError"
+
+
+
+def test_asked_lists_items_only_for_targets_the_collector_declares_as_lists(skill_dir, monkeypatch, tmp_path):
+    def run(ctx, targets):
+        ctx.evidence.add(kind="current", resource="r", summary="ok")
+
+    entry = Collector("listy", "d", ("groups",), ("pattern",), run)
+    object.__setattr__(entry, "list_targets", ("groups",))  # the registry's declaration, once it exists
+    monkeypatch.setattr(collect, "all_collectors", lambda: {"listy": entry})
+    case = tmp_path / "case"
+    argv = args(skill_dir, "--target", "groups=/aws/a", "--target", "pattern=ERROR, timeout", "--case-dir", str(case), name="listy")
+    assert collect.main(argv, runner=FakeAws({})) == 0
+    asked = json.loads(next((case / "evidence").iterdir()).read_text())["asked"]
+    assert asked["targets"] == {"groups": "/aws/a", "pattern": "ERROR, timeout"}
+    assert asked["target_items"] == {"groups": ["/aws/a"]}

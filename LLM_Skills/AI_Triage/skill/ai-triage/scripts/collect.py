@@ -60,9 +60,16 @@ def _target_problem(collector: Collector, targets: dict[str, str]) -> str | None
     return None
 
 
-def _asked_targets(targets: dict[str, str]) -> dict[str, str | list[str]]:
-    """Every target as given; a value with a comma is a list target and is recorded as its list of items."""
-    return {key: split_csv(value) if "," in value else value for key, value in targets.items()}
+def _asked_items(collector: Collector, targets: dict[str, str]) -> dict[str, list[str]]:
+    """The items of each given target that the collector declares as a list (Collector.list_targets).
+
+    Until the registry declares list targets, a target with a comma is itemised too: extra asked strings
+    only make the findings check stricter, and the raw value is always kept whole under "targets".
+    """
+    list_keys = getattr(collector, "list_targets", None)
+    if list_keys is None:
+        return {key: split_csv(value) for key, value in targets.items() if "," in value}
+    return {key: split_csv(value) for key, value in targets.items() if key in list_keys}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -129,7 +136,7 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     if region not in allowed_regions:
         return _fail(f"region {region} is not allowed for {account.alias}; use one of: {', '.join(allowed_regions)}", 2)
     evidence = Evidence(collector.name, account.alias, region, window)
-    evidence.set_asked(_asked_targets(targets), {"start": args.start, "end": args.end})
+    evidence.set_asked(dict(targets), {"start": args.start, "end": args.end}, _asked_items(collector, targets))
     if args.case_dir and evidence.path_for(args.case_dir, args.suffix).exists():
         existing = evidence.path_for(args.case_dir, args.suffix)
         return _fail(f"{existing} already exists; pass another --suffix to keep both", 2)

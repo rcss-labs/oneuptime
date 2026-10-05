@@ -59,21 +59,29 @@ def _first_entries(collection: list | dict) -> list | dict:
     return dict(list(collection.items())[:MAX_NESTED_ENTRIES])
 
 
+def _omitted_key(key: str) -> str:
+    return key[: MAX_KEY_LENGTH - len(OMITTED_SUFFIX)] + OMITTED_SUFFIX
+
+
 def _bound_dict(value: dict) -> dict:
     """Keys cut to MAX_KEY_LENGTH; a key equal to an earlier one after the cut is dropped and counted in
     keys_omitted. A nested list or dict longer than MAX_NESTED_ENTRIES is cut, and its count of dropped
     entries is put beside it as "<key>_omitted"."""
     bounded: dict[str, Any] = {}
+    real_counts: set[str] = set()  # omitted keys holding a count made here; a collector's own value never wins
     collisions = 0
     for key, item in value.items():
         cut_key = str(key)[:MAX_KEY_LENGTH]
+        if cut_key in real_counts:
+            continue
         if cut_key in bounded:
             collisions += 1
             continue
         if isinstance(item, (list, dict)) and len(item) > MAX_NESTED_ENTRIES:
             bounded[cut_key] = _bound(_first_entries(item))
-            omitted_key = cut_key[: MAX_KEY_LENGTH - len(OMITTED_SUFFIX)] + OMITTED_SUFFIX
-            bounded.setdefault(omitted_key, len(item) - MAX_NESTED_ENTRIES)
+            omitted_key = _omitted_key(cut_key)
+            bounded[omitted_key] = len(item) - MAX_NESTED_ENTRIES
+            real_counts.add(omitted_key)
         else:
             bounded[cut_key] = _bound(item)
     if collisions:
@@ -113,7 +121,15 @@ def _limit_data(data: dict) -> dict:
     if len(cut) <= MAX_DATA_KEYS:
         return cut
     omitted = cut.pop("keys_omitted", 0)
-    kept = dict(list(cut.items())[: MAX_DATA_KEYS - 1])
+    kept: dict[str, Any] = {}
+    for key, item in cut.items():
+        if key in kept:
+            continue
+        sibling = _omitted_key(key)
+        group = {key: item, **({sibling: cut[sibling]} if sibling in cut and sibling != key else {})}
+        if len(kept) + len(group) > MAX_DATA_KEYS - 1:
+            break  # a list is never kept without its omitted count
+        kept.update(group)
     kept["keys_omitted"] = len(cut) - len(kept) + (omitted if isinstance(omitted, int) else 0)
     return kept
 
@@ -163,9 +179,16 @@ class Evidence:
         self.facts.append(fact)
         return fact
 
-    def set_asked(self, targets: dict[str, Any], window: dict[str, str]) -> None:
-        """Record what was asked (targets as given, window arguments), so a finding that only quotes it can be refused."""
-        self.asked = _bound({"targets": self._redact_content(dict(targets)), "window": self._redact_content(dict(window))})
+    def set_asked(
+        self, targets: dict[str, str], window: dict[str, str], target_items: dict[str, list[str]] | None = None,
+    ) -> None:
+        """Record what was asked, so a finding that only quotes it can be refused: each target's value as one
+        string as given, the items of each list target, and the window arguments."""
+        self.asked = _bound({
+            "targets": self._redact_content(dict(targets)),
+            "target_items": self._redact_content(dict(target_items or {})),
+            "window": self._redact_content(dict(window)),
+        })
 
     def _redact_content(self, value: Any) -> Any:
         """Text redaction of every string, never the name-based rule: a target named "secret" holds a

@@ -229,11 +229,13 @@ def test_write_still_replaces_an_existing_file_and_path_for_names_it(tmp_path):
 def test_asked_is_recorded_redacted_and_is_not_a_fact():
     evidence = make_evidence()
     secret_query = "password=" + "sun" + "flower"
-    evidence.set_asked({"cluster": "checkout", "log_groups": ["/a", "/b"], "pattern": secret_query},
-                       {"start": "2026-10-04T10:00:00Z", "end": "2026-10-04T12:00:00Z"})
+    evidence.set_asked({"cluster": "checkout", "log_groups": "/a,/b", "pattern": secret_query},
+                       {"start": "2026-10-04T10:00:00Z", "end": "2026-10-04T12:00:00Z"},
+                       target_items={"log_groups": ["/a", "/b"]})
     document = evidence.to_dict()
     assert document["asked"]["targets"]["cluster"] == "checkout"
-    assert document["asked"]["targets"]["log_groups"] == ["/a", "/b"]
+    assert document["asked"]["targets"]["log_groups"] == "/a,/b"
+    assert document["asked"]["target_items"]["log_groups"] == ["/a", "/b"]
     assert document["asked"]["window"] == {"start": "2026-10-04T10:00:00Z", "end": "2026-10-04T12:00:00Z"}
     assert "sunflower" not in json.dumps(document)
     assert document["facts"] == []
@@ -246,8 +248,11 @@ def test_asked_is_absent_until_set():
 @pytest.mark.parametrize("key", ["secret", "token", "password_policy", "key_id"])
 def test_asked_is_redacted_by_content_not_by_target_name(key):
     evidence = make_evidence()
-    evidence.set_asked({key: "orders-db-credentials", "names": ["a-one", "b-two"]}, {"start": "s", "end": "e"})
-    assert evidence.to_dict()["asked"]["targets"] == {key: "orders-db-credentials", "names": ["a-one", "b-two"]}
+    evidence.set_asked({key: "orders-db-credentials", "names": "a-one, b-two"}, {"start": "s", "end": "e"},
+                       target_items={"names": ["a-one", "b-two"]})
+    asked = evidence.to_dict()["asked"]
+    assert asked["targets"] == {key: "orders-db-credentials", "names": "a-one, b-two"}
+    assert asked["target_items"] == {"names": ["a-one", "b-two"]}
 
 
 def test_key_like_target_is_masked_in_asked_and_in_the_summary_alike():
@@ -258,3 +263,38 @@ def test_key_like_target_is_masked_in_asked_and_in_the_summary_alike():
     stored = evidence.to_dict()["asked"]["targets"]["secret"]
     assert token not in json.dumps(evidence.to_dict())
     assert fact.summary == f"Secret {stored}: not found"
+
+
+
+def test_a_collectors_own_omitted_value_never_overrides_the_real_count():
+    before = add_simple(make_evidence(), data={"items_omitted": 5, "items": list(range(300))})
+    after = add_simple(make_evidence(), data={"items": list(range(300)), "items_omitted": 5})
+    assert before.data["items_omitted"] == 100
+    assert after.data["items_omitted"] == 100
+
+
+def test_the_top_level_key_cap_keeps_an_omitted_count_with_its_list():
+    data = {f"k{n:02d}": n for n in range(48)}
+    data["zz"] = list(range(300))
+    data["last"] = 1
+    fact = add_simple(make_evidence(), data=data)
+    assert len(fact.data) <= 50
+    assert "zz" not in fact.data and "zz_omitted" not in fact.data  # no room for both, so neither is kept
+    assert fact.data["keys_omitted"] == 3  # zz, zz_omitted, last
+    data = {f"k{n:02d}": n for n in range(46)}
+    data["zz"] = list(range(300))
+    data["a"], data["b"], data["c"] = 1, 2, 3
+    fact = add_simple(make_evidence(), data=data)
+    assert fact.data["zz_omitted"] == 100 and len(fact.data["zz"]) == 200
+
+
+def test_asked_records_raw_strings_and_declared_list_items():
+    evidence = make_evidence()
+    evidence.set_asked({"pattern": "ERROR, timeout", "log_groups": "/aws/a"}, {"start": "s", "end": "e"},
+                       target_items={"log_groups": ["/aws/a"]})
+    asked = evidence.to_dict()["asked"]
+    assert asked == {
+        "targets": {"pattern": "ERROR, timeout", "log_groups": "/aws/a"},
+        "target_items": {"log_groups": ["/aws/a"]},
+        "window": {"start": "s", "end": "e"},
+    }
