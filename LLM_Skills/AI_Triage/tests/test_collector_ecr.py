@@ -78,7 +78,7 @@ def test_missing_tag_is_a_fact_not_an_error(config_data, tmp_path):
     assert len(ctx.evidence.facts) == 1
     fact = ctx.evidence.facts[0]
     assert fact.kind == "current" and "does not exist" in fact.summary and "v43" in fact.summary
-    assert "deployment" in fact.summary
+    assert "common cause" not in fact.summary and "deployment" not in fact.summary  # states the fact, not an opinion
     assert ctx.evidence.errors == []
     assert aws.called("ecr", "describe-image-scan-findings") == []
 

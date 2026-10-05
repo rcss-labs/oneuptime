@@ -90,10 +90,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         if image_id:
             ctx.evidence.add(
                 kind=CURRENT, resource=resource, command=ctx.last_command,
-                summary=(
-                    f"Image {image_id.split('=', 1)[1]} does not exist in repository {repository} in {ctx.region}; "
-                    "a missing image is a common cause of failed deployments"
-                ),
+                summary=f"Image {image_id.split('=', 1)[1]} does not exist in repository {repository} in {ctx.region}",
             )
         else:
             ctx.evidence.add(
