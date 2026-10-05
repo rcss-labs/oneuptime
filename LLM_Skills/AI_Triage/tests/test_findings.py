@@ -459,10 +459,15 @@ def test_a_lone_redaction_placeholder_is_never_an_excerpt(tmp_path, placeholder)
 
 
 def test_matched_text_is_cut_around_the_match(tmp_path):
-    long_text = "lorem ipsum " * 55 + "OOMKilled by kernel" + " dolor sit amet" * 50
-    result = check(_fact_with_data(tmp_path, {"rows": [long_text]}), [finding(fact_ids=["vpc-0001"], excerpt="OOMKilled by kernel")])
+    # Collectors cap strings at 500 characters, so a longer one has to be written by hand.
+    case = _fact_with_data(tmp_path, {"rows": ["placeholder"]})
+    path = next((case / "evidence").glob("*.json"))
+    document = json.loads(path.read_text())
+    document["facts"][0]["data"]["rows"] = ["lorem ipsum " * 55 + "OOMKilled by kernel" + " dolor sit amet" * 50]
+    path.write_text(json.dumps(document))
+    result = check(case, [finding(fact_ids=["vpc-0001"], excerpt="OOMKilled by kernel")])
     matched = result["valid"][0]["matched_text"]
-    assert len(matched) <= 500 and "OOMKilled by kernel" in matched
+    assert len(matched) == 500 and "OOMKilled by kernel" in matched
 
 
 def test_rejection_message_names_summary_excerpt_or_data(case_dir):
