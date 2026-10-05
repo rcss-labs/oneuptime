@@ -163,3 +163,19 @@ def test_protected_roots_are_resolved(layout):
     roots = protected_roots(str(link), str(layout["cases"]))
     assert isinstance(roots, ProtectedRoots)
     assert protected_reason(str(layout["skill"] / "x"), roots)
+
+
+# ---- fix round 5, ruling 5 ------------------------------------------------------
+
+
+@pytest.mark.parametrize("relative, script", [("incident.json", "case.py"), ("render.json", "report.py")])
+def test_incident_and_render_records_are_protected(layout, relative, script):
+    result = verdict(layout, str(layout["run"] / relative))
+    assert result.kind == DENY and script in result.reason
+    assert verdict(layout, str(layout["run"] / "findings" / relative)).kind == PASS
+
+
+def test_the_docstring_names_the_hard_link_gap():
+    import triage.guard_paths
+
+    assert "hard link" in triage.guard_paths.__doc__

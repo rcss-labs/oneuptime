@@ -680,3 +680,22 @@ def test_what_the_tripwire_leaves_to_the_normal_flow(command, monkeypatch):
     # A redirect to a file and an unparseable command are never allowed anyway; a read is not a write.
     monkeypatch.setenv("HOME", "/home/eng")
     assert kind(command) == PASS
+
+
+# ---- fix round 5, ruling 5: an own script pointed at another skill folder ------
+
+
+@pytest.mark.parametrize(
+    "args",
+    ["--skill-dir /tmp/other propose --case-dir c --service-name s", "propose --skill-dir=/tmp/other --case-dir c",
+     "--skill /tmp/other propose", "--sk=/tmp/other propose", "--json --skill-dir x"],
+)
+def test_an_own_script_with_skill_dir_asks(args):
+    for script in ("map_suggest.py", "publish.py", "preflight.py"):
+        verdict = decide(f"{PY} {SCRIPT}/{script} {args}", CONTEXT)
+        assert verdict.kind == ASK and "--skill-dir" in verdict.reason
+
+
+def test_own_scripts_without_skill_dir_keep_their_answer():
+    assert kind(f"{PY} {SCRIPT}/map_suggest.py propose --case-dir c --service-name s") == ALLOW
+    assert kind(f"{PY} {SCRIPT}/preflight.py --json") == ALLOW

@@ -6,7 +6,8 @@ A hand edit there could turn a candidate cause into a confirmed one or mark an
 unaudited report as audited. Paths are made absolute against the hook's cwd,
 `~` is expanded, and symbolic links and `..` are resolved before the check.
 Names are compared without regard to letter case or Unicode normalization,
-because macOS file systems usually ignore both.
+because macOS file systems usually ignore both. A hard link made beforehand
+to a protected file is not detected: it is a separate path to the same file.
 
 protected_write_tripwire is the Bash side, and it is a tripwire, not a
 boundary: it reads the parsed command, and asks when a segment's command word
@@ -39,6 +40,8 @@ RUN_FILES = {
     ("audit.json",): "publish.py audit",
     ("case.json",): "case.py",
     ("case.md",): "case.py",
+    ("incident.json",): "case.py",
+    ("render.json",): "report.py",
     ("report.md",): "report.py",
     ("work-order.json",): "report.py",
     ("slack-message.md",): "publish.py slack-message",
