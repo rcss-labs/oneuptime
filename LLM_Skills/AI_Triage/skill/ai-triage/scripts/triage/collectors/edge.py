@@ -10,6 +10,7 @@ from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
 from triage.metrics import MetricSpec, add_metric_facts
 from triage.window import describe_offset, format_time
 
+MAX_ARNS = 20
 MAX_LISTENERS = 5
 MAX_LISTENER_FACTS = 20
 MAX_CERTIFICATES = 20
@@ -27,6 +28,14 @@ LOAD_BALANCER_METRICS = (
     ("TargetConnectionErrorCount", "Sum"),
 )
 HOST_COUNT_METRICS = (("UnHealthyHostCount", "Maximum"), ("HealthyHostCount", "Minimum"))
+
+
+def _put_capped(data: dict, key: str, items: list) -> None:
+    """Store at most MAX_ARNS items under key and the number left out under key_omitted."""
+    if items:
+        data[key] = items[:MAX_ARNS]
+    if len(items) > MAX_ARNS:
+        data[f"{key}_omitted"] = len(items) - MAX_ARNS
 
 
 def _last_segment(arn: str) -> str:
@@ -47,10 +56,24 @@ def _describe_load_balancer(ctx: CollectContext, name: str) -> dict | None:
     return balancers[0]
 
 
-def _add_load_balancer(ctx: CollectContext, resource: str, balancer: dict) -> None:
+def _add_load_balancer(
+    ctx: CollectContext, resource: str, balancer: dict, command: str, listeners: list[dict], groups: list[dict]
+) -> None:
     zones = ", ".join(zone.get("ZoneName", "") for zone in balancer.get("AvailabilityZones", [])) or "none"
+    data: dict = {}
+    if balancer.get("LoadBalancerArn"):
+        data["arn"] = balancer["LoadBalancerArn"]
+    _put_capped(
+        data, "listeners",
+        [{"arn": l.get("ListenerArn"), "port": l.get("Port")} for l in listeners if l.get("ListenerArn")],
+    )
+    _put_capped(data, "target_group_arns", [g["TargetGroupArn"] for g in groups if g.get("TargetGroupArn")])
+    certificates = [
+        c["CertificateArn"] for l in listeners for c in l.get("Certificates", []) if c.get("CertificateArn")
+    ]
+    _put_capped(data, "certificate_arns", list(dict.fromkeys(certificates)))
     ctx.evidence.add(
-        kind=CURRENT, resource=resource, command=ctx.last_command,
+        kind=CURRENT, resource=resource, command=command, data=data,
         summary=(
             f"Load balancer {balancer.get('LoadBalancerName')} is {balancer.get('State', {}).get('Code')}: "
             f"{balancer.get('Scheme')} {balancer.get('Type')}, zones {zones}, DNS name {balancer.get('DNSName')}"
@@ -62,13 +85,15 @@ def _listener_text(listener: dict) -> str:
     return f"Listener {listener.get('Protocol')} {listener.get('Port')}"
 
 
-def _add_listeners(
-    ctx: CollectContext, resource: str, balancer_arn: str, group_names: dict[str, str]
-) -> tuple[list[str], str]:
-    """Add listener and rule facts; return the ACM certificate ARNs the listeners use and the listing command."""
+def _read_listeners(ctx: CollectContext, balancer_arn: str) -> tuple[list[dict], str]:
     reply = ctx.aws("elbv2", "describe-listeners", ["--load-balancer-arn", balancer_arn])
-    command = ctx.last_command
-    listeners = (reply or {}).get("Listeners", [])
+    return (reply or {}).get("Listeners", []), ctx.last_command
+
+
+def _add_listeners(
+    ctx: CollectContext, resource: str, listeners: list[dict], command: str, group_names: dict[str, str]
+) -> list[str]:
+    """Add listener and rule facts; return the ACM certificate ARNs the listeners use."""
     certificates: list[str] = []
     for listener in listeners:
         arns = [c.get("CertificateArn", "") for c in listener.get("Certificates", [])]
@@ -77,8 +102,14 @@ def _add_listeners(
     for listener in listeners[:MAX_LISTENER_FACTS]:
         arns = [c.get("CertificateArn", "") for c in listener.get("Certificates", [])]
         shown = ", ".join(_last_segment(arn) for arn in arns) or "none"
+        data: dict = {}
+        if listener.get("ListenerArn"):
+            data["arn"] = listener["ListenerArn"]
+        if listener.get("Port") is not None:
+            data["port"] = listener["Port"]
+        _put_capped(data, "certificate_arns", [arn for arn in arns if arn])
         ctx.evidence.add(
-            kind=CURRENT, resource=resource, command=command,
+            kind=CURRENT, resource=resource, command=command, data=data,
             summary=f"{_listener_text(listener)}, certificate {shown}",
         )
     if len(listeners) > MAX_LISTENER_FACTS:
@@ -88,7 +119,7 @@ def _add_listeners(
         )
     for listener in listeners[:MAX_LISTENERS]:
         _add_rules(ctx, resource, listener, group_names)
-    return certificates, command
+    return certificates
 
 
 def _forwarded_groups(rule: dict) -> list[str]:
@@ -137,6 +168,7 @@ def _add_target_group(ctx: CollectContext, resource: str, group: dict, command: 
     detail = ", ".join(part for part in (" ".join(pieces), ", ".join(thresholds)) if part)
     ctx.evidence.add(
         kind=CURRENT, resource=resource, command=command,
+        data={"arn": group["TargetGroupArn"]} if group.get("TargetGroupArn") else {},
         summary=f"Target group {group.get('TargetGroupName')} health check {detail or 'settings are not reported'}",
     )
 
@@ -230,7 +262,7 @@ def _add_certificate(ctx: CollectContext, resource: str, arn: str) -> None:
     # falls inside the window.
     kind = INCIDENT_TIME if not_after and ctx.window.contains(not_after) else CURRENT
     ctx.evidence.add(
-        kind=CURRENT, resource=resource, time=not_after, command=ctx.last_command,
+        kind=CURRENT, resource=resource, time=not_after, command=ctx.last_command, data={"arn": arn},
         summary=f"Certificate {name} ({certificate.get('DomainName') or 'no domain'}) is {certificate.get('Status')}{until}",
     )
     if not_after is None:
@@ -287,13 +319,14 @@ def _add_dns_record(ctx: CollectContext, hostname: str, dns_name: str) -> None:
     if reply is None:
         return
     resource = f"dns/{hostname}"
+    where = {"hosted_zone_id": zone_id, "record_name": hostname}
     records = [
         r for r in reply.get("ResourceRecordSets", [])
         if _normal_name(r.get("Name", "")) == hostname and r.get("Type") in ADDRESS_RECORD_TYPES
     ]
     if not records:
         ctx.evidence.add(
-            kind=CURRENT, resource=resource, command=ctx.last_command,
+            kind=CURRENT, resource=resource, command=ctx.last_command, data=where,
             summary=(
                 f"No A, AAAA, or CNAME record named {hostname} exists in hosted zone {zone_id} "
                 "(a wildcard record may apply)"
@@ -303,7 +336,7 @@ def _add_dns_record(ctx: CollectContext, hostname: str, dns_name: str) -> None:
     for record in records:
         if any(_normal_name(target) == _normal_name(dns_name) for target in _record_targets(record)):
             ctx.evidence.add(
-                kind=CURRENT, resource=resource, command=ctx.last_command,
+                kind=CURRENT, resource=resource, command=ctx.last_command, data=where,
                 summary=(
                     f"{hostname} has {'a' if record.get('Type') == 'CNAME' else 'an'} {record.get('Type')} record "
                     f"pointing at {dns_name}, this load balancer"
@@ -312,7 +345,7 @@ def _add_dns_record(ctx: CollectContext, hostname: str, dns_name: str) -> None:
             return
     shown = "; ".join(f"{r.get('Type')} record to {', '.join(_record_targets(r)) or 'no value'}" for r in records)
     ctx.evidence.add(
-        kind=DERIVED, resource=resource, command=ctx.last_command,
+        kind=DERIVED, resource=resource, command=ctx.last_command, data=where,
         summary=f"{hostname} does not point at this load balancer ({dns_name}); its records point at: {shown}",
     )
 
@@ -341,11 +374,13 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     if balancer is None:
         return
     arn = balancer.get("LoadBalancerArn", "")
-    _add_load_balancer(ctx, resource, balancer)
+    balancer_command = ctx.last_command
     groups = _describe_target_groups(ctx, arn)
     groups_command = ctx.last_command
+    listeners, listeners_command = _read_listeners(ctx, arn)
+    _add_load_balancer(ctx, resource, balancer, balancer_command, listeners, groups)
     group_names = {g.get("TargetGroupArn", ""): g.get("TargetGroupName", "") for g in groups}
-    certificates, listeners_command = _add_listeners(ctx, resource, arn, group_names)
+    certificates = _add_listeners(ctx, resource, listeners, listeners_command, group_names)
     listed = groups[:MAX_TARGET_GROUPS]
     for group in listed:
         _add_target_group(ctx, resource, group, groups_command)

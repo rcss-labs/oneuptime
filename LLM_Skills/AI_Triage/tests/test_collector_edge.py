@@ -449,3 +449,38 @@ def test_a_certificate_valid_for_a_year_still_carries_its_expiry_time(config_dat
     ctx, _, _ = run(config_data, tmp_path, healthy_answers(**certificate("2027-10-04T12:00:00+00:00")))
     status = by_summary(ctx, "ISSUED")[0]
     assert status.kind == "current" and status.time == "2027-10-04T12:00:00Z"
+
+
+def test_state_fact_carries_the_arns_an_action_could_target(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, healthy_answers())
+    data = by_summary(ctx, "Load balancer web-alb")[0].data
+    assert data["arn"] == LB_ARN
+    assert data["listeners"] == [{"arn": LISTENER_ARN, "port": 443}]
+    assert data["target_group_arns"] == [TG_ARN] and data["certificate_arns"] == [CERT_ARN]
+    assert by_summary(ctx, "Listener HTTPS 443, certificate")[0].data == {
+        "arn": LISTENER_ARN, "port": 443, "certificate_arns": [CERT_ARN]}
+    assert by_summary(ctx, "health check path")[0].data == {"arn": TG_ARN}
+    assert by_summary(ctx, "is ISSUED")[0].data["arn"] == CERT_ARN
+
+
+def test_arn_lists_are_capped_with_an_omitted_count(config_data, tmp_path):
+    listeners = [listener(8000 + n, "HTTP", f"{LISTENER_ARN}{n}") for n in range(25)]
+    groups = [target_group(f"{TG_ARN}{n}", f"tg-{n}") for n in range(25)]
+    ctx, _, _ = run(config_data, tmp_path, healthy_answers(**{
+        "elbv2 describe-listeners": {"Listeners": listeners}, "elbv2 describe-target-groups": {"TargetGroups": groups}}))
+    data = by_summary(ctx, "Load balancer web-alb")[0].data
+    assert len(data["listeners"]) == 20 and data["listeners_omitted"] == 5
+    assert len(data["target_group_arns"]) == 20 and data["target_group_arns_omitted"] == 5
+
+
+def test_missing_arn_fields_write_no_arn_key_and_do_not_fail(config_data, tmp_path):
+    balancer = load_balancer()
+    del balancer["LoadBalancers"][0]["LoadBalancerArn"]
+    ctx, _, _ = run(config_data, tmp_path, healthy_answers(**{"elbv2 describe-load-balancers": balancer}))
+    assert "arn" not in by_summary(ctx, "Load balancer web-alb")[0].data
+    assert ctx.evidence.errors == []
+
+
+def test_dns_facts_carry_the_zone_id_and_record_name(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, dns_answers(ALIAS_HERE), HOSTNAME)
+    assert dns_facts(ctx)[0].data == {"hosted_zone_id": "ZLONG", "record_name": "www.example.com"}
