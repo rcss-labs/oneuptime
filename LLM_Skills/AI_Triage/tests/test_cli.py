@@ -251,3 +251,46 @@ def test_hook_input_that_is_not_utf8_fails_closed_and_exits_0(skill_dir):
     result = script("guard_hook.py", stdin=payload, env={"AI_TRIAGE_SKILL_DIR": str(skill_dir), "AI_TRIAGE_TEST": "1"})
     assert result.returncode == 0, text(result)
     assert "deny" in result.stdout.decode()
+
+
+# M6: exit codes that agree across scripts
+
+def load_script(name):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(f"script_{name}", SCRIPTS / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("statuses, expected", [
+    ([("collected", 0), ("already collected", None), ("skipped", None)], 0),
+    ([("collected", 0), ("failed", 1)], 1),
+    ([("failed", 3), ("collected", 0)], 3),
+    ([("failed", 3), ("failed", 1)], 3),
+    ([("timed out", None), ("collected", 0)], 1),
+    ([("not started", None)], 1),
+])
+def test_case_collect_exits_3_for_an_expired_sign_in_and_1_for_any_other_failure(skill_dir, case_dir, monkeypatch,
+                                                                                capsys, statuses, expected):
+    case_script = load_script("case")
+    ran = []
+
+    def fake_run(commands, case_dir):
+        ran.append(True)
+        return [{"name": f"c{n}", "status": status, "exit_code": code} for n, (status, code) in enumerate(statuses)]
+    monkeypatch.setattr(case_script, "plan_collection", lambda *a, **k: [])
+    monkeypatch.setattr(case_script, "run_collection", fake_run)
+    assert case_script.main(["collect", "--case-dir", case_dir, "--skill-dir", str(skill_dir)]) == expected
+    assert ran  # every planned command ran before the exit code was chosen
+
+
+def test_timeline_prints_a_message_not_a_repr(skill_dir, case_dir, monkeypatch, capsys):
+    timeline_script = load_script("timeline")
+
+    def broken(case_dir):
+        raise KeyError("incident_start")
+    monkeypatch.setattr(timeline_script, "build_timeline", broken)
+    assert timeline_script.main(["--case-dir", case_dir, "--skill-dir", str(skill_dir)]) == 2
+    err = capsys.readouterr().err
+    assert "KeyError(" not in err and "missing incident_start" in err

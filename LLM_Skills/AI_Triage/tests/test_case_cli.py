@@ -311,14 +311,15 @@ def test_a_command_that_cannot_start_gives_exit_1_and_the_others_still_run(skill
     assert "changes" in started and "platform" in started
 
 
-def test_a_failing_command_still_gives_exit_0(skill_dir, case_dir, capsys, monkeypatch):
+def test_every_command_runs_and_an_expired_sign_in_gives_exit_3(skill_dir, case_dir, capsys, monkeypatch):
     run(skill_dir, "target", "--case-dir", case_dir, "--service", "checkout-api", "--environment", "prod")
     module = load_command_module()
     import triage.collection_plan as plan_module
     monkeypatch.setattr(plan_module, "_launch", lambda argv, timeout: (3, "Sign-in expired\n"))
-    assert module.main(["collect", "--case-dir", case_dir, "--skill-dir", str(skill_dir)]) == 0
+    assert module.main(["collect", "--case-dir", case_dir, "--skill-dir", str(skill_dir)]) == 3
     entries = json.loads(capsys.readouterr().out)["commands"]
     assert all(e["status"] in ("failed", "skipped") for e in entries)
+    assert sum(e["status"] == "failed" for e in entries) > 1  # it went on after the first failure
 
 
 def test_collect_without_a_target_exits_2(skill_dir, case_dir):

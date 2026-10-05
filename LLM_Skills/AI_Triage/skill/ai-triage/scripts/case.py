@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Create a case folder for an incident, choose its target, and print the collection plan.
 
-Exit codes: 0 done, 1 a planned command could not be started or timed out (collect), 2 usage, config, or incident error.
+Exit codes: 0 done, 1 a planned command failed, could not be started, or timed out (collect, after running all),
+2 usage, config, or incident error, 3 a planned command found an expired sign-in (collect).
 """
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ from triage.window import WindowError, parse_time
 from triage.cli import add_exit_codes, run
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
+SIGN_IN_EXPIRED = 3  # collect.py's exit code for an expired sign-in
 
 
 MANUAL_TARGET_HELP = """\
@@ -142,7 +144,9 @@ def _collect(args: argparse.Namespace, config) -> int:
     commands = plan_collection(_load_checked(args.case_dir), config, args.skill_dir)
     results = run_collection(commands, args.case_dir)
     print(json.dumps({"commands": results}, indent=2))
-    return 1 if any(result["status"] in ("not started", "timed out") for result in results) else 0
+    if any(result.get("exit_code") == SIGN_IN_EXPIRED for result in results):
+        return SIGN_IN_EXPIRED
+    return 1 if any(result["status"] in ("failed", "not started", "timed out") for result in results) else 0
 
 
 def _show(args: argparse.Namespace, config) -> int:

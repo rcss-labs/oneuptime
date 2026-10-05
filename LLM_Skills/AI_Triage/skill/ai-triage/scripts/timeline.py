@@ -40,8 +40,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         rows = build_timeline(case_dir)
-    except (OSError, ValueError, KeyError) as error:
-        print(f"cannot build the timeline from {args.case_dir}: {error!r}", file=sys.stderr)
+    except KeyError as error:
+        print(f"cannot build the timeline from {args.case_dir}: missing {error.args[0] if error.args else 'a field'}",
+              file=sys.stderr)
+        return 2
+    except (OSError, ValueError) as error:
+        print(f"cannot build the timeline from {args.case_dir}: {error}", file=sys.stderr)
         return 2
     if isinstance(case, dict) and case.get("replay"):
         print(REPLAY_NOTICE)
