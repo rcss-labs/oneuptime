@@ -413,6 +413,11 @@ HARMLESS = [
     ("private-subnets", "private_subnets: subnet-0123456789abcdef0"),
     ("license-model", "LicenseModel: license-included"),
     ("key-manager", "KeyManager: CUSTOMER"),
+    # round 5 ruling 6: labelled commits and AWS request ids
+    ("git-commit", "deployed commit " + _hex(60, 40) + " to prod"),
+    ("image-tag-sha", "image tag " + _hex(61, 40)),
+    ("amz-id-2", "x-amz-id-2: " + _random(62, 76, string.ascii_letters + string.digits + "+/")),
+    ("amz-cf-id", "x-amz-cf-id: " + _random(63, 56, string.ascii_letters + string.digits + "_-")),
 ]
 
 assert len(HARMLESS) >= 60, len(HARMLESS)

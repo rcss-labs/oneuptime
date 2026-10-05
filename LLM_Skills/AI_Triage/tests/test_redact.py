@@ -1958,3 +1958,51 @@ def test_one_megabyte_round_five_shapes_are_fast(shape):
         call(source)
         elapsed = time.perf_counter() - started
         assert elapsed < 2, (shape, elapsed)
+
+
+# Ruling 6: what the key-like token rule also keeps
+
+HEX40_R5 = random_token(55, 40, "0123456789abcdef")
+AMZ_ID = random_token(56, 76, ALNUM + "+/")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        f"deployed commit {HEX40_R5} to prod",
+        f"git checkout {HEX40_R5}",
+        f"image tag {HEX40_R5}",
+        f"build {HEX40_R5} finished",
+        f"revision: {HEX40_R5}",
+        f"version {HEX40_R5}",
+        f"x-amz-id-2: {AMZ_ID}",
+        f'{{"x-amz-cf-id": "{AMZ_ID}"}}',
+        f"x-amz-request-id={AMZ_ID[:32]}",
+        f"x-amzn-RequestId: {AMZ_ID}",
+    ],
+)
+def test_token_rule_keeps_labelled_commits_and_aws_request_ids(source):
+    assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        f"signature mismatch {HEX40_R5}",
+        f"commit {HEX40_R5} token {HEX40_R5[::-1]}",
+        f"deploy secret {HEX40_R5}",
+        f"x-api-key: {AMZ_ID}",
+        f"retry with {AMZ_ID}",
+    ],
+)
+def test_token_rule_still_masks_everything_else(source):
+    out = Redactor().text(source)
+    assert HEX40_R5 not in out and AMZ_ID not in out
+
+
+# Ruling 7: stated limits
+
+def test_module_docstring_states_the_limits():
+    doc = (redact_module.__doc__ or "").lower()
+    for phrase in ("separate lines", "short passwords", "ipv6", "look-alike", "across files"):
+        assert phrase in doc, phrase

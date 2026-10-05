@@ -1,4 +1,20 @@
-"""Redact secrets and personal data from text before it enters evidence."""
+"""Redact secrets and personal data from text before it enters evidence.
+
+Everything written to evidence, sent to the scoring API or published passes through Redactor.
+It never raises: an unexpected error, or more than 5 seconds spent on one string, turns that
+string into one <UNREADABLE-n> placeholder. Key-like tokens that no rule explains are masked as
+<TOKEN-n> (fail closed). audit_text reports positions and kinds, never values.
+
+Stated limits (recorded decisions, not oversights):
+- A key and its value on separate lines are not paired, beyond the shapes handled here (YAML
+  blocks and items, netrc, Kubernetes Secret data, tables under a header).
+- Short passwords with no name and no known command shape are not detected; the token rule
+  only sees long, mixed or high-entropy values.
+- IPv6 addresses are not masked (public IPv4 addresses are).
+- Look-alike letters from other alphabets in key names are not folded (NFKC handles full-width
+  and compatibility forms only).
+- Placeholders are consistent within one evidence file (one Redactor), not across files.
+"""
 from __future__ import annotations
 
 import ast
@@ -1626,12 +1642,34 @@ def _token_spans(text: str) -> list[Span]:
     return spans
 
 
+AWS_REQUEST_ID_HEADERS = frozenset({"x-amz-id-2", "x-amz-cf-id", "x-amz-request-id", "x-amzn-requestid"})
+_AWS_REQUEST_ID_LABEL_RE = re.compile(
+    r"(?i)\b(?:x-amz-id-2|x-amz-cf-id|x-amz-request-id|x-amzn-requestid)[\"']?[ \t]*[:=][ \t]*[\"']?$"
+)
+_COMMIT_WORDS = frozenset({"commit", "revision", "git", "sha", "image", "tag", "version", "build", "deploy"})
+_LINE_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+
+
+def _commit_line(text: str, position: int) -> bool:
+    """A line with one of the words commit, revision, git, sha, image, tag, version, build, deploy
+    and no secret word: its 40-hex runs are commit ids, not keys."""
+    line = text[_line_start(text, position):_line_end(text, position)]
+    if len(line) > 2000:
+        return False
+    words = [word.lower() for word in _LINE_WORD_RE.findall(line)]
+    return any(word in _COMMIT_WORDS for word in words) and not any(looks_secret_key(word) for word in words)
+
+
 def _token_piece_spans(text: str, start: int, end: int) -> list[Span]:
     token = text[start:end]
     if len(token) < MIN_TOKEN_LENGTH:
         return []
     if _HEX_RE.fullmatch(token) and _DIGEST_LABEL_RE.search(text, max(0, start - 8), start):
         return []  # a labelled digest such as sha256:...
+    if _AWS_REQUEST_ID_LABEL_RE.search(text, max(0, start - 40), start):
+        return []  # x-amz-id-2, x-amz-cf-id: AWS support asks for these
+    if _HEX_RE.fullmatch(token) and _commit_line(text, start):
+        return []
     if _looks_like_path(token):
         spans, position = [], start
         for segment in token.split("/"):
@@ -2094,6 +2132,8 @@ class Redactor:
             new_key = self.text(key) if isinstance(key, str) else key
             if command_args is not None and key in command_args:
                 result[new_key] = self._walk_list(item, False, False, False, argv=command_args[key])
+            elif isinstance(key, str) and key.lower() in AWS_REQUEST_ID_HEADERS and isinstance(item, str):
+                result[new_key] = self._labelled_text(key, item)
             elif key in ("data", "stringData") and obj.get("kind") == "Secret" and not keep:
                 # every value of a Kubernetes Secret, whatever its key is called (DATABASE_URL too)
                 result[new_key] = (
@@ -2126,6 +2166,12 @@ class Redactor:
             else:
                 result[new_key] = self._walk(item, secret, False, False)
         return result
+
+    def _labelled_text(self, label: str, value: str) -> str:
+        """text() on a value with its label in front, so label-aware rules see it; the label is cut off again."""
+        prefix = f"{label}: "
+        out = self.text(prefix + value)
+        return out[len(prefix):] if out.startswith(prefix) else self.text(value)
 
     @staticmethod
     def _command_and_args(obj: dict) -> dict[str, dict[int, list[Span]]] | None:
