@@ -2120,3 +2120,15 @@ def test_a_timeline_without_such_rows_has_no_sub_heading(case_dir, case):
              "fact_id": None, "resource": ""}]
     text = render_report(VALID_REPORT, case, valid_findings(case_dir), rows, [], RENDERED_AT)
     assert "Before the window" not in text
+
+
+@pytest.mark.parametrize("cause_label", ["probable", "candidate"])
+def test_a_recommended_action_needs_a_confirmed_cause_not_just_a_probable_one(case_dir, case, findings, config, cause_label):
+    report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(label=cause_label))
+    assert report["actions"][0]["label"] == "recommended"
+    problems = problems_for(report, case, findings, config)
+    assert_problem(problems, "actions[0]", "recommended", "cause is not labelled confirmed")
+    assert check_draft(report, findings, config) == []
+    assert not any("actions[1]" in problem for problem in problems)
+    confirmed = problems_for(VALID_REPORT, case, findings, config)
+    assert not any("cause is not labelled confirmed" in problem for problem in confirmed)
