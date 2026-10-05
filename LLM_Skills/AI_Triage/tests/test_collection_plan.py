@@ -510,3 +510,155 @@ def test_collectors_that_do_not_declare_incident_start_do_not_get_it(config):
 def test_rds_gets_the_incident_start_next_to_its_db(config):
     command = one(plan({"rds": "db-1"}, config), "rds")
     assert targets_of(command) == {"db": "db-1", "incident_start": "2026-10-04T10:42:00Z"}
+
+
+# collect: run the plan
+
+import json
+import subprocess
+import threading
+import time
+
+from triage.collection_plan import run_collection
+
+
+def planned_with_files(config, resources=None):
+    return plan(resources or FULL_RESOURCES, config)
+
+
+def test_each_planned_command_names_its_evidence_file_and_suffix(config):
+    registry_names = {"ecs": "ecs-prod-main-eu-west-1.json", "rds": "rds-prod-main-eu-west-1.json"}
+    commands = plan({"ecs_service": "c/s", "rds": "d", "lambda_functions": ["a_b"],
+                     "opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-checkout-*"}}, config)
+    by_name = {c.name: c for c in commands if c.name in registry_names}
+    for name, file_name in registry_names.items():
+        assert by_name[name].evidence == "evidence/" + file_name
+        assert by_name[name].suffix == ""
+    lam = one(commands, "lambda")
+    assert lam.suffix.startswith("ab-") and lam.evidence == f"evidence/lambda-prod-main-eu-west-1-{lam.suffix}.json"
+    searches = named(commands, "opensearch")
+    assert [c.suffix for c in searches] == ["histogram", "top-messages", "search"]
+    assert searches[0].evidence == "evidence/opensearch-prod-main-logs-prod-histogram.json"
+    assert all(c.evidence == "" for c in commands if c.tool == "skipped")
+
+
+def test_the_evidence_names_match_what_the_evidence_writer_makes(config, tmp_path):
+    from triage.evidence import Evidence
+    from triage.window import make_window
+    window = make_window(START, END, 6)
+    for command in plan({"lambda_functions": ["a_b", "Orders", "x.y"], "dynamodb_tables": ["-t"]}, config):
+        if command.tool == "collect.py":
+            account, region = option(command, "--account"), option(command, "--region")
+            suffix = option(command, "--suffix") if "--suffix=" in " ".join(command.argv) else ""
+            written = Evidence(command.name, account, region, window).write(tmp_path, suffix)
+            assert command.evidence == f"evidence/{written.name}"
+
+
+def fake_launch(log=None, fail=None):
+    def launch(argv, timeout):
+        if log is not None:
+            log.append((argv, timeout))
+        if fail and fail(argv):
+            return fail(argv)
+        return 0, ""
+    return launch
+
+
+def write_evidence(case_dir, command, facts=2, errors=1):
+    path = case_dir / command.evidence
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"facts": [{}] * facts, "errors": ["e"] * errors}))
+
+
+def test_run_collection_runs_every_command_and_reports_counts(config, tmp_path):
+    commands = plan({"rds": "d", "lambda_functions": ["f"]}, config)
+    log = []
+
+    def launch(argv, timeout):
+        log.append((argv, timeout))
+        command = next(c for c in commands if c.argv == argv)
+        write_evidence(tmp_path, command, facts=3, errors=0)
+        return 0, ""
+
+    results = run_collection(commands, tmp_path, launch=launch)
+    assert [r["name"] for r in results] == [c.name for c in commands]
+    assert len(log) == len(commands) and all(timeout == 300 for _, timeout in log)
+    rds = next(r for r in results if r["name"] == "rds")
+    assert rds == {"name": "rds", "tool": "collect.py", "suffix": "", "status": "collected", "exit_code": 0,
+                   "evidence": "evidence/rds-prod-main-eu-west-1.json", "facts": 3, "errors": 0, "stderr": ""}
+
+
+def test_an_existing_evidence_file_is_not_collected_again(config, tmp_path):
+    commands = plan({"rds": "d"}, config)
+    for command in commands:
+        write_evidence(tmp_path, command, facts=4, errors=2)
+    log = []
+    results = run_collection(commands, tmp_path, launch=fake_launch(log))
+    assert log == []
+    assert {r["status"] for r in results} == {"already collected"}
+    assert all(r["facts"] == 4 and r["errors"] == 2 and r["exit_code"] is None for r in results)
+
+
+def test_a_command_that_fails_is_reported_with_the_last_stderr_line(config, tmp_path):
+    commands = plan({"rds": "d"}, config)
+    results = run_collection(commands, tmp_path, launch=fake_launch(fail=lambda argv: (3, "first\n\nSign-in expired\n\n")))
+    assert all(r["status"] == "failed" and r["exit_code"] == 3 and r["stderr"] == "Sign-in expired" and r["evidence"] is None
+               for r in results)
+
+
+def test_a_command_that_cannot_start_or_times_out_does_not_stop_the_others(config, tmp_path):
+    commands = plan({"rds": "d", "efs": "fs", "ecs_service": "c/s"}, config)
+
+    def launch(argv, timeout):
+        if argv[2] == "rds":
+            raise FileNotFoundError(2, "No such file or directory")
+        if argv[2] == "efs":
+            raise subprocess.TimeoutExpired(argv, timeout)
+        write_evidence(tmp_path, next(c for c in commands if c.argv == argv))
+        return 0, ""
+
+    status = {r["name"]: r["status"] for r in run_collection(commands, tmp_path, launch=launch)}
+    assert status["rds"] == "not started" and status["efs"] == "timed out" and status["ecs"] == "collected"
+    assert status["changes"] == "collected" and status["platform"] == "collected"
+
+
+def test_at_most_four_commands_run_at_once(config, tmp_path):
+    commands = plan(FULL_RESOURCES, config)
+    assert len(commands) >= 8
+    lock, state = threading.Lock(), {"now": 0, "peak": 0}
+
+    def launch(argv, timeout):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        time.sleep(0.05)
+        with lock:
+            state["now"] -= 1
+        return 0, ""
+
+    run_collection(commands, tmp_path, launch=launch)
+    assert state["peak"] == 4
+
+
+def test_skipped_commands_are_reported_and_not_run(config, tmp_path):
+    commands = plan({"rds": ["bad"]}, config)
+    log = []
+    results = run_collection(commands, tmp_path, launch=fake_launch(log))
+    skipped = next(r for r in results if r["status"] == "skipped")
+    assert skipped["tool"] == "skipped" and skipped["stderr"] and skipped["evidence"] is None
+    assert all(argv[2] != "rds" for argv, _ in log)
+
+
+def test_the_default_launch_uses_the_same_interpreter(monkeypatch):
+    import sys
+    import triage.collection_plan as module
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(argv=argv, **kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    module._launch(["/skill/.venv/bin/python", "/skill/scripts/collect.py", "rds"], 300)
+    assert seen["argv"] == [sys.executable, "/skill/scripts/collect.py", "rds"]
+    assert seen["timeout"] == 300 and "env" not in seen

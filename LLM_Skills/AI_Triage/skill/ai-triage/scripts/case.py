@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create a case folder for an incident, choose its target, and print the collection plan.
 
-Exit codes: 0 done, 2 usage, config, or incident error.
+Exit codes: 0 done, 1 a planned command could not be started or timed out (collect), 2 usage, config, or incident error.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from triage.case import (
     set_target_from_discovery,
     set_target_from_map,
 )
-from triage.collection_plan import plan_collection
+from triage.collection_plan import plan_collection, run_collection
 from triage.config import ConfigError, default_config_path, load_config
 from triage.service_map import MapError, ServiceMap, default_map_path, load_map
 from triage.window import WindowError, parse_time
@@ -48,6 +48,8 @@ def _build_parser() -> argparse.ArgumentParser:
     target.add_argument("--discovery", type=Path, help="JSON printed by discover.py")
     plan = add("plan", "print the collector commands for the chosen target")
     plan.add_argument("--case-dir", type=Path, required=True)
+    collect = add("collect", "run every planned command (at most 4 at a time) and report what each wrote")
+    collect.add_argument("--case-dir", type=Path, required=True)
     show = add("show", "print case.json")
     show.add_argument("--case-dir", type=Path, required=True)
     return parser
@@ -109,6 +111,13 @@ def _plan(args: argparse.Namespace, config) -> int:
     return 0
 
 
+def _collect(args: argparse.Namespace, config) -> int:
+    commands = plan_collection(load_case(args.case_dir), config, args.skill_dir)
+    results = run_collection(commands, args.case_dir)
+    print(json.dumps({"commands": results}, indent=2))
+    return 1 if any(result["status"] in ("not started", "timed out") for result in results) else 0
+
+
 def _show(args: argparse.Namespace, config) -> int:
     print(json.dumps(load_case(args.case_dir), indent=2))
     return 0
@@ -116,7 +125,7 @@ def _show(args: argparse.Namespace, config) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    handler = {"init": _init, "target": _target, "plan": _plan, "show": _show}[args.subcommand]
+    handler = {"init": _init, "target": _target, "plan": _plan, "collect": _collect, "show": _show}[args.subcommand]
     try:
         config = load_config(default_config_path(args.skill_dir))
         return handler(args, config)

@@ -5,6 +5,9 @@ import hashlib
 import json
 import re
 import shlex
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +32,9 @@ RESOURCE_COLLECTOR = {
     "sqs_queues": "messaging", "sns_topics": "messaging", "log_groups": "logs", "opensearch": "opensearch",
 }
 MAX_RESOURCE_NAMES = 10
+COLLECT_WORKERS = 4
+COMMAND_TIMEOUT_SECONDS = 300
+STDERR_LINE_LIMIT = 300
 OPENSEARCH_QUERIES = ("histogram", "top-messages", "search")
 SKIPPED = "skipped"
 # The evidence writer drops every other character from a file name suffix.
@@ -56,6 +62,15 @@ def _suffix_for(name: str, budget: int) -> str:
     return f"{kept}-{digest}" if kept else digest
 
 
+def _evidence_path(collector: str, account: str, region: str, suffix: str) -> str:
+    """Where Evidence.write puts the file for this collector, account, region (or cluster), and suffix."""
+    name = "-".join(_SUFFIX_CLEANER.sub("", part) for part in (collector, account, region))
+    cleaned = _SUFFIX_CLEANER.sub("", suffix)
+    if cleaned:
+        name += f"-{cleaned}"
+    return f"evidence/{name}.json"
+
+
 @dataclass(frozen=True)
 class PlannedCommand:
     domain: str
@@ -63,6 +78,8 @@ class PlannedCommand:
     name: str
     argv: list[str]
     reason: str
+    suffix: str = ""
+    evidence: str = ""  # the evidence file this command writes, relative to the case folder
 
     def shell(self) -> str:
         return shlex.join(self.argv)
@@ -103,7 +120,8 @@ class _Planner:
         self._claim_file(name, "", suffix)
         if suffix:
             argv.append(f"--suffix={suffix}")
-        self.commands.append(PlannedCommand(COLLECTOR_DOMAIN[name], "collect.py", name, argv, reason))
+        self.commands.append(PlannedCommand(
+            COLLECTOR_DOMAIN[name], "collect.py", name, argv, reason, suffix, _evidence_path(name, self.account, self.region, suffix)))
 
     def opensearch(self, subcommand: str, spec: dict, reason: str) -> None:
         argv = [self.python, self.opensearch_script, subcommand, "--cluster", spec["cluster"],
@@ -114,7 +132,10 @@ class _Planner:
             argv += ["--filter", f"{key}={text}"]
         self._claim_file("opensearch", f"{spec['cluster']}", subcommand)
         argv.append(f"--suffix={subcommand}")
-        self.commands.append(PlannedCommand(COLLECTOR_DOMAIN["opensearch"], "opensearch_query.py", "opensearch", argv, reason))
+        cluster = self.config.opensearch_clusters[spec["cluster"]]
+        self.commands.append(PlannedCommand(
+            COLLECTOR_DOMAIN["opensearch"], "opensearch_query.py", "opensearch", argv, reason, subcommand,
+            _evidence_path("opensearch", cluster.account, cluster.name, subcommand)))
 
     def skip(self, key: str, why: str) -> None:
         name = RESOURCE_COLLECTOR.get(key, key)
@@ -304,3 +325,57 @@ def plan_collection(case: dict, config: TriageConfig, skill_dir: Path) -> list[P
     p.collect("changes", changes, "deployments and configuration changes before the incident")
     p.collect("platform", {}, "known AWS service events")
     return p.commands
+
+
+def _launch(argv: list[str], timeout: int) -> tuple[int, str]:
+    """Run one planned command with this interpreter and this environment. Returns (exit code, stderr)."""
+    done = subprocess.run([sys.executable, *argv[1:]], capture_output=True, text=True, timeout=timeout)
+    return done.returncode, done.stderr
+
+
+def _last_line(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1][:STDERR_LINE_LIMIT] if lines else ""
+
+
+def _counts(path: Path) -> tuple[int | None, int | None]:
+    try:
+        document = json.loads(path.read_text())
+        return len(document["facts"]), len(document["errors"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, None
+
+
+def _run_one(command: PlannedCommand, case_dir: Path, timeout: int, launch: Any) -> dict:
+    entry: dict[str, Any] = {"name": command.name, "tool": command.tool, "suffix": command.suffix,
+                             "status": "", "exit_code": None, "evidence": None, "facts": None, "errors": None,
+                             "stderr": ""}
+    if command.tool == SKIPPED:
+        return {**entry, "status": "skipped", "stderr": command.reason}
+    path = case_dir / command.evidence
+    if path.is_file():
+        facts, errors = _counts(path)
+        return {**entry, "status": "already collected", "evidence": command.evidence, "facts": facts, "errors": errors}
+    try:
+        code, stderr = launch(command.argv, timeout)
+    except subprocess.TimeoutExpired:
+        return {**entry, "status": "timed out", "stderr": f"no answer after {timeout} seconds"}
+    except OSError as error:
+        return {**entry, "status": "not started", "stderr": str(error).replace("\n", " ")[:STDERR_LINE_LIMIT]}
+    entry.update(exit_code=code, stderr=_last_line(stderr))
+    if code != 0:
+        return {**entry, "status": "failed"}
+    if path.is_file():
+        entry["evidence"] = command.evidence
+        entry["facts"], entry["errors"] = _counts(path)
+    return {**entry, "status": "collected"}
+
+
+def run_collection(commands: list[PlannedCommand], case_dir: Path, timeout: int = COMMAND_TIMEOUT_SECONDS,
+                   workers: int = COLLECT_WORKERS, launch: Any = None) -> list[dict]:
+    """Run the planned commands, at most `workers` at a time, and report each in plan order. A command whose
+    evidence file already exists is not run again. A command that fails, cannot start, or times out never stops
+    the others."""
+    launcher = launch or _launch
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda command: _run_one(command, case_dir, timeout, launcher), commands))

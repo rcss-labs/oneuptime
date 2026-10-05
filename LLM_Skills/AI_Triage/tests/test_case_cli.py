@@ -223,3 +223,114 @@ def test_a_bad_opensearch_filter_key_exits_2_from_plan(skill_dir, case_dir, tmp_
         "opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-checkout-*", "filter": {"-dash": "v"}}}}
     run(skill_dir, "target", "--case-dir", case_dir, "--discovery", write(tmp_path, "d.json", discovery))
     assert_clean_exit_2(run(skill_dir, "plan", "--case-dir", case_dir))
+
+
+# collect
+
+import importlib.util
+import os
+
+from fakes import FakeJudge  # noqa: F401  (replay_support imports it too)
+from replay_support import (CALL_LOG_NAME, REPLAY_DIR, ReplayCase, _build_skill_dir, load_call_log, skill_style,
+                            start_case)
+from triage.config import load_config
+from triage.guard import context_from_config, decide
+from triage.verdict import ALLOW
+
+SCENARIO = REPLAY_DIR / "ecs-bad-deploy"
+
+
+def start_uncollected(base):
+    base.mkdir(parents=True, exist_ok=True)
+    skill_dir, _ = _build_skill_dir(SCENARIO, base)
+    case = ReplayCase(SCENARIO, base, skill_dir, case_dir=base)
+    incident = json.loads((SCENARIO / "incident.json").read_text())
+    init = json.loads(case.script("init", "case.py", "init", "--incident", str(SCENARIO / "incident.json"),
+                                  "--now", incident["observed_at"])["stdout"])
+    case.case_dir = Path(init["case_dir"])
+    candidate = init["match"]["candidates"][0]
+    case.script("target", "case.py", "target", "--case-dir", str(case.case_dir),
+                "--service", candidate["service"], "--environment", candidate["environment"])
+    return case
+
+
+def evidence_files(case_dir):
+    return {path.name: json.loads(path.read_text()) for path in sorted((case_dir / "evidence").glob("*.json"))}
+
+
+def test_collect_writes_the_same_evidence_as_running_the_planned_commands_one_by_one(tmp_path):
+    reference = start_case(SCENARIO, tmp_path / "one-by-one")
+    case = start_uncollected(tmp_path / "collect")
+    done = case.script("collect", "case.py", "collect", "--case-dir", str(case.case_dir))
+    report = json.loads(done["stdout"])
+    assert evidence_files(case.case_dir) == evidence_files(reference.case_dir)
+    assert len(evidence_files(case.case_dir)) >= 6
+    for entry in report["commands"]:
+        assert entry["status"] == "collected" and entry["exit_code"] == 0
+        document = json.loads((case.case_dir / entry["evidence"]).read_text())
+        assert entry["facts"] == len(document["facts"]) and entry["errors"] == len(document["errors"])
+        assert set(entry) == {"name", "tool", "suffix", "status", "exit_code", "evidence", "facts", "errors", "stderr"}
+    assert not Path(report["commands"][0]["evidence"]).is_absolute()
+
+
+def test_a_second_collect_reports_already_collected_and_makes_no_call(tmp_path):
+    case = start_uncollected(tmp_path / "again")
+    case.script("collect", "case.py", "collect", "--case-dir", str(case.case_dir))
+    calls = load_call_log(case.base)
+    assert calls
+    before = evidence_files(case.case_dir)
+    again = json.loads(case.script("collect again", "case.py", "collect", "--case-dir", str(case.case_dir))["stdout"])
+    assert {entry["status"] for entry in again["commands"]} == {"already collected"}
+    assert load_call_log(case.base) == calls
+    assert evidence_files(case.case_dir) == before
+
+
+def load_command_module():
+    spec = importlib.util.spec_from_file_location("case_command_under_test", COMMAND)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_command_that_cannot_start_gives_exit_1_and_the_others_still_run(skill_dir, tmp_path, case_dir, capsys, monkeypatch):
+    run(skill_dir, "target", "--case-dir", case_dir, "--service", "checkout-api", "--environment", "prod")
+    module = load_command_module()
+    import triage.collection_plan as plan_module
+    started = []
+
+    def launch(argv, timeout):
+        started.append(argv[2])
+        if argv[2] == "rds":
+            raise FileNotFoundError(2, "No such file or directory")
+        return 0, ""
+
+    monkeypatch.setattr(plan_module, "_launch", launch)
+    code = module.main(["collect", "--case-dir", case_dir, "--skill-dir", str(skill_dir)])
+    statuses = {e["name"]: e["status"] for e in json.loads(capsys.readouterr().out)["commands"]}
+    assert code == 1 and statuses["rds"] == "not started"
+    assert "changes" in started and "platform" in started
+
+
+def test_a_failing_command_still_gives_exit_0(skill_dir, case_dir, capsys, monkeypatch):
+    run(skill_dir, "target", "--case-dir", case_dir, "--service", "checkout-api", "--environment", "prod")
+    module = load_command_module()
+    import triage.collection_plan as plan_module
+    monkeypatch.setattr(plan_module, "_launch", lambda argv, timeout: (3, "Sign-in expired\n"))
+    assert module.main(["collect", "--case-dir", case_dir, "--skill-dir", str(skill_dir)]) == 0
+    entries = json.loads(capsys.readouterr().out)["commands"]
+    assert all(e["status"] in ("failed", "skipped") for e in entries)
+
+
+def test_collect_without_a_target_exits_2(skill_dir, case_dir):
+    assert_clean_exit_2(run(skill_dir, "collect", "--case-dir", case_dir))
+
+
+def test_the_guard_allows_collect_in_the_skills_form(tmp_path, monkeypatch):
+    case = start_uncollected(tmp_path / "guard")
+    home = case.skill_dir.parents[2]  # the fake home that holds .claude/skills/ai-triage
+    monkeypatch.setenv("HOME", str(home))
+    context = context_from_config(load_config(case.skill_dir / "config" / "triage-config.yaml"), case.skill_dir)
+    command = skill_style([str(case.python), str(case.skill_dir / "scripts" / "case.py"), "collect",
+                           "--case-dir", str(case.case_dir)], home)
+    assert command.startswith('"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/case.py" collect')
+    assert decide(command, context).kind == ALLOW
