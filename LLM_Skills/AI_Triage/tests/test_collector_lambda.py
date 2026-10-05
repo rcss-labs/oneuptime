@@ -188,7 +188,7 @@ def test_metrics_use_the_bare_function_name_when_given_an_arn(config_data, tmp_p
 
 FUNCTION_ARN = "arn:aws:lambda:eu-west-1:111111111111:function:orders-worker:live"
 ROLE_ARN = "arn:aws:iam::111111111111:role/orders-worker-role"
-MAPPING_ARN = "arn:aws:lambda:eu-west-1:111111111111:event-source-mapping:11111111-2222-3333-4444-555555555555"
+MAPPING_ARN = "arn:aws:lambda:eu-west-1:111111111111:event-source-mapping:1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
 
 
 def test_the_state_fact_holds_the_arns_from_the_answers(config_data, tmp_path):
