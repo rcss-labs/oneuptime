@@ -556,7 +556,7 @@ def test_strong_lines_come_before_soft_ones_and_the_summary_counts_what_was_left
     _, fact = log_fact(config_data, tmp_path, lines)
     kept = fact.data["lines"]
     assert any("panic: nil map" in line for line in kept) and any("Traceback" in line for line in kept)
-    assert "first 30 of 42 error-looking lines; 12 not kept" in fact.summary
+    assert "first 30 of 42 distinct error-looking lines; 12 not kept" in fact.summary
     times = [line.split()[0] for line in kept]
     assert times == sorted(times)
     # 2 strong groups and the first 28 soft ones fill the 30 places.
@@ -595,3 +595,22 @@ def test_a_whole_answer_just_under_the_limit_is_not_reported_as_cut(config_data,
     ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
                     logs={("payments-api-abc", "app", True): text})
     assert not any("200000 bytes" in f.summary for f in ctx.evidence.facts)
+
+
+def test_lines_differing_only_in_hex_ids_or_uuids_are_one_group_and_groups_are_counted_against_groups(config_data, tmp_path):
+    letters = "abcdef"
+    # Ids that differ in their letters, so normalising digits alone would not group them.
+    hex_ids = ["deadbe" + letters[n % 6] + letters[n // 6] + "c0ffee" for n in range(10)]
+    uuids = [f"a1b2c3{letters[n % 6]}{letters[n // 6]}-1b2c-4d3e-8f90-a1b2c3d4e5f6" for n in range(10)]
+    lines = [f"{stamp(n)} info {n}" for n in range(20)]
+    lines += [f"{stamp(20 + n)} ERROR request req={hex_ids[n]} failed" for n in range(10)]
+    lines += [f"{stamp(30 + n)} ERROR trace {uuids[n]} lost" for n in range(10)]
+    words = [chr(ord("a") + n % 26) * (1 + n // 26) for n in range(35)]
+    lines += [f"{stamp(40 + n)} WARN slow call to {word}" for n, word in enumerate(words)]
+    _, fact = log_fact(config_data, tmp_path, lines)
+    kept = fact.data["lines"]
+    assert len([line for line in kept if "req=" in line]) == 1 and any("repeated 10 times" in line and "req=" in line for line in kept)
+    assert len([line for line in kept if "trace" in line]) == 1
+    # 2 strong groups and 35 soft groups: 30 groups kept, 7 groups not kept.
+    assert "first 30 of 37 distinct error-looking lines; 7 not kept" in fact.summary
+    assert "55 error-looking" in fact.summary

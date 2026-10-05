@@ -21,6 +21,8 @@ LOG_LINE_CHARS = 300
 _STRONG_LINE = re.compile(r"\b(error|fatal|critical|oom)\b|panic|exception|traceback|killed|out of memory", re.IGNORECASE)
 _SOFT_LINE = re.compile(r"\b(warn|warning)\b|timeout|refused|denied|failed", re.IGNORECASE)
 _DIGITS = re.compile(r"\d+")
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_HEX_RUN = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{8,}(?![0-9A-Za-z])")
 REPLACEMENT = "\ufffd"
 LOG_BYTES = 200000
 MAX_PODS = 30
@@ -305,7 +307,8 @@ def _fetch_logs(ctx: CollectContext, cluster: str, namespace: str, pod_name: str
             )
         return
     error_count = sum(1 for _, line in inside if _is_error_looking(line))
-    chosen, not_kept = _error_lines_to_keep(inside)
+    chosen, group_count = _error_lines_to_keep(inside)
+    not_kept = group_count - len(chosen)
     wanted = sorted(set(range(min(LOG_HEAD_LINES, len(inside)))) | set(chosen))
     # Redact each line before it is cut or quoted, so no secret survives at a cut boundary.
     kept = [(inside[i][0], _shorten(ctx.evidence.redactor.text(inside[i][1])) + _repeat_note(chosen.get(i, 1))) for i in wanted]
@@ -315,7 +318,7 @@ def _fetch_logs(ctx: CollectContext, cluster: str, namespace: str, pod_name: str
     shown = first_error or kept[0][1]
     label = "first strong error-looking line" if strong else "first error-looking line"
     error_text = f"; {label}: {first_error}" if first_error else ""
-    left_out = f"; first {LOG_ERROR_LINES} of {error_count} error-looking lines; {not_kept} not kept" if not_kept else ""
+    left_out = f"; first {LOG_ERROR_LINES} of {group_count} distinct error-looking lines; {not_kept} not kept" if not_kept else ""
     ctx.evidence.add(
         kind=INCIDENT_TIME, resource=resource, time=kept[0][0], command=ctx.last_command,
         summary=(
@@ -348,16 +351,20 @@ def _is_error_looking(line: str) -> bool:
     return bool(_STRONG_LINE.search(line) or _SOFT_LINE.search(line))
 
 
+def _group_key(line: str) -> str:
+    """The line with UUIDs, hex runs of 8 or more characters, and digits ignored."""
+    return _DIGITS.sub("#", _HEX_RUN.sub("<hex>", _UUID.sub("<uuid>", line)))
+
+
 def _error_lines_to_keep(inside: list[tuple]) -> tuple[dict[int, int], int]:
-    """Index of the first line of each kept group of error-looking lines (same text once digits are ignored) with its
-    count, strong groups before soft ones, at most LOG_ERROR_LINES groups; and how many error-looking lines were left out."""
+    """Index of the first line of each kept group of error-looking lines (same text once ids and digits are ignored)
+    with its count, strong groups before soft ones, at most LOG_ERROR_LINES groups; and how many groups there were."""
     groups: dict[str, list[int]] = {}
     for index, (_, line) in enumerate(inside):
         if _is_error_looking(line):
-            groups.setdefault(_DIGITS.sub("#", line), []).append(index)
+            groups.setdefault(_group_key(line), []).append(index)
     ranked = sorted(groups.values(), key=lambda members: (not _STRONG_LINE.search(inside[members[0]][1]), members[0]))
-    kept = ranked[:LOG_ERROR_LINES]
-    return {members[0]: len(members) for members in kept}, sum(len(members) for members in ranked[LOG_ERROR_LINES:])
+    return {members[0]: len(members) for members in ranked[:LOG_ERROR_LINES]}, len(ranked)
 
 
 def _repeat_note(count: int) -> str:
