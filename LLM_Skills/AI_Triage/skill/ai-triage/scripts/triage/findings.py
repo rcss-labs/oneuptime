@@ -180,8 +180,14 @@ def _around(text: str, needle: str) -> str:
 
 
 def _repeats_request(needle: str, asked: list[str]) -> bool:
+    """True when the excerpt sits inside one asked string, or is only asked strings joined by punctuation."""
     comparable = _comparable(needle)
-    return any(comparable in text for text in asked)
+    if any(comparable in text for text in asked):
+        return True
+    remainder = comparable
+    for text in sorted((text for text in asked if len(text) >= MIN_WHOLE_VALUE), key=len, reverse=True):
+        remainder = remainder.replace(text, " ")
+    return not any(char.isalnum() for char in remainder)
 
 
 def _matched_string(fact: dict, needle: str) -> str | None:

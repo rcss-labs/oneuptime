@@ -596,3 +596,11 @@ def test_matched_text_always_holds_a_300_character_excerpt(tmp_path):
     path.write_text(json.dumps(document))
     matched = check(case, [finding(fact_ids=["vpc-0001"], excerpt=needle)])["valid"][0]["matched_text"]
     assert len(matched) == 500 and needle in matched
+
+
+def test_an_excerpt_made_only_of_several_asked_strings_and_punctuation_is_refused(tmp_path):
+    case = _asked_fact(tmp_path, "queried the first 5, skipped: /aws/OutOfMemoryError, /aws/checkout-killed",
+                       file_asked={"log_groups": ["/aws/OutOfMemoryError", "/aws/checkout-killed"]})
+    reasons = reasons_of(check(case, [finding(fact_ids=["changes-0001"], excerpt="/aws/OutOfMemoryError, /aws/checkout-killed",
+                                              provenance="inferred")]))
+    assert any(REPEATS in reason for reason in reasons)
