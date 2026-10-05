@@ -34,7 +34,7 @@ MIN_TOKEN_LENGTH = 24
 MIN_LOWERCASE_LENGTH = 20
 MIN_HEX_LENGTH = 40
 
-_ZERO_WIDTH = "​‌‍‎‏⁠⁡⁢⁣⁤﻿­᠎"
+_ZERO_WIDTH = "\u200b\u200c\u200d\u200e\u200f\u2060\u2061\u2062\u2063\u2064\ufeff\u00ad\u180e"
 _SPECIAL_RE = re.compile(
     r"(?P<ansi>\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]?)"
     r"|(?P<zw>[" + _ZERO_WIDTH + r"])"

@@ -1065,3 +1065,16 @@ def test_one_megabyte_of_secret_words_is_scanned_in_under_two_seconds():
     start = time.perf_counter()
     scan(text)
     assert time.perf_counter() - start < 2.0
+
+
+INVISIBLE = [
+    "​", "‌", "‍", "‎", "‏", "⁠", "⁡", "⁢", "⁣", "⁤",
+    "﻿", "­", "᠎",
+]
+
+
+@pytest.mark.parametrize("char", INVISIBLE, ids=[f"U+{ord(c):04X}" for c in INVISIBLE])
+def test_each_invisible_character_inside_a_token_is_removed_before_matching(char):
+    key = "AK" + "IA" + "X" * 16
+    assert [h.kind for h in scan("see " + key[:2] + char + key[2:])] == ["vendor_token"]
+    assert [h.kind for h in scan("pass" + char + "word=" + "hunter" + "22")] == ["named_value"]
