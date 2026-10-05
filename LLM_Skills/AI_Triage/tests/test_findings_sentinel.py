@@ -314,15 +314,6 @@ from triage.collectors import all_collectors  # noqa: E402
 
 # Collectors whose own target checks refuse a sentinel value, with the reason. Listed, never skipped silently.
 CANNOT_RUN_WITH_SENTINEL: dict[str, str] = {}
-# Targets whose sentinel run shows a gap outside findings.py. The sweep gives them a plain value, and a strict
-# xfail test below keeps the gap visible until its owner closes it.
-KNOWN_GAPS: dict[tuple[str, str], str] = {
-    ("access", "secret"): (
-        "Evidence.set_asked redacts the value of a target named like a secret, so the asked record holds "
-        "<SECRET-1> instead of the secret name, while the access summary 'Secret <name>: ...' keeps the name; "
-        "an excerpt of the name plus a few words is then accepted (evidence.py owner)"
-    ),
-}
 EXTRA_QUOTE = 11
 
 
@@ -355,22 +346,8 @@ def test_registry_sentinel_is_refused_for_every_fact(skill_dir, case_dir, name, 
     if name in CANNOT_RUN_WITH_SENTINEL:
         pytest.skip(CANNOT_RUN_WITH_SENTINEL[name])
     collector = all_collectors()[name]
-    targets = {key: f"plain-{key}" if (name, key) in KNOWN_GAPS else sentinel_value(key)
-               for key in (*collector.required, *collector.optional)}
+    targets = {key: sentinel_value(key) for key in (*collector.required, *collector.optional)}
     assert_sentinel_refused(skill_dir, case_dir, name, targets, answers)
-
-
-@pytest.mark.parametrize("gap", sorted(KNOWN_GAPS))
-def test_known_gap_sentinel_is_refused(skill_dir, case_dir, gap):
-    name, key = gap
-    collector = all_collectors()[name]
-    targets = {other: f"plain-{other}" for other in (*collector.required, *collector.optional)}
-    targets[key] = sentinel_value(key)
-    try:
-        assert_sentinel_refused(skill_dir, case_dir, name, targets, "empty")
-    except AssertionError:
-        pytest.xfail(KNOWN_GAPS[gap])
-    pytest.fail(f"the known gap {gap} is closed; remove it from KNOWN_GAPS")
 
 
 def assert_sentinel_refused(skill_dir, case_dir, name, targets, answers):
