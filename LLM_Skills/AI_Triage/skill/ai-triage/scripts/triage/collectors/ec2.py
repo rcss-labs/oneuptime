@@ -11,6 +11,7 @@ from triage.metrics import MetricSpec, add_metric_facts
 from triage.window import format_time
 
 MAX_INSTANCES = 10
+MAX_RELATED_IDS = 20
 # describe-instances states the time of the last state change only inside this free text.
 TRANSITION_TIME_RE = re.compile(r"\((\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) GMT\)")
 LATEST_RETRY_CODES = ("UnsupportedOperation", "IncorrectInstanceState")
@@ -23,6 +24,23 @@ def _time_text(value: object) -> str:
 
 def _instances(reply: dict) -> list[dict]:
     return [i for reservation in reply.get("Reservations", []) for i in reservation.get("Instances", [])]
+
+
+def _identifiers(instance: dict) -> dict:
+    """Ids from the describe answer. EC2 has no ARN for an instance, so none is made up."""
+    data: dict = {"resource_id": instance.get("InstanceId")}
+    for key, field in (("subnet_id", "SubnetId"), ("vpc_id", "VpcId")):
+        if instance.get(field):
+            data[key] = instance[field]
+    groups = [group["GroupId"] for group in instance.get("SecurityGroups") or [] if group.get("GroupId")]
+    if groups:
+        data["security_group_ids"] = groups[:MAX_RELATED_IDS]
+        if len(groups) > MAX_RELATED_IDS:
+            data["security_group_ids_omitted"] = len(groups) - MAX_RELATED_IDS
+    profile_arn = (instance.get("IamInstanceProfile") or {}).get("Arn")
+    if profile_arn:
+        data["iam_instance_profile_arn"] = profile_arn
+    return data
 
 
 def _add_instance(ctx: CollectContext, instance: dict, entry: dict | None, command: str) -> None:
@@ -41,7 +59,7 @@ def _add_instance(ctx: CollectContext, instance: dict, entry: dict | None, comma
             f"zone {(instance.get('Placement') or {}).get('AvailabilityZone')}{reason_text}"
         ),
         data={"state": state, "instance_type": instance.get("InstanceType"),
-              "system_status": system, "instance_status": instance_status},
+              "system_status": system, "instance_status": instance_status, **_identifiers(instance)},
     )
     if in_window(ctx.window, instance.get("LaunchTime")):
         ctx.evidence.add(

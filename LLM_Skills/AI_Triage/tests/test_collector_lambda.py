@@ -184,3 +184,36 @@ def test_metrics_use_the_bare_function_name_when_given_an_arn(config_data, tmp_p
     COLLECTOR.run(ctx, {"function": "arn:aws:lambda:eu-west-1:111111111111:function:orders-worker"})
     call = aws.called("cloudwatch", "get-metric-data")[0]
     assert '"Value": "orders-worker"' in call[call.index("--metric-data-queries") + 1]
+
+
+FUNCTION_ARN = "arn:aws:lambda:eu-west-1:111111111111:function:orders-worker:live"
+ROLE_ARN = "arn:aws:iam::111111111111:role/orders-worker-role"
+MAPPING_ARN = "arn:aws:lambda:eu-west-1:111111111111:event-source-mapping:11111111-2222-3333-4444-555555555555"
+
+
+def test_the_state_fact_holds_the_arns_from_the_answers(config_data, tmp_path):
+    replies = answers(**{
+        "lambda get-function-configuration": configuration(FunctionArn=FUNCTION_ARN, Role=ROLE_ARN, Version="7"),
+        "lambda list-event-source-mappings": {"EventSourceMappings": [{**mapping(), "EventSourceMappingArn": MAPPING_ARN}]},
+    })
+    ctx, aws, kube = run(config_data, tmp_path, replies)
+    data = ctx.evidence.facts[0].data
+    assert data["arn"] == FUNCTION_ARN and data["role_arn"] == ROLE_ARN and data["version"] == "7"
+    assert data["event_source_mapping_arns"] == [MAPPING_ARN]
+    mapping_fact = with_text(ctx, "Event source mapping")[0]
+    assert mapping_fact.data["arn"] == MAPPING_ARN
+    assert_read_only(ctx, aws, kube)
+
+
+def test_arn_lists_are_capped_with_an_omitted_count(config_data, tmp_path):
+    many = [{**mapping(uuid=f"m{n}"), "EventSourceMappingArn": f"{MAPPING_ARN}{n:02d}"} for n in range(25)]
+    ctx, _, _ = run(config_data, tmp_path, answers(**{"lambda list-event-source-mappings": {"EventSourceMappings": many}}))
+    data = ctx.evidence.facts[0].data
+    assert len(data["event_source_mapping_arns"]) == 20 and data["event_source_mapping_arns_omitted"] == 5
+
+
+def test_an_answer_without_arns_writes_no_arn_keys(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, answers())
+    data = ctx.evidence.facts[0].data
+    assert not {"arn", "role_arn", "event_source_mapping_arns"} & set(data)
+    assert ctx.evidence.errors == []

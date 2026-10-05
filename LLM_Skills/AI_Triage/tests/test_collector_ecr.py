@@ -192,3 +192,20 @@ def test_access_denied_is_not_reported_as_a_missing_image(config_data, tmp_path)
     ctx, _, _ = run(config_data, tmp_path, {"ecr describe-images": access_denied("DescribeImages")}, image_tag="v42")
     assert ctx.evidence.facts == []
     assert ctx.evidence.errors[0]["code"] == "AccessDeniedException"
+
+
+def test_the_image_fact_holds_the_repository_id_and_no_made_up_arn(config_data, tmp_path):
+    answer = {"imageDetails": [image()]}
+    ctx, aws, kube = run(config_data, tmp_path, {"ecr describe-images": answer}, image_tag="v42")
+    data = ctx.evidence.facts[0].data
+    assert data["resource_id"] == "checkout" and data["registry_id"] == "111111111111"
+    assert "arn" not in data and "repository_uri" not in data
+    assert_read_only(ctx, aws, kube)
+
+
+def test_an_answer_without_a_registry_id_still_works(config_data, tmp_path):
+    bare = image()
+    del bare["registryId"]
+    ctx, _, _ = run(config_data, tmp_path, {"ecr describe-images": {"imageDetails": [bare]}})
+    assert ctx.evidence.facts[0].data["resource_id"] == "checkout"
+    assert "registry_id" not in ctx.evidence.facts[0].data

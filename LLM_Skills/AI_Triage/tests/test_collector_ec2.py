@@ -302,3 +302,32 @@ def test_an_instance_launched_inside_the_window_has_a_timed_fact(config_data, tm
 def test_an_instance_without_a_status_entry_says_unknown(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, answers(**{"ec2 describe-instance-status": {"InstanceStatuses": []}}))
     assert "system status unknown, instance status unknown" in with_text(ctx, "Instance i-0aaa is running")[0].summary
+
+
+def test_the_state_fact_holds_the_instance_id_and_related_ids(config_data, tmp_path):
+    full = instance()
+    full.update({"SubnetId": "subnet-0123", "VpcId": "vpc-0456",
+                 "SecurityGroups": [{"GroupId": "sg-0aaa", "GroupName": "web"}, {"GroupId": "sg-0bbb"}],
+                 "IamInstanceProfile": {"Arn": "arn:aws:iam::111111111111:instance-profile/web", "Id": "AIPA"}})
+    ctx, aws, kube = run(config_data, tmp_path, answers(**{"ec2 describe-instances": described(full)}))
+    data = with_text(ctx, "Instance i-0aaa is running")[0].data
+    assert data["resource_id"] == "i-0aaa" and "arn" not in data
+    assert data["subnet_id"] == "subnet-0123" and data["vpc_id"] == "vpc-0456"
+    assert data["security_group_ids"] == ["sg-0aaa", "sg-0bbb"]
+    assert data["iam_instance_profile_arn"] == "arn:aws:iam::111111111111:instance-profile/web"
+    assert_read_only(ctx, aws, kube)
+
+
+def test_security_group_ids_are_capped(config_data, tmp_path):
+    full = instance()
+    full["SecurityGroups"] = [{"GroupId": f"sg-{n:04d}"} for n in range(25)]
+    ctx, _, _ = run(config_data, tmp_path, answers(**{"ec2 describe-instances": described(full)}))
+    data = with_text(ctx, "Instance i-0aaa is running")[0].data
+    assert len(data["security_group_ids"]) == 20 and data["security_group_ids_omitted"] == 5
+
+
+def test_an_instance_without_network_fields_still_gets_its_id(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, answers())
+    data = with_text(ctx, "Instance i-0aaa is running")[0].data
+    assert data["resource_id"] == "i-0aaa"
+    assert not {"subnet_id", "vpc_id", "security_group_ids", "iam_instance_profile_arn"} & set(data)

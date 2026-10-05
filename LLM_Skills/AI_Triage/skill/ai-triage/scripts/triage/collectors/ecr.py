@@ -38,7 +38,12 @@ def _add_image(ctx: CollectContext, repository: str, image: dict) -> None:
             f"Image pushed{inside}: {tag_text}, digest {image.get('imageDigest')}, "
             f"size {_size_text(image.get('imageSizeInBytes'))}"
         ),
-        data={"tags": tags, "digest": image.get("imageDigest"), "size_bytes": image.get("imageSizeInBytes")},
+        data={
+            "tags": tags, "digest": image.get("imageDigest"), "size_bytes": image.get("imageSizeInBytes"),
+            # Neither describe call returns the repository ARN or URI, so only the name and registry id are stated.
+            "resource_id": repository,
+            **({"registry_id": image["registryId"]} if image.get("registryId") else {}),
+        },
     )
 
 
