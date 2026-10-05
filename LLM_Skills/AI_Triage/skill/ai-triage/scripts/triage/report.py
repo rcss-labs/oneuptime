@@ -54,6 +54,7 @@ REPORT_KEYS = frozenset({
     "map_changes", "run", "engineer", "duration_minutes",
 })
 TYPESAFE_UNAVAILABLE_PREFIX = "unavailable: "
+TYPESAFE_FAILED_PREFIX = "failed: "
 NO_CAUSE_TEXT = "No cause was established."
 
 
@@ -237,8 +238,9 @@ def _check_action_shape(action: dict, where: str, problems: list[str]) -> None:
 def _check_coverage_shape(coverage: dict, problems: list[str]) -> None:
     _text_field(coverage, "typesafe", "coverage", problems)
     typesafe = coverage.get("typesafe")
-    if isinstance(typesafe, str) and typesafe != "available" and not typesafe.startswith(TYPESAFE_UNAVAILABLE_PREFIX):
-        problems.append(f"coverage.typesafe: must be 'available' or start with '{TYPESAFE_UNAVAILABLE_PREFIX}'")
+    if (isinstance(typesafe, str) and typesafe != "available"
+            and not typesafe.startswith((TYPESAFE_UNAVAILABLE_PREFIX, TYPESAFE_FAILED_PREFIX))):
+        problems.append(f"coverage.typesafe: must be 'available' or start with '{TYPESAFE_UNAVAILABLE_PREFIX}' or '{TYPESAFE_FAILED_PREFIX}'")
     if "not_checked" not in coverage:
         problems.append("coverage.not_checked: missing")
     elif not isinstance(coverage["not_checked"], list):
@@ -357,6 +359,10 @@ def _check_typesafe(report: dict, parts: dict, problems: list[str]) -> None:
         for index, cause in parts["causes"]:
             if cause.get("label") == "confirmed":
                 problems.append(f"causes[{index}]: TypeSafe was unavailable, so no cause may be labelled confirmed")
+    elif isinstance(typesafe, str) and typesafe.startswith(TYPESAFE_FAILED_PREFIX):
+        for index, cause in parts["causes"]:
+            if cause.get("label") in ("confirmed", "probable"):
+                problems.append(f"causes[{index}]: TypeSafe judging failed, so no cause may be labelled above candidate")
 
 
 def load_summary(case: dict) -> tuple[dict | None, str | None]:
@@ -730,6 +736,62 @@ def _finding_entry_problems(entry: Any, where: str) -> list[str]:
     return problems
 
 
+def _optional_text(value: Any) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _case_shape_problems(case_dir: Path) -> list[str]:
+    """Wrong types in the parts of case.json that render reads."""
+    where = "case.json"
+    try:
+        case = json.loads((Path(case_dir) / "case.json").read_text())
+    except (OSError, ValueError, RecursionError):
+        return [f"{where}: cannot be read as JSON"]
+    if not isinstance(case, dict):
+        return [f"{where}: must be a JSON object"]
+    problems = []
+    for key in ("skill_version", "case_dir", "incident_start"):
+        if not isinstance(case.get(key), str):
+            problems.append(f"{where} {key}: must be text")
+    incident = case.get("incident")
+    if not isinstance(incident, dict):
+        problems.append(f"{where} incident: must be an object")
+    else:
+        for key in ("number", "title"):
+            if not isinstance(incident.get(key), str) or not incident[key].strip():
+                problems.append(f"{where} incident.{key}: must be non-empty text")
+        for key in ("url", "severity", "state", "declared_at", "impact_started_at", "resolved_at"):
+            if not _optional_text(incident.get(key)):
+                problems.append(f"{where} incident.{key}: must be text or null")
+    window = case.get("window")
+    if not isinstance(window, dict) or not all(isinstance(window.get(key), str) for key in ("start", "end")):
+        problems.append(f"{where} window: must be an object with text start and end")
+    target = case.get("target")
+    if target is not None:
+        if not isinstance(target, dict) or not all(isinstance(target.get(key), str) for key in ("source", "account", "region")):
+            problems.append(f"{where} target: must be null or an object with text source, account, and region")
+        elif not _optional_text(target.get("service")):
+            problems.append(f"{where} target.service: must be text or null")
+    return problems
+
+
+def _evidence_shape_problems(case_dir: Path) -> list[str]:
+    """Wrong types in the evidence files that render reads. A file that cannot be read is reported elsewhere."""
+    problems = []
+    for position, (_, document) in enumerate(evidence_documents(Path(case_dir))):
+        where = f"evidence file {position}"
+        if not isinstance(document.get("facts", []), list):
+            problems.append(f"{where}.facts: must be a list")
+        elif not all(isinstance(fact, dict) for fact in document.get("facts", [])):
+            problems.append(f"{where}.facts: every entry must be an object")
+        errors = document.get("errors", [])
+        if errors is not None and not (isinstance(errors, list) and all(isinstance(item, dict) for item in errors)):
+            problems.append(f"{where}.errors: must be a list of objects")
+        if not isinstance(document.get("truncated", False), bool):
+            problems.append(f"{where}.truncated: must be true or false")
+    return problems
+
+
 def check_case_inputs(case_dir: Path) -> tuple[dict[str, dict], list[str]]:
     """The usable findings of the case (id to finding) and every problem with checked.json and the evidence facts.
 
@@ -737,6 +799,10 @@ def check_case_inputs(case_dir: Path) -> tuple[dict[str, dict], list[str]]:
     """
     checked, problems = load_checked(case_dir)
     findings = {item["id"]: item for item in checked.get("valid", [])}
+    problems += _case_shape_problems(case_dir)
+    shape = _evidence_shape_problems(case_dir)
+    if shape:
+        return findings, problems + shape
     for position, (key, fact) in enumerate(load_facts(Path(case_dir)).items()):
         if not ID_RE.fullmatch(key) or not isinstance(fact.get("id"), str) or not ID_RE.fullmatch(fact["id"]):
             problems.append(f"evidence fact {position}: its id is not a valid id")
@@ -761,6 +827,8 @@ def build_work_order(report: dict, case: dict, now: datetime, checked: dict | No
     gaps = [f"{entry['what']}: {entry['why']}" for entry in report["coverage"]["not_checked"]]
     typesafe = report["coverage"]["typesafe"]
     if typesafe.startswith(TYPESAFE_UNAVAILABLE_PREFIX):
+        gaps.append(f"TypeSafe {typesafe}")
+    elif typesafe.startswith(TYPESAFE_FAILED_PREFIX):
         gaps.append(f"TypeSafe {typesafe}")
     for item in (checked or {}).get("unreadable") or []:
         if isinstance(item, dict):

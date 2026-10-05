@@ -6,6 +6,7 @@ Exit codes: 0 done, 1 the report is invalid (every problem is printed), 2 usage,
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -72,6 +73,7 @@ def _validated(case_dir: Path, config) -> tuple[dict, dict, dict]:
 
 
 OUTPUT_NAMES = ("report.md", "work-order.json")
+MARKER_NAME = "render.json"
 
 
 def _mark_stale(case_dir: Path) -> tuple[list[str], list[str]]:
@@ -80,6 +82,12 @@ def _mark_stale(case_dir: Path) -> tuple[list[str], list[str]]:
     One failure does not stop the others, and a leftover temporary name is cleared if it can be.
     """
     renamed, failed = [], []
+    marker = case_dir / MARKER_NAME
+    if marker.exists():
+        try:
+            os.replace(marker, case_dir / f"{MARKER_NAME}.stale")
+        except OSError:
+            pass
     for name in OUTPUT_NAMES:
         path = case_dir / name
         if path.exists():
@@ -95,6 +103,27 @@ def _mark_stale(case_dir: Path) -> tuple[list[str], list[str]]:
     return renamed, failed
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _check_marker(case_dir: Path) -> str:
+    """Mark both outputs stale unless render.json vouches for the pair on disk. Returns the note, or "".
+
+    A render killed between its two moves leaves a new file beside an old one and no matching marker.
+    """
+    present = [name for name in OUTPUT_NAMES if (case_dir / name).exists()]
+    if not present:
+        return ""
+    try:
+        marker = json.loads((case_dir / MARKER_NAME).read_text())
+        matches = (isinstance(marker, dict) and len(present) == len(OUTPUT_NAMES)
+                   and all(marker.get(name) == _sha256(case_dir / name) for name in OUTPUT_NAMES))
+    except (OSError, ValueError):
+        matches = False
+    return "" if matches else _stale_note(case_dir)
+
+
 def _write_both(case_dir: Path, text: str, work_order: dict) -> None:
     """Write both files to temporary names, then move both into place."""
     contents = {"report.md": text, "work-order.json": json.dumps(work_order, indent=2) + "\n"}
@@ -102,6 +131,9 @@ def _write_both(case_dir: Path, text: str, work_order: dict) -> None:
         (case_dir / f"{name}.tmp").write_text(content)
     for name in OUTPUT_NAMES:
         os.replace(case_dir / f"{name}.tmp", case_dir / name)
+    marker = {name: _sha256(case_dir / name) for name in OUTPUT_NAMES}
+    (case_dir / f"{MARKER_NAME}.tmp").write_text(json.dumps(marker, indent=2) + "\n")
+    os.replace(case_dir / f"{MARKER_NAME}.tmp", case_dir / MARKER_NAME)
 
 
 def _render(case_dir: Path, config, now: datetime) -> int:
@@ -138,6 +170,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.case_dir.is_dir():
             raise CaseError([f"case folder not found: {args.case_dir}"])
         config = load_config(default_config_path(args.skill_dir))
+        marker_note = _check_marker(args.case_dir)
+        if marker_note:
+            print(marker_note, file=sys.stderr)
         now = None
         if args.command == "render":
             now = parse_time(args.now) if getattr(args, "now", None) else datetime.now(timezone.utc)

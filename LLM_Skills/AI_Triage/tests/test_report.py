@@ -1633,14 +1633,61 @@ def test_any_status_but_complete_or_unavailable_caps_everything_at_candidate(jud
     assert_problem(problems, "actions[0]", "recommended")
 
 
-def test_a_failed_run_with_a_failed_typesafe_value_is_accepted_when_the_report_agrees(judged, config):
-    with_status(judged, "failed", typesafe="failed: the connection dropped; judging failed")
-    def downgrade(report):
-        report["coverage"]["typesafe"] = "failed: the connection dropped; judging failed"
-        report["causes"][0]["label"] = "candidate"
-        report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
-    problems = judged_problems(judged, config, mutated(VALID_REPORT, downgrade))
-    assert not any("stronger than" in problem or "recommended" in problem for problem in problems)
+@pytest.fixture
+def failed_run(case_dir, case, config):
+    """A real judging run that failed: the fake judge answers every call with nothing."""
+    write_findings(case_dir, [
+        {"id": "compute-1", "claim": "Containers exit with code 137", "fact_ids": ["ecs-0001"], "excerpt": "exit code 137",
+         "provenance": "incident_time", "confidence": "high", "time": "2026-10-04T10:41:10Z"},
+        {"id": "compute-2", "claim": "Service is down now", "fact_ids": ["ecs-0002"],
+         "excerpt": "desired 2, running 0", "provenance": "current", "confidence": "medium"},
+    ])
+    check_findings(case_dir)
+    (case_dir / "report.json").write_text(json.dumps(VALID_REPORT))
+    summary = run_judgments(case_dir, config, FakeJudge(lambda state, questions: {}), QUESTIONS, random.Random(1))
+    assert summary["status"] == "failed" and summary["typesafe"].startswith("failed: "), summary
+    return case_dir
+
+
+def all_candidate_report(typesafe, cause_label="candidate"):
+    report = mutated(VALID_REPORT, lambda r: r["coverage"].update(typesafe=typesafe))
+    report["status"], report["summary"]["top_cause"] = "unresolved", None
+    for cause in report["causes"]:
+        cause["label"] = cause_label if cause["id"] == "C1" else "candidate"
+    report["actions"] = [{**a, "label": "candidate"} for a in report["actions"]]
+    return report
+
+
+def test_a_report_with_every_label_candidate_validates_and_renders_after_a_failed_run(failed_run, config):
+    typesafe = stored_summary(failed_run)["typesafe"]
+    report = all_candidate_report(typesafe)
+    assert judged_problems(failed_run, config, report) == []
+    case = load_case(failed_run)
+    findings, _ = check_case_inputs(failed_run)
+    text = render_report(report, case, findings, build_timeline(failed_run), [], RENDERED_AT)
+    assert_headings(text)
+    assert f"TypeSafe: {typesafe}" in section(text, "## 7. Coverage notes")
+    assert "(confirmed)" not in text and "(probable)" not in text
+    assert any("TypeSafe failed: " in gap for gap in build_work_order(report, case, RENDERED_AT)["coverage_gaps"])
+
+
+@pytest.mark.parametrize("label", ["probable", "confirmed"])
+def test_any_label_above_candidate_is_a_problem_after_a_failed_run(failed_run, config, label):
+    report = all_candidate_report(stored_summary(failed_run)["typesafe"], cause_label=label)
+    problems = judged_problems(failed_run, config, report)
+    assert_problem(problems, "causes[0]", "stronger than candidate")
+    assert_problem(problems, "causes[0]", "TypeSafe", "failed")
+
+
+def test_a_failed_typesafe_value_must_equal_the_summarys(failed_run, config):
+    report = all_candidate_report("failed: something else")
+    assert_problem(judged_problems(failed_run, config, report), "coverage.typesafe", "must equal")
+
+
+def test_a_failed_typesafe_value_without_a_summary_is_refused(case_dir, case, findings, config):
+    remove_summary(case_dir)
+    report = all_candidate_report("failed: judging failed")
+    assert_problem(problems_for(report, case, findings, config), "coverage.typesafe", "no judging run")
 
 
 def test_an_unavailable_status_follows_the_unavailable_rules(judged, config):
@@ -1662,3 +1709,69 @@ def test_the_report_typesafe_must_agree_with_the_summary_for_every_status(judged
     with_status(judged, "complete")
     report = mutated(VALID_REPORT, lambda r: r["coverage"].update(typesafe="unavailable: x"))
     assert_problem(judged_problems(judged, config, report), "coverage.typesafe", "must equal")
+
+
+# round 3, m8: shapes of case.json and evidence files that render reads
+
+def rewrite_case(case_dir, change):
+    path = case_dir / "case.json"
+    data = json.loads(path.read_text())
+    change(data)
+    path.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize("change", [
+    lambda d: d.pop("skill_version"), lambda d: d.update(skill_version=5), lambda d: d.update(case_dir=5),
+    lambda d: d.update(incident=5), lambda d: d["incident"].pop("number"), lambda d: d["incident"].update(title=None),
+    lambda d: d["incident"].update(url=5), lambda d: d["incident"].update(declared_at=[1]),
+    lambda d: d.update(window=5), lambda d: d["window"].pop("start"), lambda d: d["window"].update(end=5),
+    lambda d: d.update(incident_start=5), lambda d: d.update(target=5),
+    lambda d: d.update(target={"source": "map"}), lambda d: d.update(target={"source": "map", "account": 5, "region": "r"}),
+])
+def test_a_malformed_case_json_is_a_problem(case_dir, change):
+    rewrite_case(case_dir, change)
+    _, problems = check_case_inputs(case_dir)
+    assert any("case.json" in problem for problem in problems), problems
+
+
+def test_a_wellformed_case_json_with_a_target_is_not_a_problem(case_dir):
+    rewrite_case(case_dir, lambda d: d.update(target={"source": "map", "service": "checkout-api", "environment": "prod",
+                                                       "account": "prod-main", "region": "eu-west-1", "resources": {},
+                                                       "depends_on": []}))
+    assert check_case_inputs(case_dir)[1] == []
+
+
+@pytest.mark.parametrize("change", [
+    lambda d: d.update(errors=5), lambda d: d.update(errors=True), lambda d: d.update(errors=[5]),
+    lambda d: d.update(truncated="yes"),
+])
+def test_a_malformed_evidence_file_is_a_problem_not_a_crash(case_dir, change):
+    path = next((case_dir / "evidence").glob("ecs-*.json"))
+    document = json.loads(path.read_text())
+    change(document)
+    path.write_text(json.dumps(document))
+    _, problems = check_case_inputs(case_dir)
+    assert any("evidence file" in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize("facts", [5, [5], "x", None])
+def test_malformed_facts_never_crash_the_input_check(case_dir, facts):
+    path = next((case_dir / "evidence").glob("ecs-*.json"))
+    document = json.loads(path.read_text())
+    document["facts"] = facts
+    path.write_text(json.dumps(document))
+    findings, problems = check_case_inputs(case_dir)
+    assert isinstance(findings, dict) and isinstance(problems, list)
+
+
+def test_a_report_that_validates_does_not_fail_in_render_for_a_shape_reason(case_dir, case, config):
+    path = next((case_dir / "evidence").glob("ecs-*.json"))
+    document = json.loads(path.read_text())
+    document["errors"] = 5
+    path.write_text(json.dumps(document))
+    assert judged_problems_without_fixture(case_dir, config) != []
+
+
+def judged_problems_without_fixture(case_dir, config):
+    findings, input_problems = check_case_inputs(case_dir)
+    return input_problems + validate_report(VALID_REPORT, load_case(case_dir), findings, config)

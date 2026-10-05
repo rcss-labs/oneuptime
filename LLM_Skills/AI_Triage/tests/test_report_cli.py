@@ -303,3 +303,88 @@ def test_unreadable_finding_files_reach_the_work_order(skill_dir, case_dir):
     render_ok(skill_dir, case_dir)
     order = json.loads((case_dir / "work-order.json").read_text())
     assert "Finding file not read: findings/network.json (not valid JSON)" in order["coverage_gaps"]
+
+
+# round 3, m7: the render marker
+
+import hashlib
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_a_render_writes_a_marker_with_the_hash_of_both_outputs(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    marker = json.loads((case_dir / "render.json").read_text())
+    assert marker == {"report.md": sha(case_dir / "report.md"), "work-order.json": sha(case_dir / "work-order.json")}
+
+
+@pytest.mark.parametrize("command", ["validate", "render"])
+def test_a_missing_marker_marks_both_outputs_stale(skill_dir, case_dir, command):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    (case_dir / "render.json").unlink()
+    result = run(skill_dir, command, "--case-dir", str(case_dir), "--now", NOW) if command == "render" else \
+        run(skill_dir, command, "--case-dir", str(case_dir))
+    assert result.returncode == 0, result.stderr
+    assert "report.md.stale" in result.stderr and "work-order.json.stale" in result.stderr
+    if command == "validate":
+        assert not (case_dir / "report.md").exists() and (case_dir / "work-order.json.stale").is_file()
+
+
+@pytest.mark.parametrize("name", ["report.md", "work-order.json"])
+def test_an_output_that_no_longer_matches_the_marker_marks_both_stale(skill_dir, case_dir, name):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    (case_dir / name).write_text("edited")
+    result = run(skill_dir, "validate", "--case-dir", str(case_dir))
+    assert result.returncode == 0 and "stale" in result.stderr
+    assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
+    assert (case_dir / "report.md.stale").is_file() and (case_dir / "work-order.json.stale").is_file()
+
+
+def test_a_matching_pair_is_left_alone(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    result = run(skill_dir, "validate", "--case-dir", str(case_dir))
+    assert result.returncode == 0 and result.stderr == ""
+    assert (case_dir / "report.md").is_file() and not (case_dir / "report.md.stale").exists()
+
+
+def test_a_missing_output_with_a_marker_marks_the_other_stale(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    render_ok(skill_dir, case_dir)
+    (case_dir / "work-order.json").unlink()
+    run(skill_dir, "validate", "--case-dir", str(case_dir))
+    assert not (case_dir / "report.md").exists() and (case_dir / "report.md.stale").is_file()
+
+
+def test_a_folder_without_outputs_needs_no_marker(skill_dir, case_dir):
+    write_report(case_dir, VALID_REPORT)
+    result = run(skill_dir, "validate", "--case-dir", str(case_dir))
+    assert result.returncode == 0 and result.stderr == ""
+
+
+def test_a_process_killed_between_the_two_moves_leaves_nothing_current_looking(skill_dir, case_dir, monkeypatch):
+    command = load_command()
+    write_report(case_dir, VALID_REPORT)
+    assert command.main(["render", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir), "--now", NOW]) == 0
+    real_replace, count = command.os.replace, {"n": 0}
+
+    def killed(source, target):
+        if str(target).endswith(("report.md", "work-order.json")) and not str(source).endswith(".stale"):
+            count["n"] += 1
+            if count["n"] == 2:
+                raise KeyboardInterrupt
+        return real_replace(source, target)
+
+    monkeypatch.setattr(command.os, "replace", killed)
+    with pytest.raises(KeyboardInterrupt):
+        command.main(["render", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir), "--now", "2026-10-04T12:00:00Z"])
+    monkeypatch.setattr(command.os, "replace", real_replace)
+    assert (case_dir / "report.md").is_file()
+    result = run(skill_dir, "validate", "--case-dir", str(case_dir))
+    assert result.returncode == 0 and "stale" in result.stderr
+    assert not (case_dir / "report.md").exists() and not (case_dir / "work-order.json").exists()
