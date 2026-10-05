@@ -202,3 +202,19 @@ def test_stage_update_time_is_carried_as_the_facts_time(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, rest_answers(), REST)
     stage = by_summary(ctx, "Stage prod")[0]
     assert stage.kind == "current" and stage.time == "2026-10-01T07:00:00Z"
+
+
+def test_stage_fact_carries_the_api_id_stage_name_and_web_acl_arn_the_answer_returns(config_data, tmp_path):
+    acl = "arn:aws:wafv2:eu-west-1:111111111111:regional/webacl/api-acl/abcd1111-2222-3333-4444-5555aaaa5555"
+    answers = rest_answers(**{"apigateway get-stages": {"item": [rest_stage(webAclArn=acl)]}})
+    ctx, _, _ = run(config_data, tmp_path, answers, REST)
+    data = by_summary(ctx, "Stage prod")[0].data
+    assert data == {"api_id": "abc123", "stage_name": "prod", "deployment_id": "dep1", "web_acl_arn": acl}
+    ctx, _, _ = run(config_data, tmp_path, http_answers(), HTTP)
+    assert by_summary(ctx, "Stage $default")[0].data == {
+        "api_id": "xyz789", "stage_name": "$default", "deployment_id": "dep9"}
+
+
+def test_no_arn_is_constructed_for_an_api_or_stage(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, rest_answers(), REST)
+    assert "arn" not in by_summary(ctx, "Stage prod")[0].data

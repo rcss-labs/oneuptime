@@ -25,6 +25,7 @@ class Stage:
     updated: str | None
     throttling: str
     cache: str
+    web_acl_arn: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,7 @@ def _rest_cache(stage: dict) -> str:
 def _rest_stage(raw: dict) -> Stage:
     return Stage(
         raw.get("stageName", ""), raw.get("deploymentId"), raw.get("lastUpdatedDate"),
-        _rest_throttling(raw), _rest_cache(raw),
+        _rest_throttling(raw), _rest_cache(raw), raw.get("webAclArn"),
     )
 
 
@@ -93,13 +94,17 @@ def _get_api_name(ctx: CollectContext, api_id: str, http: bool) -> tuple[str | N
     return name, reply is None and was_not_found(ctx, NOT_FOUND)
 
 
-def _add_stage(ctx: CollectContext, resource: str, stage: Stage) -> None:
+def _add_stage(ctx: CollectContext, resource: str, api_id: str, stage: Stage) -> None:
     updated = parse_iso(stage.updated)
     when = f", last updated {format_time(updated)}" if updated else ""
     inside = in_window(ctx.window, stage.updated)
     inside_text = " and was updated inside the window" if inside else ""
+    # API Gateway answers carry no ARN for an API or a stage, so none is built; the ids are enough to name them.
+    data = {"api_id": api_id, "stage_name": stage.name, "deployment_id": stage.deployment_id}
+    if stage.web_acl_arn:
+        data["web_acl_arn"] = stage.web_acl_arn
     ctx.evidence.add(
-        kind=INCIDENT_TIME if inside else CURRENT, resource=resource, time=updated, command=ctx.last_command,
+        kind=INCIDENT_TIME if inside else CURRENT, resource=resource, time=updated, command=ctx.last_command, data=data,
         summary=(
             f"Stage {stage.name} runs deployment {stage.deployment_id}{when}{inside_text}; "
             f"throttling {stage.throttling}; {stage.cache}"
@@ -160,7 +165,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
             )
     ctx.last_command = stage_command
     for stage in stages:
-        _add_stage(ctx, resource, stage)
+        _add_stage(ctx, resource, api_id, stage)
     ctx.last_command = deployments_command
     _add_deployments(ctx, resource, deployments)
     if name is None and not http:
