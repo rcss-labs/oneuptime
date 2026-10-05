@@ -23,13 +23,17 @@ from triage.metrics import MetricSpec, add_metric_facts
 from triage.window import format_time
 
 MAX_EVENTS = 30
-MAX_LOG_LINES = 20
+LINES_BEFORE_ONSET = 5
+LINES_FROM_ONSET = 15
+NEWEST_LINES = 20
+MAX_LINE_PART = 240
+DEFAULT_LEAD = timedelta(minutes=60)
 MAX_LOG_FILES = "10"
 MAX_EVENT_ITEMS = "50"
 MAX_MEMBERS = 6
 INSTANCE_NOT_FOUND = ("DBInstanceNotFound", "DBInstanceNotFoundFault")
 CLUSTER_NOT_FOUND = ("DBClusterNotFound", "DBClusterNotFoundFault")
-LOG_LINES_TO_READ = "200"
+LOG_LINES_TO_READ = "1000"
 TOP_WAIT_EVENTS = 5
 PROBLEM_LINE = re.compile(r"ERROR|FATAL|PANIC|(?i:deadlock)|\bError:")
 SQL_SERVER_ERROR = re.compile(r"\bError: \d+, Severity:")
@@ -37,6 +41,7 @@ MASK = "<value>"
 MAX_LOG_FILES_READ = 6
 MAX_LISTING_PAGES = 5
 LEADING_TIMESTAMP = re.compile(r"\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
+FILE_MINUTE = re.compile(r"(\d{4}-\d{2}-\d{2})-(\d{2})(\d{2})(?!\d)")
 FILE_HOUR = re.compile(r"(\d{4}-\d{2}-\d{2})[-.](\d{2})(?!\d)")
 FILE_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 EARLIEST = datetime.min.replace(tzinfo=timezone.utc)
@@ -274,16 +279,18 @@ def _error_files(files: list[dict]) -> list[dict]:
 
 
 def _file_span(file: dict) -> tuple[datetime, datetime]:
-    """When a log file may hold lines: from the hour or date in its name (else unknown) to its last write."""
+    """When a log file may hold lines: from the minute, hour or date in its name (else unknown) to its last write."""
     name = file.get("LogFileName", "")
     written = datetime.fromtimestamp(file.get("LastWritten", 0) / 1000, tz=timezone.utc)
-    hour, day = FILE_HOUR.search(name), FILE_DATE.search(name)
-    if hour and parse_iso(f"{hour.group(1)}T{hour.group(2)}:00:00Z"):
-        begin = parse_iso(f"{hour.group(1)}T{hour.group(2)}:00:00Z")
-        return begin, max(begin + timedelta(hours=1), written)
-    if day and parse_iso(f"{day.group(1)}T00:00:00Z"):
-        begin = parse_iso(f"{day.group(1)}T00:00:00Z")
-        return begin, max(begin + timedelta(days=1), written)
+    minute, hour, day = FILE_MINUTE.search(name), FILE_HOUR.search(name), FILE_DATE.search(name)
+    for match, form, length in (
+        (minute, "{0}T{1}:{2}:00Z", timedelta(minutes=1)),
+        (hour, "{0}T{1}:00:00Z", timedelta(hours=1)),
+        (day, "{0}T00:00:00Z", timedelta(days=1)),
+    ):
+        begin = parse_iso(form.format(*match.groups())) if match else None
+        if begin is not None:
+            return begin, max(begin + length, written)
     return EARLIEST, written
 
 
@@ -294,13 +301,21 @@ def _overlapping_files(files: list[dict], window) -> list[dict]:
     return sorted(inside, key=lambda f: (spans[f["LogFileName"]][0], f.get("LastWritten", 0)))
 
 
-def _choose_files(overlapping: list[dict], window) -> list[dict]:
+def _onset_file(overlapping: list[dict], onset: datetime) -> dict:
+    """The file covering the incident start (the latest to begin, then the first to end); without one, the last file
+    that ended before it, else the first that began after it."""
+    covering = [f for f in overlapping if _file_span(f)[0] <= onset < _file_span(f)[1]]
+    if covering:
+        return max(covering, key=lambda f: (_file_span(f)[0], -f.get("LastWritten", 0)))
+    ended = [f for f in overlapping if _file_span(f)[1] <= onset]
+    return max(ended, key=lambda f: _file_span(f)[1]) if ended else overlapping[0]
+
+
+def _choose_files(overlapping: list[dict], onset: datetime) -> list[dict]:
     """At most MAX_LOG_FILES_READ files: the one covering the incident start, the one before it, then the newest."""
     if not overlapping:
         return []
-    started = [f for f in overlapping if _file_span(f)[0] <= window.start]
-    latest_begin = max((_file_span(f)[0] for f in started), default=None)
-    cover = min((f for f in started if _file_span(f)[0] == latest_begin), key=lambda f: f.get("LastWritten", 0)) if started else overlapping[0]
+    cover = _onset_file(overlapping, onset)
     chosen = [cover]
     position = overlapping.index(cover)
     if position > 0:
@@ -308,6 +323,20 @@ def _choose_files(overlapping: list[dict], window) -> list[dict]:
     newest = sorted((f for f in overlapping if f not in chosen), key=lambda f: f.get("LastWritten", 0), reverse=True)
     chosen += newest[:MAX_LOG_FILES_READ - len(chosen)]
     return sorted(chosen, key=lambda f: overlapping.index(f))
+
+
+def _incident_start(ctx: CollectContext, targets: dict[str, str]) -> datetime:
+    """The incident start given as a target, as the changes collector takes it; without one, the window start plus the
+    standard 60-minute lead (cut to the window end)."""
+    given = targets.get("incident_start") or None
+    moment = parse_iso(given) if given else None
+    if given and moment is None:
+        ctx.evidence.add_error(
+            "", "InvalidTarget", "incident_start must be an ISO time with a timezone, for example 2026-10-04T10:50:00Z",
+        )
+    if moment is not None:
+        return moment
+    return min(ctx.window.start + DEFAULT_LEAD, ctx.window.end)
 
 
 def _line_time(line: str) -> datetime | None:
@@ -336,13 +365,54 @@ def _list_error_files(ctx: CollectContext, name: str) -> tuple[list[dict], bool,
     return _error_files(files), True, len(files)
 
 
-def _add_log_lines(ctx: CollectContext, name: str) -> None:
+def _read_error_entries(ctx: CollectContext, name: str, files: list[dict]) -> tuple[list[tuple[datetime, str]], list[str], str]:
+    """Error lines inside the window from the last lines of each file, each with the DETAIL line or SQL Server message
+    line that follows it, masked, without duplicates, in time order; the files read; and the last command."""
+    entries: dict[tuple[datetime, str], str] = {}
+    read_names, command = [], ctx.last_command
+    for file in files:
+        file_name = file.get("LogFileName", "")
+        portion = ctx.aws("rds", "download-db-log-file-portion", [
+            "--db-instance-identifier", name, "--log-file-name", file_name, "--number-of-lines", LOG_LINES_TO_READ,
+            "--no-paginate",
+        ])
+        if portion is None:
+            continue
+        command = ctx.last_command
+        read_names.append(file_name)
+        open_key: tuple[datetime, str] | None = None
+        for line in (portion.get("LogFileData") or "").splitlines():
+            moment = _line_time(line)
+            if PROBLEM_LINE.search(line) and moment is not None and ctx.window.start <= moment < ctx.window.end:
+                open_key = (moment, line) if (moment, line) not in entries else None
+                entries.setdefault((moment, line), _shorten(_mask_values(line.strip())))
+            elif open_key is not None and ("DETAIL:" in line or SQL_SERVER_ERROR.search(open_key[1])):
+                entries[open_key] += " | " + _shorten(_mask_values(line.strip()))
+                open_key = None
+            else:
+                open_key = None
+    return [(moment, text) for (moment, _), text in sorted(entries.items(), key=lambda item: item[0][0])], read_names, command
+
+
+def _shorten(text: str) -> str:
+    return text if len(text) <= MAX_LINE_PART else text[: MAX_LINE_PART - 1] + "…"
+
+
+def _lines_to_keep(entries: list[tuple[datetime, str]], onset: datetime) -> list[tuple[datetime, str]]:
+    """The error lines nearest before the incident start, the first ones from it, and the newest, in time order."""
+    before = [i for i, (moment, _) in enumerate(entries) if moment < onset]
+    after = [i for i, (moment, _) in enumerate(entries) if moment >= onset]
+    wanted = set(before[-LINES_BEFORE_ONSET:]) | set(after[:LINES_FROM_ONSET]) | set(range(len(entries))[-NEWEST_LINES:])
+    return [entries[i] for i in sorted(wanted)]
+
+
+def _add_log_lines(ctx: CollectContext, name: str, onset: datetime) -> None:
     listed = _list_error_files(ctx, name)
     if listed is None:
         return
     all_files, cut, count = listed
     overlapping = _overlapping_files(all_files, ctx.window)
-    files = _choose_files(overlapping, ctx.window)
+    files = _choose_files(overlapping, onset)
     cut_note = f", but the listing was cut after {MAX_LISTING_PAGES} pages, so later files could not be checked" if cut else ""
     if not files:
         ctx.evidence.add(
@@ -361,41 +431,31 @@ def _add_log_lines(ctx: CollectContext, name: str) -> None:
             kind=DERIVED, resource=f"db/{name}", command=ctx.last_command,
             summary=f"Error log files overlapping the window that were not read: {', '.join(skipped)}",
         )
-    inside, read_names, command = [], [], ctx.last_command
-    for file in files:
-        file_name = file.get("LogFileName", "")
-        portion = ctx.aws("rds", "download-db-log-file-portion", [
-            "--db-instance-identifier", name, "--log-file-name", file_name, "--number-of-lines", LOG_LINES_TO_READ,
-            "--no-paginate",
-        ])
-        if portion is None:
-            continue
-        command = ctx.last_command
-        read_names.append(file_name)
-        previous_kept: tuple[datetime, str, str] | None = None
-        for line in (portion.get("LogFileData") or "").splitlines():
-            moment = _line_time(line)
-            if PROBLEM_LINE.search(line) and moment is not None and ctx.window.start <= moment < ctx.window.end:
-                previous_kept = (moment, file_name, line)
-                inside.append(previous_kept)
-            elif previous_kept is not None and ("DETAIL:" in line or SQL_SERVER_ERROR.search(previous_kept[2])):
-                inside.append((moment or previous_kept[0], file_name, line))
-                previous_kept = None
-            else:
-                previous_kept = None
-    for moment, file_name, line in inside[-MAX_LOG_LINES:]:
-        ctx.evidence.add(
-            kind=INCIDENT_TIME, resource=f"db/{name}", time=moment, command=command,
-            summary=f"Database log line in {file_name} (last {LOG_LINES_TO_READ} lines of the file read)", excerpt=_mask_values(line.strip()),
-        )
-    if not inside and read_names:
-        ctx.evidence.add(
-            kind=DERIVED, resource=f"db/{name}", command=command,
-            summary=(
-                f"No error line inside the window was found in the last {LOG_LINES_TO_READ} lines read from "
-                f"{', '.join(read_names)}; earlier lines of those files were not read"
-            ),
-        )
+    entries, read_names, command = _read_error_entries(ctx, name, files)
+    lines_read = f"{int(LOG_LINES_TO_READ):,}"
+    if not entries:
+        if read_names:
+            ctx.evidence.add(
+                kind=DERIVED, resource=f"db/{name}", command=command,
+                summary=(
+                    f"No error line inside the window was found in the last {lines_read} lines read from "
+                    f"{', '.join(read_names)}; earlier lines of those files were not read"
+                ),
+            )
+        return
+    kept = _lines_to_keep(entries, onset)
+    from_onset = next((moment for moment, _ in kept if moment >= onset), kept[0][0])
+    ctx.evidence.add(
+        kind=INCIDENT_TIME, resource=f"db/{name}", time=from_onset, command=command,
+        summary=(
+            f"{len(entries)} error lines inside the window, {len(kept)} kept, {len(entries) - len(kept)} not kept "
+            f"(up to {LINES_BEFORE_ONSET} just before the incident start at {format_time(onset)}, the first "
+            f"{LINES_FROM_ONSET} from it, and the newest {NEWEST_LINES}); the last {lines_read} lines of each file "
+            f"were read, so earlier lines were not seen; files read: {', '.join(read_names)}"
+        ),
+        data={"lines": [text for _, text in kept]},
+        excerpt=next(text for moment, text in kept if moment == from_onset),
+    )
 
 
 def _add_metrics(ctx: CollectContext, name: str) -> None:
@@ -427,17 +487,17 @@ def _add_wait_events(ctx: CollectContext, name: str, resource_id: str) -> None:
     )
 
 
-def _collect_instance(ctx: CollectContext, instance: dict) -> None:
+def _collect_instance(ctx: CollectContext, instance: dict, onset: datetime) -> None:
     name = instance.get("DBInstanceIdentifier", "")
     _add_instance_state(ctx, instance)
     _add_events(ctx, name, "db-instance", "Instance")
-    _add_log_lines(ctx, name)
+    _add_log_lines(ctx, name, onset)
     _add_metrics(ctx, name)
     if instance.get("PerformanceInsightsEnabled") and instance.get("DbiResourceId"):
         _add_wait_events(ctx, name, instance["DbiResourceId"])
 
 
-def _collect_cluster(ctx: CollectContext, name: str) -> None:
+def _collect_cluster(ctx: CollectContext, name: str, onset: datetime) -> None:
     reply = ctx.aws("rds", "describe-db-clusters", ["--db-cluster-identifier", name], not_found=CLUSTER_NOT_FOUND)
     clusters = (reply or {}).get("DBClusters", [])
     if not clusters:
@@ -468,22 +528,23 @@ def _collect_cluster(ctx: CollectContext, name: str) -> None:
     for member in members[:MAX_MEMBERS]:
         instance = _describe_instance(ctx, member.get("DBInstanceIdentifier", ""))
         if instance is not None:
-            _collect_instance(ctx, instance)
+            _collect_instance(ctx, instance, onset)
 
 
 def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     name = targets["db"]
+    onset = _incident_start(ctx, targets)
     instance = _describe_instance(ctx, name)
     if instance is not None:
-        _collect_instance(ctx, instance)
+        _collect_instance(ctx, instance, onset)
     elif was_not_found(ctx, INSTANCE_NOT_FOUND):
-        _collect_cluster(ctx, name)
+        _collect_cluster(ctx, name, onset)
 
 
 COLLECTOR = Collector(
     name="rds",
     description="RDS instance or cluster state, events, error log lines, load and storage metrics, Performance Insights wait events",
     required=("db",),
-    optional=(),
+    optional=("incident_start",),
     run=collect,
 )

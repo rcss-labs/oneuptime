@@ -4,7 +4,7 @@ import re
 from fakes import FakeAws, access_denied
 from helpers import WINDOW_START, assert_read_only, fact_summaries, make_context
 from triage.collectors.rds import COLLECTOR, _mask_values
-from triage.window import parse_time
+from triage.window import Window, parse_time
 
 TARGETS = {"db": "orders-db"}
 IN_WINDOW = "2026-10-04T10:42:10.123000+00:00"
@@ -49,12 +49,22 @@ class ByArgument(FakeAws):
         return super().__call__(argv, timeout)
 
 
-def run(config_data, tmp_path, answers, fake=None):
+def run(config_data, tmp_path, answers, fake=None, incident_start=None, window=None):
     ctx, aws, kube = make_context(config_data, tmp_path, answers, collector="rds")
     if fake is not None:
         ctx.runner, aws = fake, fake
-    COLLECTOR.run(ctx, dict(TARGETS))
+    if window is not None:
+        ctx.window = Window(parse_time(window[0]), parse_time(window[1]))
+    targets = dict(TARGETS, **({"incident_start": incident_start} if incident_start else {}))
+    COLLECTOR.run(ctx, targets)
     return ctx, aws
+
+
+def log_lines(ctx):
+    """The kept error log lines (one fact holds them all) and that fact."""
+    facts = [f for f in ctx.evidence.facts if "lines" in f.data]
+    assert len(facts) <= 1
+    return (facts[0].data["lines"], facts[0]) if facts else ([], None)
 
 
 def by_summary(ctx, text):
@@ -64,7 +74,7 @@ def by_summary(ctx, text):
 def test_declares_its_targets():
     assert COLLECTOR.name == "rds"
     assert COLLECTOR.required == ("db",)
-    assert COLLECTOR.optional == ()
+    assert COLLECTOR.optional == ("incident_start",)
 
 
 def test_healthy_instance(config_data, tmp_path):
@@ -146,16 +156,18 @@ def test_error_log_files_are_read_and_filtered(config_data, tmp_path):
     ctx, aws = run(config_data, tmp_path, log_answers([hourly(10), hourly(11)], data))
     download = aws.called("rds", "download-db-log-file-portion")
     assert len(download) == 2
-    assert download[0][download[0].index("--number-of-lines") + 1] == "200"
+    assert download[0][download[0].index("--number-of-lines") + 1] == "1000"
     assert "--no-paginate" in download[0]
     listing = aws.called("rds", "describe-db-log-files")[0]
     assert listing[listing.index("--file-last-written") + 1] == str(WINDOW_START_MILLIS)
     assert listing[listing.index("--filename-contains") + 1] == "error"
     assert "--max-items" in listing
-    timed = [f for f in ctx.evidence.facts if "deadlock detected" in f.excerpt]
-    assert timed and timed[0].kind == "incident_time" and timed[0].time == "2026-10-04T10:42:11Z"
-    assert not any("too many connections" in f.excerpt for f in ctx.evidence.facts)
-    assert not any("checkpoint complete" in f.excerpt or "all fine" in f.excerpt for f in ctx.evidence.facts)
+    lines, fact = log_lines(ctx)
+    assert fact.kind == "incident_time" and fact.time == "2026-10-04T10:42:11Z"
+    # Both files answered with the same text; the same line is kept once.
+    assert len(lines) == 1 and "deadlock detected" in lines[0]
+    assert "too many connections" not in ctx.evidence.to_json()
+    assert "checkpoint complete" not in ctx.evidence.to_json() and "all fine" not in ctx.evidence.to_json()
     assert_read_only(ctx, aws)
 
 
@@ -207,15 +219,16 @@ def plain_file(name, minutes_after_start):
 def test_at_most_six_files_are_read_the_cover_file_first_then_the_newest(config_data, tmp_path):
     files = [plain_file(f"error/a{n}.log", n) for n in range(1, 9)]
     ctx, aws = run(config_data, tmp_path, log_answers(files, ""))
-    assert downloaded(aws) == ["error/a1.log", "error/a4.log", "error/a5.log", "error/a6.log", "error/a7.log", "error/a8.log"]
+    # No file covers the incident start (assumed 60 minutes after the window start); the last one before it is read first.
+    assert downloaded(aws) == ["error/a3.log", "error/a4.log", "error/a5.log", "error/a6.log", "error/a7.log", "error/a8.log"]
     fact = by_summary(ctx, "were not read")[0]
-    assert fact.kind == "derived" and "error/a2.log" in fact.summary and "error/a3.log" in fact.summary and "a8" not in fact.summary
+    assert fact.kind == "derived" and "error/a1.log" in fact.summary and "error/a2.log" in fact.summary and "a8" not in fact.summary
 
 
 def test_the_cover_file_and_the_one_before_it_are_chosen_before_newer_files(config_data, tmp_path):
     before = {"LogFileName": "error/postgresql.log.2026-10-04-09", "LastWritten": WINDOW_START_MILLIS + 30 * 60_000, "Size": 1}
     files = [before, hourly(10), hourly(11)] + [plain_file(f"error/z{n}.log", 180 + n) for n in range(1, 6)]
-    ctx, aws = run(config_data, tmp_path, log_answers(files, ""))
+    ctx, aws = run(config_data, tmp_path, log_answers(files, ""), incident_start="2026-10-04T10:00:00Z")
     read = downloaded(aws)
     assert len(read) == 6
     assert "error/postgresql.log.2026-10-04-10" in read and "error/postgresql.log.2026-10-04-09" in read
@@ -244,7 +257,7 @@ def test_a_daily_rotated_file_written_during_the_window_is_read(config_data, tmp
     daily = {"LogFileName": "error/postgresql.log.2026-10-04-00", "LastWritten": WINDOW_START_MILLIS + 6 * 3_600_000, "Size": 1}
     ctx, aws = run(config_data, tmp_path, log_answers([daily], "2026-10-04 10:30:00 UTC::@:[1]:ERROR:  onset"))
     assert downloaded(aws) == ["error/postgresql.log.2026-10-04-00"]
-    assert by_summary(ctx, "Database log line")
+    assert log_lines(ctx)[0]
     assert by_summary(ctx, "No error log") == []
 
 
@@ -261,8 +274,9 @@ def test_sql_server_error_log_and_its_error_lines(config_data, tmp_path):
     message = "2026-10-04 10:30:00.12 Logon       Login failed for user <hidden>."
     ctx, aws = run(config_data, tmp_path, log_answers(files, line + "\n" + message + "\n2026-10-04 10:31:00.12 Server      Started"))
     assert downloaded(aws) == ["log/ERROR"]
-    facts = [f for f in ctx.evidence.facts if "Error: 18456" in f.excerpt]
-    assert len(facts) == 1 and "Severity: 14, State: 8" in facts[0].excerpt and "Started" not in ctx.evidence.to_json()
+    lines, _ = log_lines(ctx)
+    assert len(lines) == 1 and "Error: 18456, Severity: 14, State: 8" in lines[0] and "Login failed for user" in lines[0]
+    assert "Started" not in ctx.evidence.to_json()
 
 
 def test_the_empty_case_names_the_listing_size_and_never_claims_more_than_it_knows(config_data, tmp_path):
@@ -277,7 +291,7 @@ def test_the_empty_case_names_the_listing_size_and_never_claims_more_than_it_kno
 
 def test_log_line_facts_say_which_portion_was_read(config_data, tmp_path):
     ctx, _ = run(config_data, tmp_path, log_answers([hourly(10)], "2026-10-04 10:30:00 UTC::@:[1]:ERROR:  onset"))
-    assert "last 200 lines" in by_summary(ctx, "Database log line")[0].summary
+    assert "last 1,000 lines of each file" in log_lines(ctx)[1].summary
 
 
 def test_no_line_in_the_window_is_stated_with_the_files_that_were_read(config_data, tmp_path):
@@ -295,15 +309,90 @@ def test_log_lines_outside_the_window_are_dropped(config_data, tmp_path):
     files = [error_file("error/e.log", 60_000)]
     data = "2026-10-04 18:05:00 UTC::@:[1]:ERROR:  late failure\n2026-10-04 10:05:00 UTC::@:[1]:ERROR:  in window failure"
     ctx, _ = run(config_data, tmp_path, log_answers(files, data))
-    assert [f.excerpt for f in ctx.evidence.facts if "failure" in f.excerpt] == ["2026-10-04 10:05:00 UTC::@:[1]:ERROR:  in window failure"]
+    assert log_lines(ctx)[0] == ["2026-10-04 10:05:00 UTC::@:[1]:ERROR:  in window failure"]
 
 
-def test_log_lines_are_capped_at_twenty(config_data, tmp_path):
-    files = [error_file("error/e.log", 1000)]
-    data = "\n".join(f"2026-10-04 10:{n:02d}:00 UTC::@:[1]:ERROR:  failure {n}" for n in range(30))
-    ctx, _ = run(config_data, tmp_path, log_answers(files, data))
-    lines = [f for f in ctx.evidence.facts if "failure" in f.excerpt]
-    assert len(lines) == 20 and lines[-1].time == "2026-10-04T10:29:00Z"
+def minute_lines(first_minute, count, word="failure"):
+    """Error lines one minute apart from 10:00 plus first_minute."""
+    return "\n".join(
+        f"2026-10-04 {10 + (first_minute + n) // 60:02d}:{(first_minute + n) % 60:02d}:00 UTC::@:[1]:ERROR:  {word}"
+        for n in range(count)
+    )
+
+
+def test_kept_lines_are_the_five_before_the_onset_the_first_fifteen_from_it_and_the_newest_twenty(config_data, tmp_path):
+    files = [error_file("error/e.log", 110 * 60_000)]
+    ctx, _ = run(config_data, tmp_path, log_answers(files, minute_lines(0, 100)), incident_start="2026-10-04T10:30:00Z")
+    lines, fact = log_lines(ctx)
+    minutes = [line[11:16] for line in lines]
+    expected = [f"10:{m:02d}" for m in range(25, 45)] + [f"{10 + m // 60:02d}:{m % 60:02d}" for m in range(80, 100)]
+    assert minutes == expected and len(lines) == 40
+    for part in ("100 error lines inside the window", "40 kept", "60 not kept"):
+        assert part in fact.summary
+    assert fact.time == "2026-10-04T10:30:00Z"
+    assert by_summary(ctx, "Database log line") == []
+
+
+def test_overlapping_choices_are_kept_once_in_time_order(config_data, tmp_path):
+    files = [error_file("error/e.log", 70 * 60_000)]
+    ctx, _ = run(config_data, tmp_path, log_answers(files, minute_lines(0, 60)), incident_start="2026-10-04T10:30:00Z")
+    lines, fact = log_lines(ctx)
+    assert [line[11:16] for line in lines] == [f"10:{m:02d}" for m in range(25, 60)]
+    assert "60 error lines inside the window" in fact.summary and "35 kept" in fact.summary and "25 not kept" in fact.summary
+
+
+def test_without_an_incident_start_the_onset_is_taken_as_sixty_minutes_after_the_window_start(config_data, tmp_path):
+    files = [error_file("error/e.log", 110 * 60_000)]
+    ctx, _ = run(config_data, tmp_path, log_answers(files, minute_lines(0, 110)))
+    lines, fact = log_lines(ctx)
+    assert lines[5][11:16] == "11:00" and lines[4][11:16] == "10:59"
+    assert "11:00" in fact.summary
+
+
+def test_an_invalid_incident_start_is_an_error_and_the_default_onset_is_used(config_data, tmp_path):
+    files = [error_file("error/e.log", 110 * 60_000)]
+    ctx, _ = run(config_data, tmp_path, log_answers(files, minute_lines(0, 110)), incident_start="yesterday")
+    assert [e["code"] for e in ctx.evidence.errors] == ["InvalidTarget"]
+    assert log_lines(ctx)[0][5][11:16] == "11:00"
+
+
+def test_the_onset_file_is_read_first_for_a_long_window(config_data, tmp_path):
+    files = [hourly(h) for h in range(9, 22)]
+    window = ("2026-10-04T09:30:00Z", "2026-10-04T21:30:00Z")
+    for start in ("2026-10-04T10:30:00Z", None):
+        _, aws = run(config_data, tmp_path, log_answers(files, ""), incident_start=start, window=window)
+        assert downloaded(aws) == [f"error/postgresql.log.2026-10-04-{h:02d}" for h in (9, 10, 18, 19, 20, 21)], start
+
+
+def minute_file(hhmm, written_minutes_after_ten):
+    return {"LogFileName": f"error/postgresql.log.2026-10-04-{hhmm}", "Size": 1,
+            "LastWritten": WINDOW_START_MILLIS + written_minutes_after_ten * 60_000}
+
+
+def test_minute_rotated_files_cover_only_their_own_minutes(config_data, tmp_path):
+    files = [minute_file(hhmm, written) for hhmm, written in (
+        ("0930", -1), ("1000", 29), ("1030", 59), ("1100", 89), ("1130", 119), ("1200", 149), ("1230", 179))]
+    window = ("2026-10-04T09:30:00Z", "2026-10-04T11:00:00Z")
+    ctx, aws = run(config_data, tmp_path, log_answers(files, ""), incident_start="2026-10-04T10:30:00Z", window=window)
+    assert downloaded(aws) == ["error/postgresql.log.2026-10-04-0930", "error/postgresql.log.2026-10-04-1000",
+                               "error/postgresql.log.2026-10-04-1030"]
+    assert by_summary(ctx, "overlapping the window that were not read") == []
+
+
+def test_a_detail_line_stays_with_its_error_line_in_one_kept_entry(config_data, tmp_path):
+    data = minute_lines(0, 3) + "\n2026-10-04 10:03:00 UTC::@:[1]:DETAIL:  Key (id)=(secret) already exists."
+    ctx, _ = run(config_data, tmp_path, log_answers([error_file("error/e.log", 60 * 60_000)], data))
+    lines, fact = log_lines(ctx)
+    assert len(lines) == 3 and "DETAIL:  Key (id)=(<value>)" in lines[2] and lines[2].startswith("2026-10-04 10:02:00")
+    assert "3 error lines inside the window" in fact.summary
+
+
+def test_a_daily_or_undated_file_says_only_its_last_thousand_lines_were_read(config_data, tmp_path):
+    daily = {"LogFileName": "error/postgresql.log.2026-10-04", "LastWritten": WINDOW_START_MILLIS + 3_600_000, "Size": 1}
+    ctx, aws = run(config_data, tmp_path, log_answers([daily], "2026-10-04 10:30:00 UTC::@:[1]:ERROR:  onset"))
+    call = aws.called("rds", "download-db-log-file-portion")[0]
+    assert call[call.index("--number-of-lines") + 1] == "1000"
+    assert "last 1,000 lines of each file" in log_lines(ctx)[1].summary
 
 
 def test_data_values_never_reach_a_log_fact(config_data, tmp_path):
@@ -594,8 +683,10 @@ def test_a_detail_line_directly_after_a_kept_line_is_included_after_masking(conf
         "2026-10-04 10:06:01 UTC::@:[1]:DETAIL:  not attached to a kept line (secret-ish)",
     ])
     ctx, _ = run(config_data, tmp_path, log_answers([error_file("error/e.log", 1000)], data))
-    detail = [f for f in ctx.evidence.facts if "DETAIL" in f.excerpt]
-    assert len(detail) == 1 and "Key (phone)=(<value>) already exists." in detail[0].excerpt
+    lines, _ = log_lines(ctx)
+    detail = [line for line in lines if "DETAIL" in line]
+    assert len(detail) == 1 and "Key (phone)=(<value>) already exists." in detail[0] and "users_phone_key" in detail[0]
+    assert "not attached" not in ctx.evidence.to_json()
     assert phone not in ctx.evidence.to_json()
 
 
