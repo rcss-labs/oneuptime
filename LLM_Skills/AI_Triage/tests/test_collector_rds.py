@@ -855,3 +855,46 @@ def test_cluster_members_are_capped_at_six(config_data, tmp_path):
     described = [c[c.index("--db-instance-identifier") + 1] for c in aws.called("rds", "describe-db-instances")]
     assert described == ["orders-db"] + names[:6]
     assert by_summary(ctx, "8 members")[0].kind == "derived"
+
+
+def endpoint_facts(ctx):
+    return [f for f in ctx.evidence.facts if "endpoint" in f.summary.lower() and f.kind == "current"]
+
+
+def test_an_instance_states_its_endpoint(config_data, tmp_path):
+    answers = healthy_answers(**{"rds describe-db-instances": instance(
+        Endpoint={"Address": "orders-db.example.com", "Port": 5432, "HostedZoneId": "Z1"})})
+    ctx, aws = run(config_data, tmp_path, answers)
+    facts = endpoint_facts(ctx)
+    assert len(facts) == 1 and facts[0].resource == "db/orders-db" and facts[0].command
+    assert "orders-db.example.com" in facts[0].summary and "5432" in facts[0].summary
+    assert facts[0].data == {"address": "orders-db.example.com", "port": 5432}
+    # No new call: the endpoint comes from the describe answer already read.
+    assert {tuple(c[1:3]) for c in aws.calls} == {("rds", "describe-db-instances"), ("rds", "describe-events"),
+                                                  ("rds", "describe-db-log-files"), ("cloudwatch", "get-metric-data")}
+    assert_read_only(ctx, aws)
+
+
+def test_an_aurora_cluster_states_its_writer_reader_and_custom_endpoints(config_data, tmp_path):
+    custom = [f"custom-{n}.cluster-custom.example.com" for n in range(12)]
+    cluster = {"DBClusters": [{"DBClusterIdentifier": "orders-db", "Status": "available", "Engine": "aurora-postgresql",
+                               "EngineVersion": "15.4", "Endpoint": "orders-db.cluster.example.com",
+                               "ReaderEndpoint": "orders-db.cluster-ro.example.com", "Port": 5432,
+                               "CustomEndpoints": custom, "DBClusterMembers": []}]}
+    answers = healthy_answers(**{"rds describe-db-instances": NOT_FOUND, "rds describe-db-clusters": cluster})
+    ctx, aws = run(config_data, tmp_path, answers)
+    facts = endpoint_facts(ctx)
+    assert len(facts) == 1 and facts[0].resource == "db/orders-db"
+    for part in ("orders-db.cluster.example.com", "orders-db.cluster-ro.example.com", "5432"):
+        assert part in facts[0].summary
+    assert facts[0].data["writer"] == "orders-db.cluster.example.com"
+    assert facts[0].data["reader"] == "orders-db.cluster-ro.example.com" and facts[0].data["port"] == 5432
+    assert facts[0].data["custom_endpoints"] == custom[:10] and facts[0].data["custom_endpoints_not_listed"] == 2
+    assert_read_only(ctx, aws)
+
+
+def test_an_instance_without_an_endpoint_yet_gets_no_endpoint_fact(config_data, tmp_path):
+    ctx, aws = run(config_data, tmp_path, healthy_answers(**{"rds describe-db-instances": instance(DBInstanceStatus="creating")}))
+    assert endpoint_facts(ctx) == [] and ctx.evidence.errors == []
+    ctx, _ = run(config_data, tmp_path, healthy_answers(**{"rds describe-db-instances": instance(Endpoint={})}))
+    assert endpoint_facts(ctx) == [] and ctx.evidence.errors == []

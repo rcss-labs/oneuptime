@@ -35,6 +35,7 @@ DEFAULT_LEAD = timedelta(minutes=60)
 MAX_LOG_FILES = "10"
 MAX_EVENT_ITEMS = "50"
 MAX_MEMBERS = 6
+MAX_CUSTOM_ENDPOINTS = 10
 INSTANCE_NOT_FOUND = ("DBInstanceNotFound", "DBInstanceNotFoundFault")
 CLUSTER_NOT_FOUND = ("DBClusterNotFound", "DBClusterNotFoundFault")
 LOG_LINES_TO_READ = "1000"
@@ -132,6 +133,38 @@ def _add_instance_state(ctx: CollectContext, instance: dict) -> None:
             f"{_pending_text(instance)}, parameter group {_parameter_groups_text(instance)}"
         ),
         data={key: instance.get(key) for key in ("DBInstanceStatus", "PendingModifiedValues")},
+    )
+
+
+def _add_instance_endpoint(ctx: CollectContext, instance: dict, command: str) -> None:
+    """Where the instance is reached now; nothing while it has no endpoint yet (for example while it is created)."""
+    endpoint = instance.get("Endpoint") or {}
+    if not endpoint.get("Address"):
+        return
+    name = instance.get("DBInstanceIdentifier")
+    ctx.evidence.add(
+        kind=CURRENT, resource=f"db/{name}", command=command,
+        summary=f"Instance {name} endpoint is {endpoint['Address']} port {endpoint.get('Port')}",
+        data={"address": endpoint["Address"], "port": endpoint.get("Port")},
+    )
+
+
+def _add_cluster_endpoints(ctx: CollectContext, name: str, cluster: dict, command: str) -> None:
+    """The writer, reader and custom endpoints of a cluster; nothing when it has none yet."""
+    writer, reader = cluster.get("Endpoint"), cluster.get("ReaderEndpoint")
+    custom = cluster.get("CustomEndpoints") or []
+    if not (writer or reader or custom):
+        return
+    data = {"writer": writer, "reader": reader, "port": cluster.get("Port"), "custom_endpoints": custom[:MAX_CUSTOM_ENDPOINTS]}
+    if len(custom) > MAX_CUSTOM_ENDPOINTS:
+        data["custom_endpoints_not_listed"] = len(custom) - MAX_CUSTOM_ENDPOINTS
+    ctx.evidence.add(
+        kind=CURRENT, resource=f"db/{name}", command=command,
+        summary=(
+            f"Cluster {name} writer endpoint is {writer or 'none'}, reader endpoint {reader or 'none'}, "
+            f"port {cluster.get('Port')}, {len(custom)} custom endpoints"
+        ),
+        data=data,
     )
 
 
@@ -518,6 +551,7 @@ def _add_wait_events(ctx: CollectContext, name: str, resource_id: str) -> None:
 def _collect_instance(ctx: CollectContext, instance: dict, onset: datetime) -> None:
     name = instance.get("DBInstanceIdentifier", "")
     _add_instance_state(ctx, instance)
+    _add_instance_endpoint(ctx, instance, ctx.last_command)
     _add_events(ctx, name, "db-instance", "Instance")
     _add_log_lines(ctx, name, onset)
     _add_metrics(ctx, name)
@@ -547,6 +581,7 @@ def _collect_cluster(ctx: CollectContext, name: str, onset: datetime) -> None:
             f"multi-AZ {'yes' if cluster.get('MultiAZ') else 'no'}, members {roles or 'none'}"
         ),
     )
+    _add_cluster_endpoints(ctx, name, cluster, ctx.last_command)
     _add_events(ctx, name, "db-cluster", "Cluster")
     if len(members) > MAX_MEMBERS:
         ctx.evidence.add(
