@@ -329,21 +329,46 @@ def test_an_action_without_a_cause_exits_2(command, skill_dir, case_dir):
     assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 2 and judge.calls == []
 
 
-def test_a_malformed_answer_run_writes_a_failed_summary_and_warns(command, skill_dir, case_dir, capsys):
+def failing_judge(reason):
     from triage.judge_client import JudgeUnavailable
     judge = FakeJudge()
     base = make_responder()
 
     def answer(state, questions):
         if len(judge.calls) == 9:
-            raise JudgeUnavailable("MalformedAnswer: action_specific")
+            raise JudgeUnavailable(reason)
         return base(state, questions)
 
     judge.answers = answer
-    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 0
+    return judge
+
+
+def test_a_malformed_answer_run_writes_a_failed_summary_and_exits_1(command, skill_dir, case_dir, capsys):
+    judge = failing_judge("MalformedAnswer: action_specific")
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 1
     captured = capsys.readouterr()
-    assert str(case_dir / "judgments" / "summary.json") in captured.out and "run again" in captured.err
-    assert json.loads((case_dir / "judgments" / "summary.json").read_text())["status"] == "failed"
+    assert str(case_dir / "judgments" / "summary.json") in captured.out
+    assert "judging failed" in captured.err and "run again" in captured.err
+    summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
+    assert summary["status"] == "failed" and summary["typesafe"].startswith("failed: MalformedAnswer")
+
+
+def test_any_other_failure_after_calls_began_exits_1_with_a_failed_summary(command, skill_dir, case_dir):
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=FakeJudge(lambda state, questions: {})) == 1
+    summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
+    assert summary["status"] == "failed" and summary["typesafe"].startswith("failed: ")
+
+
+def test_an_unavailable_service_run_exits_0_with_an_unavailable_value(command, skill_dir, case_dir):
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=failing_judge("the connection failed")) == 0
+    summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
+    assert summary["status"] == "unavailable" and summary["typesafe"] == "unavailable: the connection failed"
+
+
+def test_a_complete_run_exits_0_and_is_available(command, skill_dir, case_dir):
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=FakeJudge(make_responder())) == 0
+    summary = json.loads((case_dir / "judgments" / "summary.json").read_text())
+    assert summary["status"] == "complete" and summary["typesafe"] == "available"
 
 
 # ad hoc: id, reason, size, odd summaries

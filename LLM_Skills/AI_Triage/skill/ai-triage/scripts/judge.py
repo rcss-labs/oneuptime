@@ -2,8 +2,9 @@
 """Check Claude's conclusions with TypeSafe: judge the report draft, locate a service, or ask one ad hoc question.
 
 Exit codes: 0 done (also when TypeSafe is unavailable; the summary records it),
-1 the report draft, the case input, or a question file is unusable, 2 usage, config, or case error, or a report draft that breaks a rule
-(duplicate ids, a reserved id, supporting or contradicting that is not a list).
+1 judging failed part-way (a malformed answer or another failure; run it again) or the report draft,
+the case input, or a question file is unusable, 2 usage, config, or case error, or a report draft that
+breaks a rule (duplicate ids, a reserved id, supporting or contradicting that is not a list, too long a state).
 """
 from __future__ import annotations
 
@@ -72,9 +73,10 @@ def _run(args: argparse.Namespace, config, judge: Judge | None) -> int:
     questions = load_questions(default_questions_path(args.skill_dir))
     judge = judge if judge is not None else TypeSafeJudge(config.typesafe_model)
     summary = run_judgments(args.case_dir, config, judge, questions, _rng(args.case_dir))
+    print(args.case_dir / "judgments" / "summary.json")
     if summary.get("status") == "failed":
         print(f"judging failed ({summary['typesafe']}); every label is candidate", file=sys.stderr)
-    print(args.case_dir / "judgments" / "summary.json")
+        return 1
     return 0
 
 

@@ -117,6 +117,7 @@ class JudgeSession:
         self.config = config
         self.redactor = redactor
         self.model: str | None = None
+        self.calls_made = 0
 
     def prepare(self, value: Any) -> Any:
         """The value as it may leave this machine: redacted and with account ids replaced."""
@@ -131,6 +132,7 @@ class JudgeSession:
         size = len(json.dumps(_json_safe(prepared)))
         if size > MAX_STATE_CHARS:
             raise JudgmentError([f"the state for {kind} {subject} is {size} characters, over the limit of {MAX_STATE_CHARS}; send less"])
+        self.calls_made += 1
         reply = self.judge.ask(prepared, questions)
         self.store.save(kind, subject, prepared, questions, reply)
         self.model = reply.model
@@ -419,11 +421,10 @@ def _finding_gates(cause: dict, verdicts: dict[str, dict], partial: bool = False
 
 def _stopped_summary(
     config: TriageConfig, report: dict, findings: dict[str, dict], reason: str, model: str | None,
-    verdicts: dict[str, dict], cause_answers: dict[str, dict],
+    verdicts: dict[str, dict], cause_answers: dict[str, dict], failed: bool,
 ) -> dict:
     """The summary of a run that stopped part-way: a failed run, or a service that became unavailable."""
-    failed = _failed_run(reason)
-    summary = _base_summary(config, f"unavailable: {reason}; judging failed and {RUN_AGAIN}" if failed else f"unavailable: {reason}", model)
+    summary = _base_summary(config, f"failed: {reason}; {RUN_AGAIN}" if failed else f"unavailable: {reason}", model)
     summary["status"] = "failed" if failed else "unavailable"
     for cause in report["causes"]:
         known_failures = _known_failures(cause, verdicts, cause_answers)
@@ -620,14 +621,20 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
         rank = rank_causes(session, questions, causes, report["symptoms"], findings, verdicts, rng)
         action_answers = judge_actions(session, questions, actions, causes)
     except JudgeUnavailable as unavailable:
-        summary = _stopped_summary(config, report, findings, unavailable.reason, session.model, verdicts, cause_answers)
+        summary = _stopped_summary(config, report, findings, unavailable.reason, session.model, verdicts, cause_answers,
+                                   failed=_failed_run(unavailable.reason))
+    except Exception as error:
+        if not session.calls_made:
+            raise
+        summary = _stopped_summary(config, report, findings, type(error).__name__, session.model, verdicts, cause_answers, failed=True)
     else:
         summary = _compose_summary(config, report, findings, parse_time(case["incident_start"]), session.model,
                                    verdicts, cause_answers, rank, action_answers)
     summary["draft_digest"] = draft_digest(report, findings, case_identity(case))
     summary["adhoc"] = adhoc
     write_summary(case_dir, summary)
-    (case_dir / "judgments" / (SUMMARY_NAME + ".stale")).unlink(missing_ok=True)
+    if summary["status"] != "failed":  # a failed run keeps the retired summary for inspection
+        (case_dir / "judgments" / (SUMMARY_NAME + ".stale")).unlink(missing_ok=True)
     return summary
 
 

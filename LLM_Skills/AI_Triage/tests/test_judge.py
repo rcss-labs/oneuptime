@@ -419,15 +419,13 @@ def test_the_resource_match_fallback_name_is_also_reserved(tmp_path, config):
 
 # a failed run leaves no summary that could vouch for the draft
 
-def test_a_run_that_fails_retires_the_previous_summary(tmp_path, config):
+def test_a_run_that_fails_replaces_the_previous_summary_with_a_failed_one(tmp_path, config):
     case_dir = build_case(tmp_path, config)
     first = run(case_dir, config, FakeJudge(make_responder()))
     assert first["causes"]["C1"]["label"] == "confirmed"
-    broken = FakeJudge(lambda state, questions: {})
-    with pytest.raises(KeyError):
-        run(case_dir, config, broken)
+    failed = run(case_dir, config, FakeJudge(lambda state, questions: {}))
     judgments = case_dir / "judgments"
-    assert not (judgments / "summary.json").exists()
+    assert json.loads((judgments / "summary.json").read_text())["status"] == "failed" and failed["status"] == "failed"
     assert json.loads((judgments / "summary.json.stale").read_text()) == first
 
 
@@ -444,8 +442,8 @@ def test_a_draft_refused_before_any_call_also_retires_the_previous_summary(tmp_p
 def test_a_run_that_succeeds_leaves_no_stale_file(tmp_path, config):
     case_dir = build_case(tmp_path, config)
     run(case_dir, config, FakeJudge(make_responder()))
-    with pytest.raises(KeyError):
-        run(case_dir, config, FakeJudge(lambda state, questions: {}))
+    run(case_dir, config, FakeJudge(lambda state, questions: {}))
+    assert (case_dir / "judgments" / "summary.json.stale").is_file()
     run(case_dir, config, FakeJudge(make_responder()))
     assert (case_dir / "judgments" / "summary.json").is_file()
     assert not (case_dir / "judgments" / "summary.json.stale").exists()
@@ -502,7 +500,7 @@ def failing_at(call_number, reason, responder=None):
 def test_a_malformed_answer_is_a_failed_run_with_every_label_candidate(tmp_path, config, reason):
     case_dir = build_case(tmp_path, config)
     summary = run(case_dir, config, failing_at(9, reason))
-    assert summary["status"] == "failed" and summary["typesafe"].startswith(f"unavailable: {reason}")
+    assert summary["status"] == "failed" and summary["typesafe"].startswith(f"failed: {reason}")
     assert {cause["label"] for cause in summary["causes"].values()} == {"candidate"}
     assert {action["label"] for action in summary["actions"].values()} == {"candidate"}
     assert all("run again" in cause["reasons"][0] for cause in summary["causes"].values())
@@ -510,8 +508,26 @@ def test_a_malformed_answer_is_a_failed_run_with_every_label_candidate(tmp_path,
     assert summary["findings"] == {} and len(summary["draft_digest"]) == 64
 
 
+def test_any_other_failure_after_calls_began_is_a_failed_run_too(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    first = run(case_dir, config, FakeJudge(make_responder()))
+    summary = run(case_dir, config, FakeJudge(lambda state, questions: {}))
+    assert summary["status"] == "failed" and summary["typesafe"].startswith("failed: KeyError")
+    assert {cause["label"] for cause in summary["causes"].values()} == {"candidate"}
+    assert "KeyError" in summary["typesafe"] and "evidence_relation" not in summary["typesafe"]
+
+
+def test_a_failure_before_any_call_still_raises(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    edit_report(case_dir, lambda r: r["causes"].append(dict(r["causes"][0])))
+    with pytest.raises(DraftRuleError):
+        run(case_dir, config, FakeJudge(make_responder()))
+    assert not (case_dir / "judgments" / "summary.json").exists()
+
+
 def test_an_unavailable_service_part_way_keeps_the_probable_cap_when_nothing_is_ruled_out(tmp_path, config):
     summary = run(build_case(tmp_path, config), config, failing_at(9, "the connection failed"))
+    assert summary["typesafe"] == "unavailable: the connection failed"
     assert summary["status"] == "unavailable" and summary["causes"]["C1"]["label"] == "probable"
 
 
