@@ -30,19 +30,24 @@ and case folder from the plan's own lines.
 | status `closed` and an end time before the incident start | resolved before the incident; not the cause | its end time |
 | "AWS Health events are not available: AWS Health needs a Business or Enterprise support plan" | the account cannot see Health through the API | the public AWS status page, outside this skill; say the question is open |
 | no Health event | no event visible for the account and region and window; the API shows only events that affect the account and may lag | other evidence; do not treat it as proof of no AWS fault |
-| "Service S has N quotas with usage tracking, for example: <name> = <value>, ..." | `current`; the quota values only, not the usage | usage from the metric below |
+| "N events in other regions were left out" | the collector keeps only events of this region or global ones; this says how many it dropped | nothing, unless the symptoms are in another region too: collect there |
+| "Service S has N quotas with usage tracking. <name>: limit L, peak P (X% of the limit); ..." | `current` fact; the quotas are sorted by share of the limit, highest first, and the data holds the full list with each peak time | the top entries; a quota far below its limit is ruled out |
+| "<name>: limit L, usage could not be read" | the usage metric returned nothing or was denied | the collector's errors; the quota is neither ruled in nor out |
+| "<name>: limit L, peak P" with no percent | the limit is zero or unknown | the quota in the lead below |
+| "Quota Q of service S reached X% of its limit: peak P of L at T" | incident-time, with the peak time: usage reached 80 percent or more of the limit in the window | whether the peak time precedes the first errors |
+| "...; K more tracked quotas were not read" | only the first 10 tracked quotas of a service were read | name the quota from the error and collect it with `service_codes` and a `--suffix`, or read it below |
+| "... M more are in the data" | the summary was cut for length | `data["quotas"]` of the same fact |
 
-The collector does not read usage or compute how close it is to a limit, and
-the list shows only the first ten quotas that have usage tracking. Compare usage
-with the value from the lead below. Events that overlap the window are listed
-for all regions; check each fact's region. Health facts carry times; quota facts are `current`.
+Usage is the peak of the quota's usage metric in the window, as a share of the limit.
+Health and near-limit facts carry times; the per-service quota fact is `current`.
 
 ## Common causes
 
 1. **A service quota is exhausted.** Evidence: an error naming a limit or throttling
-   ("LimitExceeded", "TooManyRequests"), the quota value from the fact, and usage at
-   or near it from the usage metric. Rule out: usage well below the value. Work
-   order: the quota name, code, current value, and observed usage; mitigation is a
+   ("LimitExceeded", "TooManyRequests"), and a near-limit fact (80 percent or more) or a
+   quota fact with a peak at the limit, with its peak time before the errors. Rule out:
+   peak well below the limit, or the peak after the errors. Work
+   order: the quota name, code, limit, and the observed peak with its time; mitigation is a
    quota increase request, the permanent fix is capacity alerting on usage.
 2. **An AWS event affects the region or service.** Evidence: a Health event for the
    service in your region starting before or at the incident, and the same symptom in
@@ -52,8 +57,8 @@ for all regions; check each fact's region. Health facts carry times; quota facts
    mitigation is waiting or failing over by the owner's plan.
 3. **A scheduled change reached its date.** Evidence: a scheduledChange event whose
    time falls in the window and a resource it names. Work order: the resource and the event.
-4. **A quota was reached because of a runaway process.** Evidence: usage rising
-   steadily before the start. Work order: what created the resources (see `cloudtrail.md`).
+4. **A quota was reached because of a runaway process.** Evidence: a near-limit fact whose
+   usage rose steadily before the start (compare with the week before if collected). Work order: what created the resources (see `cloudtrail.md`).
 
 Do not suspect AWS because the cause is unknown. Require a Health event, or many
 unrelated failures starting together in one region with no change anywhere.
@@ -70,7 +75,6 @@ When the collector's facts are not enough, read directly by `reference/reading.m
 ```bash
 aws health describe-event-details --event-arns <event ARN> --profile <triage profile> --region us-east-1 --query 'successfulSet[].{type:event.eventTypeCode,start:event.startTime,end:event.endTime,text:eventDescription.latestDescription}' 2>/dev/null
 aws service-quotas list-service-quotas --service-code <service code> --profile <triage profile> --region <region> --max-items 50 --query 'Quotas[?contains(QuotaName,`<name fragment>`)].{name:QuotaName,code:QuotaCode,value:Value,adjustable:Adjustable,usageMetric:UsageMetric}' 2>/dev/null
-aws cloudwatch get-metric-statistics --namespace AWS/Usage --metric-name ResourceCount --dimensions Name=Type,Value=Resource Name=Resource,Value=<resource name> Name=Service,Value=<service name> Name=Class,Value=None --start-time <window start> --end-time <window end> --period 300 --statistics Maximum --profile <triage profile> --region <region> --query 'Datapoints[].{time:Timestamp,usage:Maximum}' 2>/dev/null
 ```
 
-The usage metric's namespace, name, and dimensions come from the `UsageMetric` field of the quota.
+The collector gives the quota's name, limit, and usage, but not its code or whether the limit can be raised; the second command reads those.
