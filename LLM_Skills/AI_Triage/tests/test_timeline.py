@@ -150,3 +150,35 @@ def test_evidence_file_with_malformed_facts_is_reported_not_a_crash(tmp_path):
     (case / "evidence" / "worse-prod-main-eu-west-1.json").write_text(json.dumps({"collector": "worse", "facts": [1]}))
     rows = build_timeline(case)
     assert rows[-1]["source"] == "timeline" and "2 evidence files" in rows[-1]["text"] and "unreadable" in rows[-1]["text"]
+
+
+def _metric_facts(case_dir):
+    evidence = Evidence("rds", "prod-main", "eu-west-1", WINDOW)
+    for summary, data in (("CPUUtilization peaked at 97, up from 20 a week earlier", {"notable": True}),
+                          ("FreeableMemory was about the same as a week earlier", {"notable": False}),
+                          ("ReadLatency was about the same as a week earlier", {"notable": False}),
+                          ("Failover started on the writer", {})):
+        evidence.add(kind=INCIDENT_TIME, resource="db", summary=summary, time="2026-10-04T10:40:00Z", data=data)
+    evidence.write(case_dir)
+
+
+def test_metric_facts_that_showed_no_change_are_left_out_and_counted(tmp_path):
+    case = make_case(tmp_path)
+    _metric_facts(case)
+    rows = build_timeline(case)
+    texts = [row["text"] for row in rows if row["source"] == "rds"]
+    assert texts == ["CPUUtilization peaked at 97, up from 20 a week earlier", "Failover started on the writer"]
+    note = "2 metric facts that showed no change were left out; they are in the evidence files"
+    assert [row["text"] for row in rows if row["source"] == "timeline"] == [note]
+    assert render_rows(rows).endswith("\n\n" + note)
+
+
+def test_a_notable_flag_that_is_not_exactly_false_keeps_the_fact(tmp_path):
+    case = make_case(tmp_path)
+    evidence = Evidence("rds", "prod-main", "eu-west-1", WINDOW)
+    for flag in (0, None, "false"):
+        evidence.add(kind=INCIDENT_TIME, resource="db", summary=f"flag {flag!r}", time="2026-10-04T10:40:00Z", data={"notable": flag})
+    evidence.write(case)
+    rows = build_timeline(case)
+    assert len([row for row in rows if row["source"] == "rds"]) == 3
+    assert not any(row["source"] == "timeline" for row in rows)

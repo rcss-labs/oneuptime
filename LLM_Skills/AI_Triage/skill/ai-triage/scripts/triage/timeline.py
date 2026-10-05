@@ -28,7 +28,13 @@ def _row(time: str, source: str, text: str, fact_id: str | None = None, resource
     return {"time": time, "source": source, "fact_id": fact_id, "resource": resource, "text": text}
 
 
-def _raw_rows(case_dir: Path, case: dict, incident: dict, warnings: list[str]) -> list[dict]:
+def _shows_no_change(fact: dict) -> bool:
+    """A metric fact flagged as not notable (about the same as before); a fact without the flag is kept."""
+    data = fact.get("data")
+    return isinstance(data, dict) and data.get("notable") is False
+
+
+def _raw_rows(case_dir: Path, case: dict, incident: dict, warnings: list[str], unchanged: list[str]) -> list[dict]:
     rows = []
     incident_times = case.get("incident") if isinstance(case.get("incident"), dict) else {}
     for key, text in _INCIDENT_TEXTS:
@@ -42,6 +48,9 @@ def _raw_rows(case_dir: Path, case: dict, incident: dict, warnings: list[str]) -
     for file_name, document in evidence_documents(case_dir, warnings):
         for fact in document.get("facts", []):
             if isinstance(fact, dict) and fact.get("kind") == INCIDENT_TIME and fact.get("time"):
+                if _shows_no_change(fact):
+                    unchanged.append(file_name)
+                    continue
                 fact_id = fact.get("id")
                 rows.append(_row(fact["time"], str(document.get("collector", "")), str(fact.get("summary", "")),
                                  qualified_id(file_name, fact_id) if isinstance(fact_id, str) else _BAD_ID,
@@ -60,7 +69,8 @@ def build_timeline(case_dir: Path) -> list[dict]:
     rows = []
     skipped = 0
     unreadable_files: list[str] = []
-    for row in _raw_rows(case_dir, case, incident, unreadable_files):
+    unchanged: list[str] = []
+    for row in _raw_rows(case_dir, case, incident, unreadable_files, unchanged):
         if row["fact_id"] == _BAD_ID:
             skipped += 1
             continue
@@ -83,6 +93,8 @@ def build_timeline(case_dir: Path) -> list[dict]:
         notes.append(f"{dropped} more rows farther from the incident start were left out")
     if skipped:
         notes.append(f"{skipped} events with an unreadable time or fact id were left out")
+    if unchanged:
+        notes.append(f"{len(unchanged)} metric facts that showed no change were left out; they are in the evidence files")
     if unreadable_files:
         notes.append(f"{len(unreadable_files)} evidence files were unreadable and left out")
     for text in notes:
