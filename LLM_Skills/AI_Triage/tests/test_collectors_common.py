@@ -192,8 +192,8 @@ def test_secret_and_personal_words_beat_setting_words(name):
 
 
 @pytest.mark.parametrize("name", ["SALT", "DB_PW", "PIN", "PASSWORD_HASH", "CREDS", "NEW_RELIC_LICENSE", "OTP_SEED",
-                                  "JWT", "PRIVATE", "SENTRY_DSN", "HMAC", "TLS_CERT", "dbPw",
-                                  "PASSCODE", "CODE", "OTP", "MFA", "PEPPER", "NONCE", "API_KEY"])
+                                  "JWT", "SENTRY_DSN", "HMAC", "TLS_CERT", "dbPw", "PINCODE", "PASSCODE",
+                                  "ACCESS_CODE", "PRIVATE_KEY", "OTP", "MFA", "PEPPER", "NONCE", "API_KEY"])
 def test_secret_looking_name_components_always_hide(name):
     assert env_summary([(name, "info")]) == {name: hidden("info")}
     assert env_summary([(name, "db.example.com")]) == {name: hidden("db.example.com")}
@@ -201,7 +201,7 @@ def test_secret_looking_name_components_always_hide(name):
 
 # The redactor does not read these as secret names (one source for name checks, ruling 1), so only the
 # value type decides: a word stays hidden, a three-label host is shown (rule 4), and MAX_CONN-style counts are numbers.
-@pytest.mark.parametrize("name", ["SIGNING", "CONN", "KEY", "PINCODE"])
+@pytest.mark.parametrize("name", ["SIGNING", "CONN", "KEY", "CODE", "PRIVATE"])
 def test_names_the_redactor_does_not_flag_are_decided_by_value_type(name):
     assert env_summary([(name, "info")]) == {name: hidden("info")}
     assert env_summary([(name, "db.example.com")]) == {name: "db.example.com"}
@@ -692,3 +692,11 @@ def test_a_trailing_unit_keeps_the_kind_of_the_part_before_it(name, value):
 def test_a_unit_part_does_not_widen_what_is_shown():
     assert not is_shown("REQUEST_TIMEOUT_MS", PW)
     assert not is_shown("DB_PASSWORD_MS", "1500")
+
+
+
+# CODE and PRIVATE alone are not secret names (redactor ruling) and have no kind: only any-name shapes show.
+@pytest.mark.parametrize("name", ["CODE", "PRIVATE", "ERROR_CODE", "EXIT_CODE", "PRIVATE_SUBNETS"])
+@pytest.mark.parametrize("value", [PW, PIN, TOK15])
+def test_names_without_a_kind_hide_words_numbers_and_short_tokens(name, value):
+    assert not is_shown(name, value)
