@@ -150,7 +150,7 @@ def test_cloudfront_metrics_use_us_east_1_and_global_region_dimension(config_dat
     assert metric["Namespace"] == "AWS/CloudFront"
     assert metric["Dimensions"] == [{"Name": "DistributionId", "Value": "E1EXAMPLE"},
                                     {"Name": "Region", "Value": "Global"}]
-    assert by_summary(ctx, "5xxErrorRate (Average): peak 8.5")
+    assert [f.data["maximum"] for f in by_summary(ctx, "5xxErrorRate (Average)")] == [8.5]
 
 
 def test_missing_distribution(config_data, tmp_path):

@@ -234,7 +234,7 @@ def test_nat_gateway_metrics(config_data, tmp_path):
     metric = sent[0]["MetricStat"]["Metric"]
     assert metric["Namespace"] == "AWS/NATGateway"
     assert metric["Dimensions"] == [{"Name": "NatGatewayId", "Value": "nat-0aaa"}]
-    assert by_summary(ctx, "ErrorPortAllocation nat-0aaa (Sum): peak 37")
+    assert [f.data["maximum"] for f in by_summary(ctx, "ErrorPortAllocation nat-0aaa (Sum)")] == [37]
 
 
 def test_built_in_default_deny_rules_are_not_listed(config_data, tmp_path):

@@ -116,8 +116,8 @@ def test_metrics(config_data, tmp_path):
         {"Id": "m1", "Timestamps": ["2026-10-04T10:41:00+00:00"], "Values": [7.0]},
     ]}
     ctx, aws, _ = run(config_data, tmp_path, answers(**{"cloudwatch get-metric-data": results}))
-    assert with_text(ctx, "Errors (Sum): peak 40")
-    assert with_text(ctx, "Throttles (Sum): peak 7")
+    assert [f.data["maximum"] for f in with_text(ctx, "Errors (Sum)")] == [40]
+    assert [f.data["maximum"] for f in with_text(ctx, "Throttles (Sum)")] == [7]
     assert len([f for f in ctx.evidence.facts if "no data was returned" in f.summary]) == 3
 
 

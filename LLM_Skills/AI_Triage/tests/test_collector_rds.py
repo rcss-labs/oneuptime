@@ -747,7 +747,7 @@ def test_secret_in_log_line_never_reaches_the_document(config_data, tmp_path):
 def test_metrics_use_the_instance_dimension_and_stats(config_data, tmp_path):
     results = {"MetricDataResults": [{"Id": "m0", "Timestamps": ["2026-10-04T10:41:00+00:00"], "Values": [97.5]}]}
     ctx, aws = run(config_data, tmp_path, healthy_answers(**{"cloudwatch get-metric-data": results}))
-    assert by_summary(ctx, "CPUUtilization (Average): peak 97.5")
+    assert [f.data["maximum"] for f in by_summary(ctx, "CPUUtilization (Average)")] == [97.5]
     call = aws.called("cloudwatch", "get-metric-data")[0]
     queries = json.loads(call[call.index("--metric-data-queries") + 1])
     stats = {q["MetricStat"]["Metric"]["MetricName"]: q["MetricStat"]["Stat"] for q in queries}
