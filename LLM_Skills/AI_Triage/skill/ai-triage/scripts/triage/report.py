@@ -309,8 +309,6 @@ def _check_status(report: dict, parts: dict, problems: list[str]) -> None:
         if not isinstance(top, str) or top not in causes:
             problems.append("summary.top_cause: not a known cause id")
         else:
-            if causes[top].get("label") not in ("confirmed", "probable"):
-                problems.append("summary.top_cause: the top cause must be labelled confirmed or probable")
             only_cause = len(parts["causes"]) == 1
             if not any(h.get("result") == "confirmed" and (h.get("cause") == top or (h.get("cause") is None and only_cause))
                        for _, h in parts["hypotheses"]):
@@ -321,6 +319,18 @@ def _check_status(report: dict, parts: dict, problems: list[str]) -> None:
     if status == "unresolved":
         if top not in (None, ""):
             problems.append("summary.top_cause: must be null or empty when status is unresolved")
+
+
+def _check_status_labels(report: dict, parts: dict, problems: list[str]) -> None:
+    """The status rules that involve labels."""
+    status = report.get("status")
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    top = summary.get("top_cause")
+    causes = _by_id(parts["causes"])
+    if status == "cause_found" and isinstance(top, str) and top in causes:
+        if causes[top].get("label") not in ("confirmed", "probable"):
+            problems.append("summary.top_cause: the top cause must be labelled confirmed or probable")
+    if status == "unresolved":
         for index, cause in parts["causes"]:
             if cause.get("label") == "confirmed":
                 problems.append(f"causes[{index}]: status is unresolved, so no cause may be labelled confirmed")
@@ -336,14 +346,20 @@ def _check_actions(config: TriageConfig, parts: dict, findings: dict[str, dict],
         cause = causes.get(cause_id) if isinstance(cause_id, str) else None
         if cause is None:
             problems.append(f"{where}.cause: not a known cause id")
-        elif action.get("label") == "recommended" and cause.get("label") != "confirmed":
-            problems.append(f"{where}: recommended, but its cause is not labelled confirmed")
         target = action.get("target") if isinstance(action.get("target"), dict) else {}
         alias = target.get("account_alias")
         if isinstance(alias, str) and alias.strip() and alias not in config.accounts:
             problems.append(f"{where}.target.account_alias: not an account in the config")
         if not any(i in findings for i in _text_ids(action.get("finding_ids"))):
             problems.append(f"{where}.finding_ids: needs at least one valid finding")
+
+
+def _check_action_labels(parts: dict, problems: list[str]) -> None:
+    causes = _by_id(parts["causes"])
+    for index, action in parts["actions"]:
+        cause = causes.get(action.get("cause")) if isinstance(action.get("cause"), str) else None
+        if cause is not None and action.get("label") == "recommended" and cause.get("label") != "confirmed":
+            problems.append(f"actions[{index}]: recommended, but its cause is not labelled confirmed")
 
 
 def _check_hypothesis_causes(parts: dict, problems: list[str]) -> None:
@@ -644,27 +660,48 @@ def _too_deep(value: Any) -> bool:
     return False
 
 
-def validate_report(report: Any, case: dict, findings: dict[str, dict], config: TriageConfig) -> list[str]:
-    """Every problem that stops the report from being rendered. An empty list means it may be rendered.
-
-    Never raises on a malformed report, and no message repeats a value from the report.
-    """
+def _draft_problems(report: Any, findings: dict[str, dict], config: TriageConfig) -> tuple[list[str], dict | None]:
+    """The checks that do not depend on labels or judgments, and the parts of the draft they found."""
     if not isinstance(report, dict):
-        return ["report: must be a JSON object"]
+        return ["report: must be a JSON object"], None
     if _too_deep(report):
-        return [f"report: nested deeper than {MAX_DEPTH} levels"]
+        return [f"report: nested deeper than {MAX_DEPTH} levels"], None
     problems: list[str] = []
     parts = _check_shape(report, problems)
     _check_finding_ids(parts["causes"], "causes", ("supporting", "contradicting"), findings, problems)
     _check_finding_ids(parts["hypotheses"], "hypotheses", ("finding_ids",), findings, problems)
     _check_finding_ids(parts["actions"], "actions", ("finding_ids",), findings, problems)
-    _check_causes(parts, findings, problems)
     _check_status(report, parts, problems)
     _check_actions(config, parts, findings, problems)
     _check_hypothesis_causes(parts, problems)
+    _check_secrets(report, problems)
+    return problems, parts
+
+
+def check_draft(report: Any, findings: dict[str, dict], config: TriageConfig) -> list[str]:
+    """Every problem with a draft that does not depend on labels or on stored judgments.
+
+    Shapes, types, required fields, id rules, allowed values, finding ids against the valid findings,
+    the cross-references inside the draft, the status rules without labels, depth, and secrets.
+    A draft with only label, summary, digest, coverage, or render problems gives an empty list.
+    """
+    return _draft_problems(report, findings, config)[0]
+
+
+def validate_report(report: Any, case: dict, findings: dict[str, dict], config: TriageConfig) -> list[str]:
+    """Every problem that stops the report from being rendered. An empty list means it may be rendered.
+
+    The draft checks come first, then the label, summary, digest, and coverage rules.
+    Never raises on a malformed report, and no message repeats a value from the report.
+    """
+    problems, parts = _draft_problems(report, findings, config)
+    if parts is None:
+        return problems
+    _check_causes(parts, findings, problems)
+    _check_status_labels(report, parts, problems)
+    _check_action_labels(parts, problems)
     _check_typesafe(report, parts, problems)
     _check_judgments(report, case, parts, findings, problems)
-    _check_secrets(report, problems)
     return problems
 
 

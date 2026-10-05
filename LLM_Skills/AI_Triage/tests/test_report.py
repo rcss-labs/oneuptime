@@ -19,6 +19,7 @@ from triage.report import (
     REQUIRED_HEADINGS,
     build_work_order,
     check_case_inputs,
+    check_draft,
     coverage_from_evidence,
     display_case_folder,
     render_report,
@@ -1811,3 +1812,74 @@ def test_a_path_in_collected_text_is_shown_without_its_local_prefix(case_dir, ca
     path.write_text(json.dumps(document))
     text = render(VALID_REPORT, case_dir, case)
     assert str(case_dir) not in text and str(Path.home()) not in text
+
+
+# the judgment-independent draft checks
+
+def deeply_nested(levels):
+    value = []
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+LABEL_ONLY_DRAFTS = {
+    "confirmed without support": lambda r: r["causes"][1].update(label="confirmed", supporting=[], contradicting=[]),
+    "recommended on a candidate cause": lambda r: r["actions"][0].update(cause="C2"),
+    "top cause labelled candidate": lambda r: r["causes"][0].update(label="candidate"),
+    "unresolved with a confirmed cause": lambda r: r.update(status="unresolved") or r["summary"].update(top_cause=None),
+    "typesafe unavailable with confirmed": lambda r: r["coverage"].update(typesafe="unavailable: x"),
+    "a different typesafe value": lambda r: r["coverage"].update(typesafe="failed: x"),
+}
+
+BROKEN_DRAFTS = {
+    "string preconditions": lambda r: r["actions"][0].update(preconditions="Capacity first"),
+    "missing field": lambda r: r.pop("causes"),
+    "bad cause id": lambda r: r["causes"][1].update(id="C 2"),
+    "unknown finding": lambda r: r["causes"][0]["supporting"].append("ghost-1"),
+    "unknown action cause": lambda r: r["actions"][0].update(cause="C9"),
+    "unknown hypothesis cause": lambda r: r["hypotheses"][0].update(cause="C9"),
+    "unknown top cause": lambda r: r["summary"].update(top_cause="C9"),
+    "unresolved with a top cause": lambda r: r.update(status="unresolved"),
+    "no confirmed hypothesis": lambda r: r["hypotheses"][0].update(result="inconclusive"),
+    "unknown account": lambda r: r["actions"][0]["target"].update(account_alias="nowhere"),
+    "empty verification": lambda r: r["actions"][0].update(verification=[]),
+    "secret": lambda r: r["actions"][0].update(change=f"Use pass{'word'}={secret_value()}"),
+    "wrong type": lambda r: r["causes"][0].update(id=["C1"]),
+    "bad status": lambda r: r.update(status="done"),
+    "bad label value": lambda r: r["causes"][0].update(label="sure"),
+    "too deep": lambda r: r.update(map_changes=[deeply_nested(60)]),
+}
+
+
+def test_a_valid_draft_has_no_draft_problems(case, findings, config):
+    assert check_draft(VALID_REPORT, findings, config) == []
+    assert check_draft(UNRESOLVED_REPORT, findings, config) == []
+
+
+@pytest.mark.parametrize("name", sorted(LABEL_ONLY_DRAFTS))
+def test_a_draft_with_only_label_or_summary_problems_has_no_draft_problems(case, findings, config, name):
+    report = mutated(VALID_REPORT, LABEL_ONLY_DRAFTS[name])
+    assert check_draft(report, findings, config) == []
+    assert problems_for(report, case, findings, config) != []
+
+
+@pytest.mark.parametrize("name", sorted(BROKEN_DRAFTS))
+def test_the_draft_problems_are_a_subset_of_the_validation_problems_in_the_same_wording(case, findings, config, name):
+    report = mutated(VALID_REPORT, BROKEN_DRAFTS[name])
+    draft = check_draft(report, findings, config)
+    assert draft, name
+    full = problems_for(report, case, findings, config)
+    assert set(draft) <= set(full) and len(draft) <= len(full)
+
+
+def test_a_draft_without_a_summary_file_has_the_same_draft_problems(case_dir, case, findings, config):
+    report = mutated(VALID_REPORT, BROKEN_DRAFTS["string preconditions"])
+    with_summary = check_draft(report, findings, config)
+    remove_summary(case_dir)
+    assert check_draft(report, findings, config) == with_summary
+
+
+def test_check_draft_never_raises_on_the_wrong_types(findings, config):
+    for value in (None, 5, [], "x", {}, {"status": []}):
+        assert isinstance(check_draft(value, findings, config), list)
