@@ -1,0 +1,87 @@
+# Access playbook
+
+## When to open
+
+The target has an IAM role, a KMS key, or a secret, or evidence shows `AccessDenied`,
+`AccessDeniedException`, "not authorized to perform", a KMS key error, or a password or
+credential that stopped working. The collector reads metadata only.
+
+## Collect
+
+The plan already runs `access` for the role, key, or secret it mapped. To get a
+simulation, give it both an `action` and the role; `resource_arn` is optional.
+
+| When | Command |
+|---|---|
+| An error names a role and an action | `run collect access ... --target role=<role name> --target action=<service:Action> --target resource_arn=<arn from the error>` |
+| An error names a key, or an encrypted resource cannot be used | `run collect access ... --target kms_key=<key id or alias>` |
+| Credentials stopped working, or a rotation is involved | `run collect access ... --target secret=<secret name>` |
+| Who changed the policy, key, or secret, and when | `run collect changes ...` and read `cloudtrail.md` |
+| The role belongs to a task, function, or pod that failed | `run collect ecs ... --target cluster=<c> --target service=<s>` (or `lambda` with `function=<name>`, `eks` with `cluster=<name>`) for it |
+| The error text is needed | `run collect logs ... --target log_groups=<log group with the error>` |
+
+Never read a secret's value, a parameter with decryption, or decrypt anything. The
+evidence needed (state, times, policy names, a decision) is in the metadata.
+
+## What the facts mean
+
+| Fact | Usually means | Read next |
+|---|---|---|
+| "Role X created T, last used T in REGION; trusted principals: a, b" (`current`) | who may assume the role | whether the caller's principal (for example the service that runs the task) is in that list; conditions on the trust are not shown; "has never been used" means the role is not the one in use |
+| "Role X policies: attached a, b; inline none" (`current`) | names only, not the documents | the Follow a lead commands for the statements |
+| "Simulation: ACTION on RESOURCE is allowed" | the identity policies would allow it | a real denial then comes from elsewhere (cause 5) |
+| "... is implicitDeny; no statement allows it" | no policy of the role allows it | the work order names the missing action and resource |
+| "... is explicitDeny; denied by POLICY (TYPE)" | a statement denies it | that policy and its type |
+| "The simulation lacked values for: ...; the real decision may differ" | a condition needs a request value the simulation did not have | treat the verdict as open |
+| "Key K state Enabled, enabled True, origin AWS_KMS" (`current`) | the key is usable | the key policy and grants (Follow a lead) |
+| "Key K is disabled; calls that use it will fail" | encrypt and decrypt calls fail | when it was disabled: the change evidence |
+| "Key K is pending deletion (deletion date T); calls that use it will fail" | same; the key will be destroyed on that date | the same, and the date is the deadline for the work order |
+| "Secret S: rotation enabled, last rotated T, last changed T, next rotation T" (`current`; "unknown" means absent) | rotation metadata | "last changed" against the incident start |
+| "Secret S: rotation is overdue: last rotated T, interval N days" | the scheduled rotation did not happen | the rotation function's errors in `lambda.md` and its logs |
+| "Secret S changed inside the incident window, at T" | the stored value changed at T | a client that cached the old value, or a database not updated to match |
+
+A `current` fact shows the state now and has no event time; the simulation is computed
+at collection time. Only the secret-changed fact carries the time of a change. Failed
+rotation has no fact of its own: it shows as overdue or as a changed secret whose
+database login fails.
+
+## Common causes
+
+1. **The role lacks a permission.** Evidence: the denial names role, action, resource;
+   the simulation says `implicitDeny`; a change to the role's policies before the
+   incident. Rule out: simulation `allowed`. Work order: the role, the action, the
+   resource ARN, the policy that should hold it; mitigation is adding that one statement;
+   permanent fix is the same in the source that defines the role.
+2. **An explicit deny.** Evidence: `explicitDeny` naming a policy, or an error message
+   that says an explicit deny. Work order: the policy, its type, the statement to change.
+3. **The trust policy does not include the caller.** Evidence: the error is from
+   `AssumeRole`, and the caller's principal is not among the trusted principals. Work
+   order: the role and the principal to add.
+4. **A KMS key is disabled or pending deletion.** Evidence: the key fact, errors that
+   name the key or an invalid key state, and a start at the time the key changed.
+   Work order: the key id, the state, the deletion date, who changed it (change
+   evidence); mitigation is a person re-enabling or cancelling the deletion; permanent
+   fix is protection on that key.
+5. **The simulation allows it but the real call fails.** Evidence: `allowed`, still
+   denied. The collector does not see a resource's own policy (a key or bucket policy),
+   a permission boundary or service control policy, session policies, or conditions it
+   lacked values for. Work order: name which of those remain unread and how to read it.
+6. **A secret rotated, failed to rotate, or changed.** Evidence: a "changed inside the
+   window" fact before authentication errors, or an overdue rotation. Work order:
+   the secret, times, interval; never the value.
+
+## Compare with
+
+A role of the same kind that works (same service, another environment), the same role
+before the incident (the change evidence), and the key or secret in another environment.
+
+## Follow a lead
+
+When the collector's facts are not enough, read directly by `reference/reading.md`:
+
+```bash
+aws iam get-role-policy --role-name <role> --policy-name <inline policy> --profile <triage profile> --region <region> --query 'PolicyDocument' 2>/dev/null | jq -c '.Statement[]'
+aws iam get-policy-version --policy-arn <policy arn> --version-id <version> --profile <triage profile> --region <region> --query 'PolicyVersion.Document' 2>/dev/null | jq -c '.Statement[]'
+aws kms get-key-policy --key-id <key id> --policy-name default --profile <triage profile> --region <region> --query 'Policy' 2>/dev/null | jq -r '.'
+aws secretsmanager describe-secret --secret-id <secret name> --profile <triage profile> --region <region> --query '{rotation:RotationEnabled,rules:RotationRules,lastRotated:LastRotatedDate,lastChanged:LastChangedDate}' 2>/dev/null
+```
