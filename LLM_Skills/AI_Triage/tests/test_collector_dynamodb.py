@@ -119,7 +119,7 @@ def run_with_metrics(config_data, tmp_path, data):
 
 def test_table_level_metrics(config_data, tmp_path):
     ctx, fake = run_with_metrics(config_data, tmp_path, {("ReadThrottleEvents", None): 840.0})
-    assert by_summary(ctx, "ReadThrottleEvents (Sum): peak 840")
+    assert [f.data["maximum"] for f in by_summary(ctx, "ReadThrottleEvents (Sum)")] == [840.0]
     queries = fake.queries[0]
     stats = {q["MetricStat"]["Metric"]["MetricName"]: q["MetricStat"]["Stat"] for q in queries}
     assert stats == {"ReadThrottleEvents": "Sum", "WriteThrottleEvents": "Sum",
@@ -146,9 +146,9 @@ def test_per_operation_metrics_are_queried_with_the_operation_dimension(config_d
 
 def test_only_per_operation_metrics_with_data_become_facts(config_data, tmp_path):
     ctx, _ = run_with_metrics(config_data, tmp_path, {("ThrottledRequests", "Query"): 12.0, ("SuccessfulRequestLatency", "PutItem"): 340.0})
-    throttled = by_summary(ctx, "ThrottledRequests Query (Sum): peak 12")
-    assert len(throttled) == 1 and throttled[0].kind == "incident_time"
-    assert by_summary(ctx, "SuccessfulRequestLatency PutItem (Maximum): peak 340")
+    throttled = by_summary(ctx, "ThrottledRequests Query (Sum)")
+    assert len(throttled) == 1 and throttled[0].kind == "incident_time" and throttled[0].data["maximum"] == 12.0
+    assert [f.data["maximum"] for f in by_summary(ctx, "SuccessfulRequestLatency PutItem (Maximum)")] == [340.0]
     assert by_summary(ctx, "ThrottledRequests Scan") == []
     assert by_summary(ctx, "throttling or system error was recorded") == []
 
@@ -217,7 +217,7 @@ def per_operation_calls(fake):
 
 def test_a_busy_table_without_throttling_still_gets_the_no_throttling_fact(config_data, tmp_path):
     ctx, _ = run_with_metrics(config_data, tmp_path, {("SuccessfulRequestLatency", "GetItem"): 12.5})
-    assert by_summary(ctx, "SuccessfulRequestLatency GetItem (Maximum): peak 12.5")
+    assert [f.data["maximum"] for f in by_summary(ctx, "SuccessfulRequestLatency GetItem (Maximum)")] == [12.5]
     assert len(by_summary(ctx, "throttling or system error was recorded")) == 1
 
 
@@ -249,7 +249,7 @@ def test_a_failed_baseline_is_named_and_the_window_is_still_reported(config_data
     ctx, aws, _ = make_context(config_data, tmp_path, answers, collector="dynamodb")
     ctx.runner = BaselineDenied(answers, {("ThrottledRequests", "Query"): 12.5})
     COLLECTOR.run(ctx, dict(TARGETS))
-    assert by_summary(ctx, "ThrottledRequests Query (Sum): peak 12.5")
+    assert [f.data["maximum"] for f in by_summary(ctx, "ThrottledRequests Query (Sum)")] == [12.5]
     fact = by_summary(ctx, "one-week baseline")[0]
     assert fact.kind == "derived" and "could not be read" in fact.summary and "window" in fact.summary
     assert by_summary(ctx, "per-operation throttling and system error metrics could not be read") == []
@@ -258,7 +258,7 @@ def test_a_failed_baseline_is_named_and_the_window_is_still_reported(config_data
 def test_no_throttling_is_not_stated_when_table_level_throttle_metrics_show_throttling(config_data, tmp_path):
     for metric in ("ReadThrottleEvents", "WriteThrottleEvents"):
         ctx, _ = run_with_metrics(config_data, tmp_path, {(metric, None): 40.0})
-        assert by_summary(ctx, f"{metric} (Sum): peak 40")
+        assert [f.data["maximum"] for f in by_summary(ctx, f"{metric} (Sum)")] == [40.0]
         assert by_summary(ctx, "throttling or system error was recorded") == []
 
 
@@ -294,3 +294,30 @@ def test_an_answer_without_arns_writes_no_arn_key(config_data, tmp_path):
     ctx, _ = run(config_data, tmp_path, healthy_answers())
     assert "arn" not in ctx.evidence.facts[0].data and "index_arns" not in ctx.evidence.facts[0].data
     assert ctx.evidence.errors == []
+
+
+class RisingSeries(FakeAws):
+    """A series that leaves last week's range at 10:10 and peaks at 10:30, against a flat baseline."""
+
+    def __call__(self, argv, timeout):
+        if argv[1:3] == ["cloudwatch", "get-metric-data"]:
+            queries = json.loads(argv[argv.index("--metric-data-queries") + 1])
+            this_week = argv[argv.index("--start-time") + 1].startswith("2026-10-04")
+            stamps = ["2026-10-04T10:10:00+00:00", "2026-10-04T10:30:00+00:00"] if this_week else \
+                ["2026-09-27T10:10:00+00:00", "2026-09-27T10:30:00+00:00"]
+            values = [5.0, 50.0] if this_week else [1.0, 1.0]
+            results = [{"Id": q["Id"], "Timestamps": stamps, "Values": values}
+                       for q in queries if {"Name": "Operation", "Value": "Query"} in q["MetricStat"]["Metric"]["Dimensions"]
+                       and q["MetricStat"]["Metric"]["MetricName"] == "ThrottledRequests"]
+            self.answers["cloudwatch get-metric-data"] = {"MetricDataResults": results}
+        return super().__call__(argv, timeout)
+
+
+def test_a_per_operation_metric_fact_is_timed_by_the_metric_helper(config_data, tmp_path):
+    answers = healthy_answers()
+    ctx, _, _ = make_context(config_data, tmp_path, answers, collector="dynamodb")
+    ctx.runner = RisingSeries(answers)
+    COLLECTOR.run(ctx, dict(TARGETS))
+    fact = by_summary(ctx, "ThrottledRequests Query (Sum)")[0]
+    assert fact.data["first_departure_time"] == "2026-10-04T10:10:00Z" and fact.data["maximum_time"] == "2026-10-04T10:30:00Z"
+    assert fact.time == "2026-10-04T10:10:00Z" and fact.data["direction"] == "rose" and fact.data["notable"] is True

@@ -77,7 +77,7 @@ def _add_operation_metrics(ctx: CollectContext, name: str, resource: str, table_
     for summary in summaries:
         if summary.datapoints:
             ctx.evidence.add(
-                kind=INCIDENT_TIME, resource=resource, time=summary.peak_time, command=window_command,
+                kind=INCIDENT_TIME, resource=resource, time=summary.fact_time, command=window_command,
                 summary=_summary_text(summary), data=asdict(summary),
             )
     if len(ctx.evidence.errors) > errors_before:
