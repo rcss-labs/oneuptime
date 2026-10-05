@@ -1,0 +1,73 @@
+{
+  "analyst": "lead",
+  "findings": [
+    {
+      "id": "lead-1",
+      "claim": "Revision 42 of checkout-api differs from revision 41 only in DB_HOST, which now names checkout-db.internal.example.com.",
+      "fact_ids": ["ecs-prod-main-eu-west-1:ecs-0014"],
+      "excerpt": "DB_HOST changed from checkout-prod-db.cluster-abc.eu-west-1.rds.example.com to checkout-db.internal.example.com",
+      "provenance": "inferred",
+      "confidence": "high"
+    },
+    {
+      "id": "lead-2",
+      "claim": "Revision 42 of the checkout-api task definition was registered by deployer at 10:36, six minutes before the impact started.",
+      "fact_ids": ["changes-prod-main-eu-west-1:changes-0002"],
+      "excerpt": "RegisterTaskDefinition (ecs.amazonaws.com) by deployer on checkout-api:42",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T10:36:00Z"
+    },
+    {
+      "id": "lead-3",
+      "claim": "From 10:38 the application logged that checkout-db.internal.example.com cannot be resolved, in the log group and in the OpenSearch index.",
+      "fact_ids": [
+        "logs-prod-main-eu-west-1:logs-0012",
+        "opensearch-prod-main-logs-prod-search:opensearch-0001"
+      ],
+      "excerpt": "Error: getaddrinfo ENOTFOUND checkout-db.internal.example.com",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T10:38:12Z"
+    },
+    {
+      "id": "lead-4",
+      "claim": "The load balancer target group checkout-api-tg has two unhealthy targets now.",
+      "fact_ids": ["edge-prod-main-eu-west-1:edge-0005"],
+      "excerpt": "Target group checkout-api-tg has 2 unhealthy targets",
+      "provenance": "current",
+      "confidence": "medium"
+    },
+    {
+      "id": "lead-5",
+      "claim": "The database CPU peaked at 85 percent at 09:50, long before the impact started at 10:42.",
+      "fact_ids": ["rds-prod-main-eu-west-1:rds-0005"],
+      "excerpt": "CPUUtilization (Average): peak 85 at 2026-10-04T09:50:00Z",
+      "provenance": "incident_time",
+      "confidence": "medium",
+      "time": "2026-10-04T09:50:00Z"
+    },
+    {
+      "id": "lead-6",
+      "claim": "The database instance checkout-prod-db is available now.",
+      "fact_ids": ["rds-prod-main-eu-west-1:rds-0001"],
+      "excerpt": "Instance checkout-prod-db is available",
+      "provenance": "current",
+      "confidence": "low",
+      "time": "2026-10-04T11:10:00Z"
+    }
+  ],
+  "checked": [
+    "CloudTrail changes to checkout-api",
+    "ECS task definition revisions 41 and 42",
+    "application log patterns and first lines",
+    "RDS instance state and CPU"
+  ],
+  "requests": [
+    {
+      "collector": "rds",
+      "targets": {"db": "checkout-prod-db"},
+      "reason": "Database connection counts at one minute resolution would show whether connections dropped at 10:38"
+    }
+  ]
+}

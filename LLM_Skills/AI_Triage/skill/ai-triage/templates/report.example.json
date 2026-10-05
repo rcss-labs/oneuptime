@@ -1,0 +1,141 @@
+{
+  "status": "cause_found",
+  "summary": {
+    "what_broke": "The checkout API stopped serving requests after revision 42 of its task definition was deployed.",
+    "impact": "Customers cannot pay: the load balancer has no healthy targets and answers with 5xx.",
+    "scope": "Only checkout-api in prod-main is affected; the database instance checkout-prod-db is available.",
+    "top_cause": "C1"
+  },
+  "symptoms": [
+    "The health check of checkout.example.com fails",
+    "The load balancer answers with 5xx and has no healthy targets"
+  ],
+  "causes": [
+    {
+      "id": "C1",
+      "label": "confirmed",
+      "statement": "Revision 42 of checkout-api, registered at 10:36, changed the environment variable DB_HOST to checkout-db.internal.example.com, which does not resolve, so every new task exits and fails its health check",
+      "supporting": ["lead-1", "lead-2", "lead-3", "lead-4"],
+      "contradicting": []
+    },
+    {
+      "id": "C2",
+      "label": "candidate",
+      "statement": "The database was overloaded and stopped answering the checkout API",
+      "supporting": [],
+      "contradicting": ["lead-5", "lead-6"]
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "H1",
+      "statement": "The new task definition points the application at a host that does not resolve",
+      "prediction": "New tasks log a name resolution error for that host and exit",
+      "test": "Compare revisions 41 and 42 and read the application logs",
+      "result": "confirmed",
+      "finding_ids": ["lead-1", "lead-3"],
+      "cause": "C1"
+    },
+    {
+      "id": "H2",
+      "statement": "A database overload made the database unreachable",
+      "prediction": "The database CPU is high when the impact starts",
+      "test": "Compare the database CPU and state with the impact start",
+      "result": "rejected",
+      "finding_ids": ["lead-5", "lead-6"],
+      "cause": "C2"
+    },
+    {
+      "id": "H3",
+      "statement": "A second change outside ECS contributed to the outage",
+      "prediction": "CloudTrail shows another change to checkout-api or its network before 10:42",
+      "test": "Read the CloudTrail changes for the resources of checkout-api",
+      "result": "inconclusive",
+      "finding_ids": [],
+      "cause": null
+    }
+  ],
+  "actions": [
+    {
+      "id": "A1",
+      "type": "mitigation",
+      "label": "recommended",
+      "cause": "C1",
+      "title": "Roll checkout-api back to task definition revision 41",
+      "target": {
+        "account_alias": "prod-main",
+        "account_id": "111111111111",
+        "region": "eu-west-1",
+        "service": "checkout-api",
+        "resource_id": "checkout/checkout-api",
+        "arn": "arn:aws:ecs:eu-west-1:111111111111:service/checkout/checkout-api"
+      },
+      "current_state": "The service runs revision 42 with DB_HOST set to checkout-db.internal.example.com",
+      "required_state": "The service runs revision 41, whose DB_HOST names the database endpoint",
+      "change": "Update the service checkout/checkout-api to task definition checkout-api:41",
+      "rationale": "Revision 41 differs only in DB_HOST and ran without errors before the deployment",
+      "finding_ids": ["lead-1", "lead-2"],
+      "risk": "Anything that shipped only in revision 42 is undone",
+      "blast_radius": "checkout-api in prod-main only",
+      "preconditions": [
+        "The engineer approves the change",
+        "Revision 41 is still registered"
+      ],
+      "verification": [
+        "Targets of checkout-api-tg become healthy",
+        "The health check of checkout.example.com passes"
+      ],
+      "rollback": [
+        "Update the service to task definition checkout-api:42 again"
+      ]
+    },
+    {
+      "id": "A2",
+      "type": "permanent_fix",
+      "label": "candidate",
+      "cause": "C1",
+      "title": "Check that DB_HOST resolves before a task definition is deployed",
+      "target": {
+        "account_alias": "prod-main",
+        "account_id": "111111111111",
+        "region": "eu-west-1",
+        "service": "checkout-api",
+        "resource_id": "checkout/checkout-api",
+        "arn": "arn:aws:ecs:eu-west-1:111111111111:service/checkout/checkout-api"
+      },
+      "current_state": "A task definition with a DB_HOST that does not resolve can be deployed",
+      "required_state": "The deployment pipeline refuses a revision whose DB_HOST does not resolve",
+      "change": "Add a name resolution check of DB_HOST to the deployment pipeline of checkout-api",
+      "rationale": "The wrong value was visible in the configuration before any task started",
+      "finding_ids": ["lead-1"],
+      "risk": "A slower pipeline",
+      "blast_radius": "the deployment pipeline of checkout-api",
+      "preconditions": [],
+      "verification": [
+        "A test deployment with a wrong DB_HOST is refused"
+      ],
+      "rollback": [
+        "Remove the check from the pipeline"
+      ]
+    }
+  ],
+  "open_questions": [
+    "Who intended the change to DB_HOST, and where does checkout-db.internal.example.com come from?"
+  ],
+  "coverage": {
+    "typesafe": "available",
+    "not_checked": [
+      {
+        "what": "Kubernetes workloads",
+        "why": "The service runs on ECS and no cluster is mapped"
+      }
+    ]
+  },
+  "map_changes": [
+    "Add the load balancer checkout-prod to the prod environment of checkout-api"
+  ],
+  "run": {
+    "engineer": "on-call engineer",
+    "duration_minutes": 25
+  }
+}
