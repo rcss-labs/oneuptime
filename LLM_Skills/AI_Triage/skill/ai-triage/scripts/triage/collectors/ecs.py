@@ -6,7 +6,7 @@ from typing import Any
 from triage.collectors import Collector
 from triage.collectors.common import env_changes, env_summary, in_window, newest_in_window
 from triage.context import CollectContext
-from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
+from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME, MAX_DATA_STRING
 from triage.metrics import MetricSpec, add_metric_facts
 
 MAX_EVENTS = 30
@@ -14,6 +14,8 @@ MAX_ITEMS = "20"
 TASK_LEVEL_FIELDS = ("cpu", "memory")
 MAX_CHANGES = 50
 MAX_CHANGE_LENGTH = 300
+CHANGE_CUT_MARKER = "… [change cut]"
+IMAGE = "image"
 
 
 def _short_name(arn: str) -> str:
@@ -151,6 +153,21 @@ def _container_changes(name: str, old: dict, new: dict) -> list[Change]:
     return changes
 
 
+def _change_lines(change: Change) -> list[str]:
+    """The data lines of one change. An image change is never cut: when one line would be longer than the
+    evidence layer keeps a string, it is written as two lines with one whole image reference each."""
+    kind, text = change
+    if kind == IMAGE:
+        if len(text) <= MAX_DATA_STRING:
+            return [text]
+        head, _, new = text.partition(" -> ")
+        prefix, _, old = head.rpartition(" image ")
+        return [f"{prefix} image was {old}", f"{prefix} image is now {new}"]
+    if len(text) <= MAX_CHANGE_LENGTH:
+        return [text]
+    return [text[: MAX_CHANGE_LENGTH - len(CHANGE_CUT_MARKER)] + CHANGE_CUT_MARKER]
+
+
 def _previous_reference(service: dict, reference: str) -> str | None:
     """The task definition of a non-primary deployment, else the revision one below the current one."""
     for deployment in service.get("deployments", []):
@@ -182,9 +199,10 @@ def _add_definition_diff(ctx: CollectContext, resource: str, reference: str, cur
         else:
             changes += _container_changes(name, old[name], new[name])
     before, after = _revision(previous_reference), _revision(reference)
-    data: dict[str, Any] = {"changes": [text[:MAX_CHANGE_LENGTH] for _, text in changes[:MAX_CHANGES]]}
-    if len(changes) > MAX_CHANGES:
-        data["changes_omitted"] = len(changes) - MAX_CHANGES
+    lines = [line for change in changes for line in _change_lines(change)]
+    data: dict[str, Any] = {"changes": lines[:MAX_CHANGES]}
+    if len(lines) > MAX_CHANGES:
+        data["changes_omitted"] = len(lines) - MAX_CHANGES
     ctx.evidence.add(
         kind=DERIVED, resource=resource, command=ctx.last_command, data=data,
         summary=_diff_summary(before, after, changes),

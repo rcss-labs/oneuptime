@@ -422,3 +422,51 @@ def test_no_change_between_revisions(config_data, tmp_path):
     diff = next(f for f in ctx.evidence.facts if "between revision" in f.summary)
     assert diff.summary.startswith("The task definition did not change between revision 41 and 42")
     assert diff.data["changes"] == []
+
+
+# Fix round 4
+
+def _diff_for(config_data, tmp_path, old_container, new_container):
+    current = {"taskDefinition": {"family": "checkout-api", "revision": 42, "containerDefinitions": [new_container]}}
+    previous = {"taskDefinition": {"family": "checkout-api", "revision": 41, "containerDefinitions": [old_container]}}
+    ctx, _, _ = make_context(config_data, tmp_path, healthy_answers(), collector="ecs")
+    ctx.runner = RevisionAws(healthy_answers(), current, previous)
+    COLLECTOR.run(ctx, dict(TARGETS))
+    return ctx, next(f for f in ctx.evidence.facts if "between revision" in f.summary)
+
+
+def test_long_change_entry_ends_with_a_cut_marker(config_data, tmp_path):
+    brokers = ",".join(f"b-{n}.kafka.example.com:9092" for n in range(1, 15))
+    _, diff = _diff_for(config_data, tmp_path, container(env={"KAFKA_BROKERS": brokers}),
+                        container(env={"KAFKA_BROKERS": brokers + ",b-99.kafka.example.com:9092"}))
+    entry = next(change for change in diff.data["changes"] if "KAFKA_BROKERS" in change)
+    assert len(entry) == 300 and entry.endswith("… [change cut]")
+
+
+def test_digest_pinned_image_change_is_never_cut(config_data, tmp_path):
+    repo = "111111111111.dkr.ecr.eu-west-1.amazonaws.com/checkout-service"
+    old_image = f"{repo}:1.4.1@sha256:" + "a" * 64
+    new_image = f"{repo}:1.4.2@sha256:" + "b" * 64
+    _, diff = _diff_for(config_data, tmp_path, container(image=old_image), container(image=new_image))
+    assert f"container app image {old_image} -> {new_image}" in diff.data["changes"]
+
+
+def test_very_long_image_references_are_kept_whole(config_data, tmp_path):
+    repo = "111111111111.dkr.ecr.eu-west-1.amazonaws.com/" + "checkout-service/" * 18 + "app"
+    old_image = f"{repo}:1@sha256:" + "a" * 64
+    new_image = f"{repo}:2@sha256:" + "b" * 64
+    assert 400 < len(new_image) < 500
+    _, diff = _diff_for(config_data, tmp_path, container(image=old_image), container(image=new_image))
+    joined = "\n".join(diff.data["changes"])
+    assert old_image in joined and new_image in joined
+    assert "1 change (image)" in diff.summary
+
+
+def test_c1_secret_never_reaches_the_document(config_data, tmp_path):
+    secret = "sun" + "flower"
+    ctx, diff = _diff_for(config_data, tmp_path, container(env={"DB_PASS1": secret}),
+                          container(env={"DB_PASS1": secret + "Q"}))
+    assert "container app: DB_PASS1 changed (values hidden)" in diff.data["changes"]
+    current = next(f for f in ctx.evidence.facts if f.kind == "current" and "Task definition" in f.summary)
+    assert current.data["environment"]["DB_PASS1"].startswith(("<hidden", "<SECRET"))
+    assert secret not in ctx.evidence.to_json()
