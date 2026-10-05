@@ -316,7 +316,8 @@ def test_harmless_named_values_never_reach_the_document(config_data, tmp_path):
     for secret in (dsn_secret, hook_secret, "pw" + "5" * 8):
         assert secret not in document
     assert "o1.ingest.example.com" not in document
-    assert "db.example.com" not in document
+    # CONN is not a secret name (ruling 1: the redactor decides), so only the URL origin of its value is shown.
+    assert "postgres://db.example.com:5432" in document
 
 
 def test_diff_reports_a_changed_host(config_data, tmp_path):

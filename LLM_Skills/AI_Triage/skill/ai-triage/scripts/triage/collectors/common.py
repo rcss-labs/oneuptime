@@ -7,47 +7,71 @@ from datetime import datetime
 from typing import Any, Callable, Iterable, Sequence
 
 from triage.context import CollectContext
-from triage.redact import SECRET_WORDS, key_components, looks_secret_key
+from triage.redact import key_components, looks_personal_key, looks_secret_key
 from triage.window import Window, WindowError, parse_time
 
+# --- value shapes ---------------------------------------------------------------------------
 _LABEL_RE = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
 _PORT_RE = re.compile(r"[0-9]{1,5}")
 _AUTHORITY_CHARS_RE = re.compile(r"[A-Za-z0-9.:\[\]-]*")
 _BOOLEAN_RE = re.compile(r"true|false", re.IGNORECASE)
+_SWITCH_RE = re.compile(r"true|false|yes|no|on|off|0|1", re.IGNORECASE)
 _REGION_RE = re.compile(r"[a-z]{2}(?:-[a-z]+)+-[0-9]")
-_SHORT_NUMBER_RE = re.compile(r"[0-9]{1,6}")
-_DURATION_RE = re.compile(r"[0-9]{1,5}(?:ms|s|m|h|d)")
-_FRACTION_RE = re.compile(r"[0-9]{1,3}\.[0-9]{1,3}")
-_WORD_RE = re.compile(r"[A-Za-z_-]{1,20}")
-_SHORT_SETTING_RE = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,14}")
+_ENUM_RE = re.compile(r"[A-Za-z][A-Za-z0-9_./,-]{0,39}")
+_MAX_ENUM_DIGITS = 4
+_NUMBER_RES = (
+    re.compile(r"-?[0-9]+(?:\.[0-9]+)?"),  # a number or a fraction
+    re.compile(r"[0-9]+(?:\.[0-9]+)?(?:ns|us|ms|s|m|h|d|w)"),  # a duration
+    re.compile(r"[0-9]+(?:\.[0-9]+)?(?:[KMGTPE]i|[KMGTPEkmgtpe][Bb]?)"),  # a size
+    re.compile(r"[0-9]+/[0-9]+"),  # a ratio
+)
+_MAX_NUMBER_LENGTH = 12
+_VERSION_RES = (
+    re.compile(r"(?:[A-Za-z]{1,10}[-_])?[vV]?[0-9]+(?:\.[0-9]+)+(?:[-+][A-Za-z0-9.]{1,20})?"),  # 1.4.2, v1.4.2-rc.1
+    re.compile(r"[vV][0-9]{1,4}"),  # v2
+)
+_HEX_VERSION_RE = re.compile(r"(?:[A-Za-z]{1,10}[-_])?[0-9A-Fa-f]{7,40}")  # abc1234, sha-abc1234
+_MAX_VERSION_LENGTH = 32
+_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9._-]{1,63}")
+_PATH_PART_RE = re.compile(r"[a-z0-9._-]{1,32}")
 _ARN_RE = re.compile(r"arn:aws[a-z-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]*:[A-Za-z0-9:/_.+=,-]{1,200}")
-_PATH_RE = re.compile(r"/[A-Za-z0-9._/-]{0,200}")
-_LONG_HEX_RE = re.compile(r"[0-9A-Fa-f]{16,}")
-_HEX_RUN_RE = re.compile(r"[0-9A-Fa-f]{32,}")
+# Key material: a long base64 or hex run, or a long unseparated mix of letters and digits.
+_KEY_RUN_RE = re.compile(r"[A-Za-z0-9+/]{20,}")
+_KEY_SEPARATORS = frozenset("._-")
+_KEY_MIX_LENGTH = 16
+_DIALECT_RE = re.compile(r"[a-z0-9]{1,20}")
+_SQS_HOST_RE = re.compile(r"(?:sqs\.[a-z0-9-]+|[a-z0-9-]+\.queue)\.amazonaws\.com(?:\.cn)?", re.IGNORECASE)
+_SQS_PATH_RE = re.compile(r"/[0-9]{12}/([A-Za-z0-9_-]{1,80}(?:\.fifo)?)/?")
 _MAX_HOST_LENGTH = 253
 _MAX_PORT = 65535
-_MAX_SINGLE_LABEL = 20
 _URL_SCHEMES = frozenset({
     "http", "https", "ws", "wss", "tcp", "udp", "redis", "rediss", "postgres", "postgresql", "mysql",
     "mongodb", "mongodb+srv", "amqp", "amqps", "kafka", "nats", "grpc", "grpcs", "s3", "memcached",
-    "ldap", "ldaps", "smtp", "smtps", "ftp", "sftp",
+    "ldap", "ldaps", "smtp", "smtps", "ftp", "sftp", "sqlserver", "clickhouse",
 })
-# Name words that mark a variable as secret or personal; the value is then always hidden.
-_SECRET_NAME_WORDS = SECRET_WORDS | frozenset({
-    "pin", "salt", "hash", "license", "seed", "jwt", "private", "dsn", "signing", "hmac", "cert", "conn",
-    "key", "passcode", "pincode", "code", "otp", "mfa", "pepper", "nonce",
-})
-_PERSONAL_NAME_WORDS = frozenset({"user", "username", "login", "email", "owner"})
-# Name words that mark a variable as a plain setting; its short plain values are then shown.
-SETTING_WORDS = frozenset({
-    "env", "environment", "stage", "region", "zone", "az", "level", "port", "host", "hostname", "endpoint",
-    "url", "uri", "addr", "address", "server", "mode", "timeout", "ttl", "interval", "delay", "retry",
-    "retries", "version", "enabled", "disabled", "debug", "feature", "flag", "name", "database", "db",
-    "schema", "bucket", "queue", "topic", "table", "stream", "cluster", "service", "namespace", "index",
-    "size", "count", "limit", "max", "min", "workers", "threads", "concurrency", "pool", "tz", "timezone",
-    "lang", "locale", "profile", "path", "dir", "arn", "log", "format", "type", "driver", "protocol",
-    "scheme", "domain",
-})
+_GENERAL_MIN_LABELS = 3  # outside a matching kind, first.last and user.name:pin look like two-label hosts
+
+# --- kinds of setting, by name word (rule 3) ---------------------------------------------------
+ADDRESS, PORT, ENUM, NUMBER, VERSION, SWITCH, IDENTIFIER, PATH, ARN, OPTS = (
+    "address", "port", "enum", "number", "version", "switch", "identifier", "path", "arn", "opts",
+)
+_KIND_WORDS = {
+    ADDRESS: ("host", "hostname", "hosts", "endpoint", "endpoints", "url", "uri", "addr", "address", "server",
+              "servers", "broker", "brokers", "bootstrap", "domain", "origin", "proxy"),
+    PORT: ("port",),
+    ENUM: ("env", "environment", "stage", "profile", "profiles", "mode", "level", "loglevel", "region", "zone", "az",
+           "tz", "timezone", "lang", "locale", "type", "format", "driver", "protocol", "scheme", "active"),
+    NUMBER: ("timeout", "ttl", "interval", "delay", "retry", "retries", "size", "count", "limit", "max", "min",
+             "workers", "threads", "concurrency", "pool", "memory", "cpu", "replicas", "conn", "connections"),
+    VERSION: ("version", "tag", "sha", "commit", "revision", "release", "build"),
+    SWITCH: ("enabled", "disabled", "debug", "feature", "flag", "verbose", "dry"),
+    IDENTIFIER: ("name", "database", "db", "schema", "bucket", "queue", "topic", "table", "stream", "cluster",
+                 "service", "namespace", "index", "group", "role", "app", "application", "component", "tier"),
+    PATH: ("path", "dir", "directory", "file", "home", "root"),
+    ARN: ("arn",),
+    OPTS: ("opts", "options", "args", "flags"),
+}
+_KIND_OF_WORD = {word: kind for kind, words in _KIND_WORDS.items() for word in words}
 _HIDDEN_PREFIX = "<hidden:"
 
 
@@ -79,17 +103,33 @@ def newest_in_window(
     return [item for _, item in inside[:limit]]
 
 
+
 def _hidden(value: Any) -> str:
     return f"<hidden: {len(value if isinstance(value, str) else str(value))} characters>"
 
 
-def _valid_host(host: str, allow_single_label: bool) -> bool:
+def _key_like(text: str) -> bool:
+    """A token, not a name: a long base64 or hex run, or 16+ characters of letters and digits with no separator."""
+    if _KEY_RUN_RE.search(text):
+        return True
+    return (
+        len(text) >= _KEY_MIX_LENGTH
+        and not any(char in _KEY_SEPARATORS for char in text)
+        and any(char.isalpha() for char in text)
+        and any(char.isdigit() for char in text)
+    )
+
+
+def _valid_host(host: str, min_labels: int) -> bool:
     if host.startswith("["):
+        inner = host[1:-1]
+        if not host.endswith("]") or "%" in inner:  # a zone id may carry any text
+            return False
         try:
-            ipaddress.IPv6Address(host[1:-1])
+            ipaddress.IPv6Address(inner)
         except ValueError:
             return False
-        return host.endswith("]")
+        return True
     try:
         ipaddress.IPv4Address(host)
         return True
@@ -98,9 +138,10 @@ def _valid_host(host: str, allow_single_label: bool) -> bool:
     labels = host.split(".")
     return (
         len(host) <= _MAX_HOST_LENGTH
-        and (len(labels) >= 2 or allow_single_label)
+        and len(labels) >= min_labels
         and all(_LABEL_RE.fullmatch(label) for label in labels)
         and any(char.isalpha() for char in labels[-1])
+        and (len(labels) > 1 or not _key_like(host))
     )
 
 
@@ -109,9 +150,9 @@ def _split_port(text: str) -> tuple[str, str] | None:
     if text.startswith("["):
         close = text.find("]")
         host, rest = text[: close + 1], text[close + 1:]
-        if close < 0 or rest not in ("",) and not rest.startswith(":"):
+        if close < 0 or rest and not rest.startswith(":"):
             return None
-        port = rest[1:] if rest else ""
+        port = rest[1:]
         has_port = bool(rest)
     elif text.count(":") > 1:
         return None
@@ -123,95 +164,160 @@ def _split_port(text: str) -> tuple[str, str] | None:
     return host, port
 
 
-def _host_and_port(text: str, allow_single_label: bool) -> str | None:
-    """text unchanged when it is a valid host or host:port, else None.
-
-    A single-label host (redis:6379) needs a port and a short name; a bare word is not a host.
-    """
+def _is_host_and_port(text: str, min_labels: int) -> bool:
     parts = _split_port(text)
-    if parts is None or not _valid_host(parts[0], allow_single_label):
-        return None
-    host, port = parts
-    if "." not in host and not host.startswith("[") and (not port or len(host) > _MAX_SINGLE_LABEL):
-        return None
-    return text
+    return parts is not None and _valid_host(parts[0], min_labels)
 
 
-def _origin(text: str, allow_single_label: bool) -> str | None:
-    """scheme://host[:port] of a URL; None when it is not a plainly safe URL."""
+def _known_scheme(scheme: str, extended: bool) -> bool:
+    lowered = scheme.lower()
+    if lowered in _URL_SCHEMES:
+        return True
+    base, plus, dialect = lowered.partition("+")
+    return extended and bool(plus) and base in _URL_SCHEMES and bool(_DIALECT_RE.fullmatch(dialect))
+
+
+def _url_parts(text: str, min_labels: int, extended: bool) -> tuple[str, str] | None:
+    """(origin, path) of a URL whose scheme is on the list; None when it is not a plainly safe URL.
+
+    extended also accepts the jdbc: prefix and scheme+dialect forms (address kinds only).
+    """
+    prefix = ""
+    if extended and text[:5].lower() == "jdbc:":
+        prefix, text = text[:5], text[5:]
     scheme, separator, rest = text.partition("://")
-    if not separator or scheme.lower() not in _URL_SCHEMES:
+    if not separator or not _known_scheme(scheme, extended):
         return None
-    cut = min((rest.find(mark) for mark in "/?#" if mark in rest), default=len(rest))
+    cut = min((rest.find(mark) for mark in "/?#;" if mark in rest), default=len(rest))
     authority, tail = rest[:cut], rest[cut:]
     if "@" in tail:
         return None
     host_and_port = authority.rpartition("@")[2]
-    if not _AUTHORITY_CHARS_RE.fullmatch(host_and_port):
+    if not _AUTHORITY_CHARS_RE.fullmatch(host_and_port) or not _is_host_and_port(host_and_port, min_labels):
         return None
-    shown = _host_and_port(host_and_port, allow_single_label)
-    return f"{scheme}://{shown}" if shown else None
+    return f"{prefix}{scheme}://{host_and_port}", tail
 
 
-def _setting_shaped(text: str) -> bool:
-    """A short, plain value of the kinds a setting holds. Never a long hex token."""
-    if _LONG_HEX_RE.fullmatch(text) or _HEX_RUN_RE.search(text):
-        return False
-    return any(
-        pattern.fullmatch(text)
-        for pattern in (
-            _BOOLEAN_RE, _SHORT_NUMBER_RE, _DURATION_RE, _FRACTION_RE, _WORD_RE, _SHORT_SETTING_RE,
-            _ARN_RE, _PATH_RE,
-        )
-    )
+def _origin(text: str, min_labels: int, extended: bool = False) -> str | None:
+    parts = _url_parts(text, min_labels, extended)
+    return parts[0] if parts else None
 
 
-def _enough_labels(host_and_port: str) -> bool:
-    """Outside setting-like names a dotted host needs three labels; first.last and user:pin look the same."""
-    host = host_and_port.rpartition(":")[0] if host_and_port.count(":") == 1 else host_and_port
-    try:
-        ipaddress.IPv4Address(host)
-        return True
-    except ValueError:
-        return host.count(".") >= 2 or host.startswith("[")
+def _address_item(item: str) -> str | None:
+    if "://" not in item:
+        return item if _is_host_and_port(item, 1) else None
+    parts = _url_parts(item, 1, extended=True)
+    if parts is None:
+        return None
+    origin, tail = parts
+    host = _split_port(origin.partition("://")[2])
+    queue = _SQS_PATH_RE.fullmatch(tail)
+    if host and _SQS_HOST_RE.fullmatch(host[0]) and queue and not _key_like(queue.group(1)):
+        return f"{origin} (queue {queue.group(1)})"
+    return origin
+
+
+def _address_value(text: str) -> str | None:
+    """A URL origin, a host[:port], or a comma list of them."""
+    shown = [_address_item(item.strip()) for item in text.split(",")]
+    return ",".join(shown) if all(shown) else None  # type: ignore[arg-type]
+
+
+def _enum_value(text: str) -> str | None:
+    fits = _ENUM_RE.fullmatch(text) and sum(char.isdigit() for char in text) <= _MAX_ENUM_DIGITS
+    return text if fits else None
+
+
+def _number_value(text: str) -> str | None:
+    fits = len(text) <= _MAX_NUMBER_LENGTH and any(pattern.fullmatch(text) for pattern in _NUMBER_RES)
+    return text if fits else None
+
+
+def _version_value(text: str) -> str | None:
+    dotted = len(text) <= _MAX_VERSION_LENGTH and any(pattern.fullmatch(text) for pattern in _VERSION_RES)
+    return text if dotted or _HEX_VERSION_RE.fullmatch(text) else None
+
+
+def _identifier_value(text: str) -> str | None:
+    return text if _IDENTIFIER_RE.fullmatch(text) and not _key_like(text) else None
+
+
+def _path_value(text: str) -> str | None:
+    if not text.startswith("/"):
+        return None
+    parts = text[1:].removesuffix("/").split("/") if text != "/" else []
+    fits = all(_PATH_PART_RE.fullmatch(part) and not _key_like(part) for part in parts)
+    return text if fits else None
+
+
+_KIND_CHECKS: dict[str, Callable[[str], str | None]] = {
+    ADDRESS: _address_value,
+    PORT: lambda text: text if _PORT_RE.fullmatch(text) else None,
+    ENUM: _enum_value,
+    NUMBER: _number_value,
+    VERSION: _version_value,
+    SWITCH: lambda text: text if _SWITCH_RE.fullmatch(text) else None,
+    IDENTIFIER: _identifier_value,
+    PATH: _path_value,
+    ARN: lambda text: text if _ARN_RE.fullmatch(text) else None,
+    OPTS: lambda text: None,  # free-form option strings carry passwords too often
+}
+
+
+def _general_value(text: str) -> str | None:
+    """Rule 4, under any name that is not secret or personal: booleans, regions, and plainly public addresses."""
+    if _BOOLEAN_RE.fullmatch(text) or _REGION_RE.fullmatch(text):
+        return text
+    if "://" in text:
+        return _origin(text, _GENERAL_MIN_LABELS)
+    return text if _is_host_and_port(text, _GENERAL_MIN_LABELS) else None
 
 
 def _secret_or_personal_name(name: str) -> bool:
-    parts = set(key_components(name))
-    return looks_secret_key(name) or bool(parts & (_SECRET_NAME_WORDS | _PERSONAL_NAME_WORDS))
+    """Secret or personal by the redactor's name checks, for the whole name or any leading part of it.
+
+    The leading parts matter because the redactor reads DB_PASSWORD_NAME and API_KEY2_URL as references
+    (by their last part), yet a value under them can still be the secret itself.
+    """
+    if looks_personal_key(name) or looks_secret_key(name):
+        return True
+    parts = key_components(name)
+    return any(looks_secret_key("_".join(parts[:end])) for end in range(1, len(parts)))
 
 
-def _setting_name(name: str) -> bool:
-    return bool(set(key_components(name)) & SETTING_WORDS)
+def _setting_kind(name: str) -> str | None:
+    """The kind of setting a name says it is: the last name word that names a kind decides."""
+    for part in reversed(key_components(name)):
+        kind = _KIND_OF_WORD.get(part.rstrip("0123456789"))
+        if kind:
+            return kind
+    return None
 
 
 def shown_env_value(name: str, value: Any) -> str:
-    """A reduced form of an environment value that is safe to put in evidence.
+    """A reduced form of an environment value that is safe to put in evidence, decided by value type.
 
-    Secret and personal names hide the value. Under any other name only booleans, regions, and
-    dotted hosts and URLs are shown; under a setting-like name short plain values are shown too.
+    Under a secret or personal name only the origin of a URL is shown. Under any other name a value is
+    shown when its shape fits the kind of setting the name says it is, or when it is a boolean, a region,
+    or a plainly public address. Everything else is hidden.
     """
-    if _secret_or_personal_name(name):
-        return _hidden(value)
     if isinstance(value, bool):
-        return "true" if value else "false"
-    text = str(value) if isinstance(value, (int, float)) else value
-    if not isinstance(text, str):
+        text = "true" if value else "false"
+    elif isinstance(value, (int, float)):
+        text = str(value)
+    elif isinstance(value, str):
+        text = value
+    else:
         return _hidden(value)
-    setting = _setting_name(name)
-    if "://" in text:
-        return _origin(text, setting) or _hidden(value)
-    if _BOOLEAN_RE.fullmatch(text) or _REGION_RE.fullmatch(text):
-        return text
-    if not _LONG_HEX_RE.fullmatch(text) and _host_and_port(text, setting) and (setting or _enough_labels(text)):
-        return text
-    if setting and _setting_shaped(text):
-        return text
-    return _hidden(value)
+    if _secret_or_personal_name(name):
+        return _origin(text, 1) or _hidden(value)
+    kind = _setting_kind(name)
+    shown = _KIND_CHECKS[kind](text) if kind else None
+    return shown or _general_value(text) or _hidden(value)
 
 
 def env_summary(pairs: Iterable[tuple[str, Any]]) -> dict[str, str]:
-    """Environment variable name to its shown value; secret and personal names are always hidden."""
+    """Environment variable name to its shown value; see shown_env_value."""
     return {name: shown_env_value(name, value) for name, value in pairs}
 
 
