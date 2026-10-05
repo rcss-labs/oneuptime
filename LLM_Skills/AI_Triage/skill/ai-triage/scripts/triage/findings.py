@@ -1,46 +1,59 @@
 """Check analyst findings against the evidence they cite, before any model judges them."""
 from __future__ import annotations
+
 import json
 import re
 from pathlib import Path
+
 from triage.evidence import CURRENT, INCIDENT_TIME, load_evidence
 from triage.redact import PLACEHOLDER_RE, Redactor
 from triage.window import WindowError, parse_time
-CHECKED_NAME = 'checked.json'
+
+CHECKED_NAME = "checked.json"
 MIN_EXCERPT = 12
 MAX_EXCERPT = 300
 MAX_MATCHED_TEXT = 500
-ASKED_KEY = 'asked'
+# What was asked of a source (a query, a target name) is kept under this one key, in a fact's data and at
+# the top of its evidence file. It is never evidence: a search query would otherwise "prove" the claim it
+# was typed to look for.
+ASKED_KEY = "asked"
 MIN_WHOLE_VALUE = 3
+# Once every asked string is cut out of an excerpt, this much other text must remain for it to show a finding.
 MIN_FOUND_TEXT = 12
 MAX_ASKED_ENTRY = 200
 MAX_ASKED_ENTRIES = 20
-REPEATS_REQUEST = 'excerpt only repeats what was asked (the request, a query, or a target), not what was found; quote a longer span of what was found'
-PROVENANCES = ('incident_time', 'current', 'inferred')
-CONFIDENCES = ('high', 'medium', 'low')
-_WHITESPACE_RE = re.compile('\\s+')
+REPEATS_REQUEST = (
+    "excerpt only repeats what was asked (the request, a query, or a target), not what was found; "
+    "quote a longer span of what was found"
+)
+PROVENANCES = ("incident_time", "current", "inferred")
+CONFIDENCES = ("high", "medium", "low")
+_WHITESPACE_RE = re.compile(r"\s+")
+
 
 def _collapse(text: str) -> str:
-    return _WHITESPACE_RE.sub(' ', text).strip()
+    return _WHITESPACE_RE.sub(" ", text).strip()
 
-def _strings_in(value: object, with_keys: bool=True) -> list[str]:
+
+def _strings_in(value: object, with_keys: bool = True) -> list[str]:
     """Every string anywhere in value, dict keys included unless with_keys is False."""
-    strings, pending = ([], [value])
+    strings, pending = [], [value]
     while pending:
         item = pending.pop()
         if isinstance(item, str):
             strings.append(item)
         elif isinstance(item, dict):
             if with_keys:
-                strings.extend((str(key) for key in item))
+                strings.extend(str(key) for key in item)
             pending.extend(item.values())
         elif isinstance(item, list):
             pending.extend(item)
     return strings
 
+
 def _asked_under(value: object) -> list[object]:
     """The values of every ASKED_KEY entry at any depth of value."""
-    found, pending = ([], [value])
+    found, pending = [], [value]
     while pending:
         item = pending.pop()
         if isinstance(item, dict):
@@ -50,135 +63,150 @@ def _asked_under(value: object) -> list[object]:
             pending.extend(item)
     return found
 
+
 def _comparable(text: str) -> str:
     return _collapse(text).lower()
 
+
 def _asked_form(text: str) -> str:
     """Lower-cased, whitespace collapsed, and without a trailing dot (collectors echo a hostname without it)."""
-    return _comparable(text).rstrip('.')
+    return _comparable(text).rstrip(".")
+
 
 def _normalised(sources: list[object], with_keys: bool) -> list[str]:
     return [text for text in (_asked_form(item) for source in sources for item in _strings_in(source, with_keys)) if text]
 
-def asked_strings(fact: dict, file_asked: object=None, with_keys: bool=True) -> list[str]:
+
+def asked_strings(fact: dict, file_asked: object = None, with_keys: bool = True) -> list[str]:
     """What was asked for this fact, normalised by _asked_form.
 
     Every string under the fact's data["asked"] (at any depth) and under its evidence file's top-level asked.
     Keys count too (a filter field name is free text), unless with_keys is False.
     """
-    return _normalised([*_asked_under(fact.get('data')), file_asked], with_keys)
+    return _normalised([*_asked_under(fact.get("data")), file_asked], with_keys)
+
 
 def _readable(value: object, name: str) -> list[str]:
     """name=value lines for every leaf of value; nested names are joined with dots and lists with commas."""
     if isinstance(value, dict):
-        return [line for key, item in value.items() for line in _readable(item, f'{name}.{key}' if name else str(key))]
+        return [line for key, item in value.items() for line in _readable(item, f"{name}.{key}" if name else str(key))]
     if value is None:
         return []
     if isinstance(value, list):
-        value = ', '.join((item if isinstance(item, str) else json.dumps(item) for item in value))
-    return [f'{name or ASKED_KEY}={value}']
+        value = ", ".join(item if isinstance(item, str) else json.dumps(item) for item in value)
+    return [f"{name or ASKED_KEY}={value}"]
 
-def asked_entries(fact: dict, file_asked: object=None) -> list[str]:
+
+def asked_entries(fact: dict, file_asked: object = None) -> list[str]:
     """What was asked for this fact, for a reader: the fact's own data["asked"] first, then the file's targets."""
-    entries = [line for asked in _asked_under(fact.get('data')) for line in _readable(asked, '')]
+    entries = [line for asked in _asked_under(fact.get("data")) for line in _readable(asked, "")]
     if isinstance(file_asked, dict):
-        entries += _readable(file_asked.get('targets'), '')
-    cut = [entry if len(entry) <= MAX_ASKED_ENTRY else entry[:MAX_ASKED_ENTRY - 1] + '…' for entry in entries]
+        entries += _readable(file_asked.get("targets"), "")
+    cut = [entry if len(entry) <= MAX_ASKED_ENTRY else entry[: MAX_ASKED_ENTRY - 1] + "…" for entry in entries]
     return cut[:MAX_ASKED_ENTRIES]
 
-def evidence_documents(case_dir: Path, warnings: list[str] | None=None) -> list[tuple[str, dict]]:
+
+def evidence_documents(case_dir: Path, warnings: list[str] | None = None) -> list[tuple[str, dict]]:
     """Every readable evidence document of the case as (file name, document), in file name order."""
     documents = []
-    for path in sorted((case_dir / 'evidence').glob('*.json')):
+    for path in sorted((case_dir / "evidence").glob("*.json")):
         try:
             document = load_evidence(path)
         except (OSError, ValueError):
             document = None
-        facts = document.get('facts', []) if isinstance(document, dict) else None
-        if not isinstance(facts, list) or not all((isinstance(fact, dict) for fact in facts)):
+        facts = document.get("facts", []) if isinstance(document, dict) else None
+        if not isinstance(facts, list) or not all(isinstance(fact, dict) for fact in facts):
             if warnings is not None:
-                warnings.append(f'evidence file {path.name} is unreadable and was skipped')
+                warnings.append(f"evidence file {path.name} is unreadable and was skipped")
             continue
         documents.append((path.name, document))
     return documents
 
+
 def qualified_id(file_name: str, fact_id: str) -> str:
-    return f'{Path(file_name).stem}:{fact_id}'
+    return f"{Path(file_name).stem}:{fact_id}"
+
 
 def _load_facts_and_asked(case_dir: Path, warnings: list[str] | None) -> tuple[dict[str, dict], dict[str, object]]:
     facts: dict[str, dict] = {}
     file_asked: dict[str, object] = {}
     for file_name, document in evidence_documents(case_dir, warnings):
         file_asked[file_name] = document.get(ASKED_KEY)
-        for fact in document.get('facts', []):
-            if not isinstance(fact, dict) or not isinstance(fact.get('id'), str):
+        for fact in document.get("facts", []):
+            if not isinstance(fact, dict) or not isinstance(fact.get("id"), str):
                 if warnings is not None:
-                    warnings.append(f'a fact in {file_name} has no text id and was skipped')
+                    warnings.append(f"a fact in {file_name} has no text id and was skipped")
                 continue
-            facts[qualified_id(file_name, fact['id'])] = {**fact, 'file': file_name}
-    return (facts, file_asked)
+            facts[qualified_id(file_name, fact["id"])] = {**fact, "file": file_name}
+    return facts, file_asked
 
-def load_facts(case_dir: Path, warnings: list[str] | None=None) -> dict[str, dict]:
+
+def load_facts(case_dir: Path, warnings: list[str] | None = None) -> dict[str, dict]:
     """Qualified fact id ("<evidence file stem>:<fact id>") to fact, across all evidence files.
 
     Fact ids are numbered per file, so only the qualified id is unique in a case.
     """
     return _load_facts_and_asked(case_dir, warnings)[0]
 
+
 def _resolve_citation(cited: str, facts: dict[str, dict]) -> tuple[str | None, str | None]:
     """The qualified id a citation names, or a problem when it names none or several."""
     if cited in facts:
-        return (cited, None)
-    matches = sorted((key for key, fact in facts.items() if fact['id'] == cited))
+        return cited, None
+    matches = sorted(key for key, fact in facts.items() if fact["id"] == cited)
     if len(matches) == 1:
-        return (matches[0], None)
+        return matches[0], None
     if matches:
-        return (None, f"fact id {cited} exists in more than one evidence file; cite it as one of: {', '.join(matches)}")
-    return (None, f'fact id {cited} does not exist')
+        return None, f"fact id {cited} exists in more than one evidence file; cite it as one of: {', '.join(matches)}"
+    return None, f"fact id {cited} does not exist"
+
 
 def _is_text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
+
 def _field_problems(finding: dict) -> list[str]:
     problems = []
-    for name in ('id', 'claim', 'excerpt'):
+    for name in ("id", "claim", "excerpt"):
         if name not in finding:
-            problems.append(f'{name} is missing')
+            problems.append(f"{name} is missing")
         elif not isinstance(finding[name], str):
-            problems.append(f'{name} must be text')
-    if 'fact_ids' not in finding:
-        problems.append('fact_ids is missing')
-    elif not isinstance(finding['fact_ids'], list) or not all((isinstance(item, str) for item in finding['fact_ids'])):
-        problems.append('fact_ids must be a list of text')
-    elif not finding['fact_ids']:
-        problems.append('fact_ids is empty')
-    for name, allowed in (('provenance', PROVENANCES), ('confidence', CONFIDENCES)):
+            problems.append(f"{name} must be text")
+    if "fact_ids" not in finding:
+        problems.append("fact_ids is missing")
+    elif not isinstance(finding["fact_ids"], list) or not all(isinstance(item, str) for item in finding["fact_ids"]):
+        problems.append("fact_ids must be a list of text")
+    elif not finding["fact_ids"]:
+        problems.append("fact_ids is empty")
+    for name, allowed in (("provenance", PROVENANCES), ("confidence", CONFIDENCES)):
         if name not in finding:
-            problems.append(f'{name} is missing')
+            problems.append(f"{name} is missing")
         elif finding[name] not in allowed:
             problems.append(f"{name} must be one of {', '.join(allowed)}")
-    if isinstance(finding.get('id'), str) and (not _is_text(finding['id'])):
-        problems.append('id is empty')
-    if isinstance(finding.get('claim'), str) and (not _is_text(finding['claim'])):
-        problems.append('claim is empty')
+    if isinstance(finding.get("id"), str) and not _is_text(finding["id"]):
+        problems.append("id is empty")
+    if isinstance(finding.get("claim"), str) and not _is_text(finding["claim"]):
+        problems.append("claim is empty")
     return problems
+
 
 def quotable_strings(fact: dict) -> list[str]:
     """The text a finding may quote: summary, excerpt, and every string in data (never keys or numbers).
 
     Strings under ASKED_KEY are skipped at any depth.
     """
-    strings = [_collapse(fact[name]) for name in ('summary', 'excerpt') if isinstance(fact.get(name), str)]
-    pending = [fact.get('data')]
+    strings = [_collapse(fact[name]) for name in ("summary", "excerpt") if isinstance(fact.get(name), str)]
+    pending = [fact.get("data")]
     while pending:
         item = pending.pop(0)
         if isinstance(item, str):
             strings.append(_collapse(item))
         elif isinstance(item, dict):
-            pending.extend((value for key, value in item.items() if str(key).lower() != ASKED_KEY))
+            pending.extend(value for key, value in item.items() if str(key).lower() != ASKED_KEY)
         elif isinstance(item, list):
             pending.extend(item)
     return strings
+
 
 def _around(text: str, needle: str) -> str:
     """At most MAX_MATCHED_TEXT characters of text, centred on the first place the needle occurs."""
@@ -187,6 +215,7 @@ def _around(text: str, needle: str) -> str:
     middle = max(text.find(needle), 0) + len(needle) // 2
     start = min(max(middle - MAX_MATCHED_TEXT // 2, 0), len(text) - MAX_MATCHED_TEXT)
     return text[start:start + MAX_MATCHED_TEXT]
+
 
 def _repeats_request(fact: dict, file_asked: object, needle: str) -> bool:
     """True when the excerpt sits inside any asked string of the fact, or when cutting the file's asked values
@@ -199,13 +228,14 @@ def _repeats_request(fact: dict, file_asked: object, needle: str) -> bool:
     asked = asked_strings(fact, file_asked)
     asked_values = _normalised([file_asked], with_keys=False)
     comparable = _asked_form(needle)
-    if any((comparable in text for text in asked)):
+    if any(comparable in text for text in asked):
         return True
     covered = _asked_coverage(comparable, [text for text in asked_values if len(text) >= MIN_WHOLE_VALUE])
     if not any(covered):
         return False
-    found = sum((1 for char, is_asked in zip(comparable, covered) if not is_asked and (not char.isspace())))
+    found = sum(1 for char, is_asked in zip(comparable, covered) if not is_asked and not char.isspace())
     return found < MIN_FOUND_TEXT
+
 
 def _asked_coverage(text: str, asked_values: list[str]) -> list[bool]:
     """Which characters of text belong to an asked value: every whole occurrence, plus an asked value cut off
@@ -214,6 +244,7 @@ def _asked_coverage(text: str, asked_values: list[str]) -> list[bool]:
 
     def mark(start: int, end: int) -> None:
         covered[start:end] = [True] * (end - start)
+
     for value in asked_values:
         position = text.find(value)
         while position >= 0:
@@ -229,6 +260,7 @@ def _asked_coverage(text: str, asked_values: list[str]) -> list[bool]:
                 break
     return covered
 
+
 def _matched_string(fact: dict, needle: str) -> str | None:
     """The quotable string holding the excerpt. A short excerpt must equal a whole string."""
     for text in quotable_strings(fact):
@@ -239,30 +271,34 @@ def _matched_string(fact: dict, needle: str) -> str | None:
             return text
     return None
 
+
 def _excerpt_shape_problem(needle: str) -> str | None:
     if not needle:
-        return 'excerpt is empty'
+        return "excerpt is empty"
     if len(needle) > MAX_EXCERPT:
-        return f'excerpt is longer than {MAX_EXCERPT} characters; quote the part that shows the claim'
-    if not PLACEHOLDER_RE.sub('', needle).strip():
-        return 'excerpt is only redaction placeholders, which carry no evidence'
+        return f"excerpt is longer than {MAX_EXCERPT} characters; quote the part that shows the claim"
+    if not PLACEHOLDER_RE.sub("", needle).strip():
+        return "excerpt is only redaction placeholders, which carry no evidence"
     return None
 
-def _citation_problems(finding: dict, facts: dict[str, dict], file_asked: dict[str, object] | None=None) -> tuple[list[str], dict[str, dict], str]:
+
+def _citation_problems(
+    finding: dict, facts: dict[str, dict], file_asked: dict[str, object] | None = None,
+) -> tuple[list[str], dict[str, dict], str]:
     """Problems with the cited facts and the excerpt, plus the cited facts that exist by qualified id."""
     problems: list[str] = []
     cited: dict[str, dict] = {}
-    if not isinstance(finding.get('fact_ids'), list) or not all((isinstance(item, str) for item in finding['fact_ids'])):
-        return (problems, cited, '')
-    for fact_id in finding['fact_ids']:
+    if not isinstance(finding.get("fact_ids"), list) or not all(isinstance(item, str) for item in finding["fact_ids"]):
+        return problems, cited, ""
+    for fact_id in finding["fact_ids"]:
         key, problem = _resolve_citation(fact_id, facts)
         if problem:
             problems.append(problem)
         else:
             cited[key] = facts[key]
-    excerpt = finding.get('excerpt')
+    excerpt = finding.get("excerpt")
     matching: list[dict] = []
-    matched_text = ''
+    matched_text = ""
     if isinstance(excerpt, str):
         needle = _collapse(excerpt)
         shape_problem = _excerpt_shape_problem(needle)
@@ -271,7 +307,7 @@ def _citation_problems(finding: dict, facts: dict[str, dict], file_asked: dict[s
             text = _matched_string(fact, needle)
             if text is None:
                 continue
-            if _repeats_request(fact, (file_asked or {}).get(fact.get('file')), needle):
+            if _repeats_request(fact, (file_asked or {}).get(fact.get("file")), needle):
                 repeats = True
                 continue
             matching.append(fact)
@@ -281,98 +317,110 @@ def _citation_problems(finding: dict, facts: dict[str, dict], file_asked: dict[s
         elif not matching and repeats:
             problems.append(REPEATS_REQUEST)
         elif not matching and len(needle) < MIN_EXCERPT:
-            problems.append(f'excerpt is shorter than {MIN_EXCERPT} characters and is not a whole value (at least {MIN_WHOLE_VALUE} characters) of a cited fact')
+            problems.append(
+                f"excerpt is shorter than {MIN_EXCERPT} characters and is not a whole value "
+                f"(at least {MIN_WHOLE_VALUE} characters) of a cited fact"
+            )
         elif not matching:
-            problems.append('excerpt was not found in the summary, excerpt, or data of any cited fact')
-    provenance = finding.get('provenance')
-    required_kind = {'incident_time': INCIDENT_TIME, 'current': CURRENT}.get(provenance)
-    if required_kind and finding['fact_ids'] and matching and (not any((fact.get('kind') == required_kind for fact in matching))):
-        problems.append(f'provenance is {provenance} but no cited fact containing the excerpt has kind {required_kind}')
-    elif required_kind and finding['fact_ids'] and (not matching) and (not any((fact.get('kind') == required_kind for fact in cited.values()))):
-        problems.append(f'provenance is {provenance} but no cited fact has kind {required_kind}')
-    return (problems, cited, matched_text)
+            problems.append("excerpt was not found in the summary, excerpt, or data of any cited fact")
+    provenance = finding.get("provenance")
+    required_kind = {"incident_time": INCIDENT_TIME, "current": CURRENT}.get(provenance)
+    if required_kind and finding["fact_ids"] and matching and not any(fact.get("kind") == required_kind for fact in matching):
+        problems.append(f"provenance is {provenance} but no cited fact containing the excerpt has kind {required_kind}")
+    elif required_kind and finding["fact_ids"] and not matching and not any(fact.get("kind") == required_kind for fact in cited.values()):
+        problems.append(f"provenance is {provenance} but no cited fact has kind {required_kind}")
+    return problems, cited, matched_text
 
-def _finding_problems(finding: object, analyst: str, facts: dict[str, dict], seen_ids: set[str], file_asked: dict[str, object] | None=None) -> tuple[list[str], dict[str, dict], str]:
+
+def _finding_problems(
+    finding: object, analyst: str, facts: dict[str, dict], seen_ids: set[str], file_asked: dict[str, object] | None = None,
+) -> tuple[list[str], dict[str, dict], str]:
     if not isinstance(finding, dict):
-        return (['finding is not an object'], {}, '')
+        return ["finding is not an object"], {}, ""
     problems = _field_problems(finding)
     citation_problems, cited, matched_text = _citation_problems(finding, facts, file_asked)
     problems += citation_problems
-    finding_id = finding.get('id')
+    finding_id = finding.get("id")
     if isinstance(finding_id, str) and finding_id:
-        if not finding_id.startswith(f'{analyst}-'):
-            problems.append(f'id must start with {analyst}-')
+        if not finding_id.startswith(f"{analyst}-"):
+            problems.append(f"id must start with {analyst}-")
         if finding_id in seen_ids:
-            problems.append(f'id {finding_id} repeats an earlier finding')
-    if finding.get('time') is not None:
+            problems.append(f"id {finding_id} repeats an earlier finding")
+    if finding.get("time") is not None:
         try:
-            parse_time(finding['time'])
+            parse_time(finding["time"])
         except WindowError:
             problems.append(f"time {finding['time']!r} cannot be parsed")
-    return (problems, cited, matched_text)
+    return problems, cited, matched_text
+
 
 def _read_finding_file(path: Path, case_dir: Path) -> tuple[dict | None, str]:
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
+        data = json.loads(path.read_text())
     except OSError as error:
-        return (None, f'cannot be read: {error.strerror or error}')
+        return None, f"cannot be read: {error.strerror or error}"
     except ValueError:
-        return (None, 'not valid JSON')
+        return None, "not valid JSON"
     if not isinstance(data, dict):
-        return (None, 'top level is not an object')
-    if not isinstance(data.get('findings'), list):
-        return (None, 'findings is missing or not a list')
-    return (data, '')
+        return None, "top level is not an object"
+    if not isinstance(data.get("findings"), list):
+        return None, "findings is missing or not a list"
+    return data, ""
+
 
 def check_findings(case_dir: Path) -> dict:
     warnings: list[str] = []
     facts, file_asked = _load_facts_and_asked(case_dir, warnings)
-    files_with_fact_asked = {fact['file'] for fact in facts.values() if _asked_under(fact.get('data'))}
+    files_with_fact_asked = {fact["file"] for fact in facts.values() if _asked_under(fact.get("data"))}
     for file_name, asked in file_asked.items():
         if asked is None and file_name not in files_with_fact_asked:
-            warnings.append(f'evidence file {file_name} does not record what was asked')
+            warnings.append(f"evidence file {file_name} does not record what was asked")
     redactor = Redactor()
-    result: dict = {'valid': [], 'rejected': [], 'unreadable': [], 'requests': [], 'checked': {}, 'warnings': warnings}
+    result: dict = {"valid": [], "rejected": [], "unreadable": [], "requests": [], "checked": {}, "warnings": warnings}
     seen_ids: set[str] = set()
-    for path in sorted((case_dir / 'findings').glob('*.json')):
+    for path in sorted((case_dir / "findings").glob("*.json")):
         if path.name == CHECKED_NAME:
             continue
         data, reason = _read_finding_file(path, case_dir)
         if data is None:
-            result['unreadable'].append({'file': f'findings/{path.name}', 'reason': reason})
+            result["unreadable"].append({"file": f"findings/{path.name}", "reason": reason})
             continue
         analyst = path.stem
-        if 'analyst' in data and data['analyst'] != analyst:
+        if "analyst" in data and data["analyst"] != analyst:
             reason = f"analyst field {data['analyst']!r} does not match the file name {analyst}"
-            result['unreadable'].append({'file': f'findings/{path.name}', 'reason': reason})
+            result["unreadable"].append({"file": f"findings/{path.name}", "reason": reason})
             continue
-        for finding in data['findings']:
+        for finding in data["findings"]:
             problems, cited, matched_text = _finding_problems(finding, analyst, facts, seen_ids, file_asked)
-            finding_id = finding.get('id') if isinstance(finding, dict) else None
+            finding_id = finding.get("id") if isinstance(finding, dict) else None
             if problems:
-                result['rejected'].append({'analyst': analyst, 'id': finding_id, 'reasons': problems})
+                result["rejected"].append({"analyst": analyst, "id": finding_id, "reasons": problems})
                 continue
             seen_ids.add(finding_id)
-            stored = redactor.value({**finding, 'analyst': analyst})
-            stored['fact_ids'] = list(cited)
-            stored['fact_summaries'] = {key: fact.get('summary', '') for key, fact in cited.items()}
-            stored['matched_text'] = matched_text
-            stored['asked'] = {key: asked_entries(fact, file_asked.get(fact.get('file'))) for key, fact in cited.items()}
-            result['valid'].append(stored)
-        if isinstance(data.get('checked'), list):
-            result['checked'][analyst] = [redactor.text(item) for item in data['checked'] if isinstance(item, str)]
-        for request in data.get('requests') if isinstance(data.get('requests'), list) else []:
+            # Ids and summaries come from evidence that is already redacted, and an id is not text.
+            stored = redactor.value({**finding, "analyst": analyst})
+            stored["fact_ids"] = list(cited)
+            stored["fact_summaries"] = {key: fact.get("summary", "") for key, fact in cited.items()}
+            stored["matched_text"] = matched_text
+            # Written from the evidence only (never from the analyst's file), so the judge can see what each fact
+            # was asked; the evidence is already redacted.
+            stored["asked"] = {key: asked_entries(fact, file_asked.get(fact.get("file"))) for key, fact in cited.items()}
+            result["valid"].append(stored)
+        if isinstance(data.get("checked"), list):
+            result["checked"][analyst] = [redactor.text(item) for item in data["checked"] if isinstance(item, str)]
+        for request in data.get("requests") if isinstance(data.get("requests"), list) else []:
             if isinstance(request, dict):
-                result['requests'].append(redactor.value({'analyst': analyst, **request}))
-    findings_dir = case_dir / 'findings'
+                result["requests"].append(redactor.value({"analyst": analyst, **request}))
+    findings_dir = case_dir / "findings"
     findings_dir.mkdir(exist_ok=True)
-    (findings_dir / CHECKED_NAME).write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
+    (findings_dir / CHECKED_NAME).write_text(json.dumps(result, indent=2) + "\n")
     return result
+
 
 def valid_findings(case_dir: Path) -> dict[str, dict]:
     """Finding id to finding, from the last check. Empty when no check has run."""
     try:
-        checked = json.loads((case_dir / 'findings' / CHECKED_NAME).read_text(encoding='utf-8'))
+        checked = json.loads((case_dir / "findings" / CHECKED_NAME).read_text())
     except (OSError, ValueError):
         return {}
-    return {item['id']: item for item in checked.get('valid', [])}
+    return {item["id"]: item for item in checked.get("valid", [])}
