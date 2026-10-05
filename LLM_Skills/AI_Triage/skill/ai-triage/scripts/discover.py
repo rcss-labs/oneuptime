@@ -15,7 +15,7 @@ from triage.config import ConfigError, TriageConfig, default_config_path, load_c
 from triage.context import SignInExpired
 from triage.discover import discover_hostname
 from triage.service_map import MapError, parse_map
-from triage.fixtures import FixtureError, fixture_dir, replay_banner, runner_from_env
+from triage.fixtures import FixtureError, fixture_dir, replay_banner, kube_runner_from_env, runner_from_env
 
 PLACEHOLDER_SERVICE_NAME = "discovered-service"
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -44,13 +44,13 @@ def _fail(message: str, code: int) -> int:
     return code
 
 
-def main(argv: list[str] | None = None, runner: Runner | None = None) -> int:
+def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runner: Runner | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         replay = fixture_dir()
         if replay and runner is None:
             print(replay_banner(replay), file=sys.stderr)
-        runner = runner or runner_from_env()
+        runner, kube_runner = runner or runner_from_env(), kube_runner or kube_runner_from_env()
     except FixtureError as error:
         return _fail(str(error), 2)
     try:
@@ -61,7 +61,9 @@ def main(argv: list[str] | None = None, runner: Runner | None = None) -> int:
     if unknown:
         return _fail(f"unknown account {', '.join(unknown)}; configured: {', '.join(config.accounts)}", 2)
     try:
-        discovery = discover_hostname(args.hostname, config, runner or subprocess_runner, args.account)
+        discovery = discover_hostname(
+            args.hostname, config, runner or subprocess_runner, args.account,
+            kube_runner=kube_runner or subprocess_runner, skill_dir=args.skill_dir)
     except SignInExpired as expired:
         return _fail(f"Sign-in expired. Run: aws sso login --profile {expired.profile}", 3)
     found = bool(discovery.resources)

@@ -134,3 +134,15 @@ def test_nothing_found_has_empty_validation(skill_dir, capsys):
     _, out, _ = run(skill_dir, capsys, FakeAws({}), "--service-name", "shop")
     data = json.loads(out)
     assert data["validation"] == [] and data["proposed_entry"] is None and data["service_name"] == "shop"
+
+
+def test_cli_follows_ip_targets_to_the_workload(skill_dir, capsys):
+    from helpers import FakeKubectl
+    from test_discover import deployment_pods, ip_target_answers
+    kubectl = FakeKubectl({"get pods": deployment_pods()})
+    code = discover.main(["--hostname", HOSTNAME, "--service-name", "shop", "--skill-dir", str(skill_dir)],
+                         runner=FakeAws(ip_target_answers()), kube_runner=kubectl)
+    data = json.loads(capsys.readouterr().out)
+    assert code == 0 and kubectl.calls
+    assert data["proposed_entry"]["environments"]["discovered"]["resources"]["eks"]["namespace"] == "payments"
+    assert data["validation"] == []

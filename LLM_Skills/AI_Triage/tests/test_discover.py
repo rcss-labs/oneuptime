@@ -402,3 +402,157 @@ def test_cname_loop_is_named_as_a_loop(config):
     assert runner.lookups == [HOSTNAME, "b.example.com"]
     assert any("loop" in note and f"{HOSTNAME} → b.example.com → {HOSTNAME}" in note for note in found.notes)
     assert not any("hops" in note for note in found.notes)
+
+
+# EKS workloads behind IP targets
+
+from helpers import FakeKubectl  # noqa: E402
+from triage.guard import KUBECONFIG_NAME  # noqa: E402
+from triage.guard_kubectl import check_kubectl  # noqa: E402
+
+POD_IP_ONE, POD_IP_TWO = "10.0.1.5", "10.0.2.9"
+
+
+def ip_target_answers():
+    return {
+        **dns_answers(), **lb_answers(),
+        "elbv2 describe-target-groups": {"TargetGroups": [{"TargetGroupArn": TG_ARN, "TargetType": "ip"}]},
+        "elbv2 describe-target-health": {"TargetHealthDescriptions": [
+            {"Target": {"Id": POD_IP_ONE, "Port": 8080}}, {"Target": {"Id": POD_IP_TWO, "Port": 8080}}]},
+        "ecs list-clusters": {"clusterArns": []},
+        "autoscaling describe-auto-scaling-groups": {"AutoScalingGroups": []},
+    }
+
+
+def pod(name, namespace, ip, owner_kind="ReplicaSet", owner_name=None):
+    owner = owner_name or name.rsplit("-", 1)[0]
+    return {
+        "metadata": {"name": name, "namespace": namespace, "labels": {"secret-label": "do-not-keep"},
+                     "ownerReferences": [{"kind": owner_kind, "name": owner, "controller": True}]},
+        "spec": {"nodeName": "node-1", "containers": [
+            {"name": "c", "env": [{"name": "PW", "value": PASSWORD}]}]},
+        "status": {"podIP": ip, "phase": "Running"},
+    }
+
+
+def pods_answer(*pods):
+    return {"items": list(pods)}
+
+
+def deployment_pods():
+    return pods_answer(
+        pod("payments-api-7d9f8c6b5-abcde", "payments", POD_IP_ONE, owner_name="payments-api-7d9f8c6b5"),
+        pod("payments-api-7d9f8c6b5-fghij", "payments", POD_IP_TWO, owner_name="payments-api-7d9f8c6b5"),
+        pod("other-5c7d-zzzzz", "other", "10.0.9.9", owner_name="other-5c7d"),
+    )
+
+
+def kube(config, tmp_path, answers, kube_runner):
+    return discover_hostname(HOSTNAME, config, runner=FakeAws(answers), kube_runner=kube_runner,
+                             skill_dir=tmp_path)
+
+
+def test_ip_targets_are_matched_to_the_pods_of_a_deployment(config, tmp_path):
+    kubectl = FakeKubectl({"get pods": deployment_pods()})
+    found = kube(config, tmp_path, ip_target_answers(), kubectl)
+    assert found.resources["eks"] == {"cluster": "platform-prod", "namespace": "payments",
+                                      "workloads": ["deployment/payments-api"]}
+    assert len(kubectl.calls) == 1
+    argv = kubectl.calls[0]
+    assert argv[argv.index("--context") + 1] == "triage-platform-prod"
+    assert "-A" in argv and "get" in argv and "pods" in argv and "json" in argv
+    step = found.steps[-1]
+    assert step.command.startswith("kubectl ") and "payments-api" in step.found
+    text = json.dumps(found.to_dict()) + json.dumps(found.proposed_entry())
+    assert PASSWORD not in text and "do-not-keep" not in text and "secret-label" not in text
+
+
+def test_statefulset_and_daemonset_owners_are_stated_directly(config, tmp_path):
+    answer = pods_answer(pod("db-0", "data", POD_IP_ONE, "StatefulSet", "db"),
+                         pod("agent-x1", "data", POD_IP_TWO, "DaemonSet", "agent"))
+    found = kube(config, tmp_path, ip_target_answers(), FakeKubectl({"get pods": answer}))
+    assert sorted(found.resources["eks"]["workloads"]) == ["daemonset/agent", "statefulset/db"]
+
+
+def test_no_cluster_holds_the_addresses(config, tmp_path):
+    found = kube(config, tmp_path, ip_target_answers(),
+                 FakeKubectl({"get pods": pods_answer(pod("x-1-aaaaa", "n", "10.9.9.9"))}))
+    assert "eks" not in found.resources
+    assert found.resources["load_balancer"] == "shop-alb"
+    assert any("platform-prod" in note and "no pod" in note for note in found.notes)
+
+
+def test_second_cluster_holds_the_pods(config_data, tmp_path):
+    config_data["eks_clusters"]["platform-prod-b"] = {
+        "account": "prod-main", "region": "eu-west-1", "context": "triage-platform-prod-b"}
+    config = parse_config(config_data)
+
+    def runner(argv, timeout):
+        context = argv[argv.index("--context") + 1]
+        answer = deployment_pods() if context == "triage-platform-prod-b" else pods_answer()
+        return 0, json.dumps(answer), ""
+
+    found = kube(config, tmp_path, ip_target_answers(), runner)
+    assert found.resources["eks"]["cluster"] == "platform-prod-b"
+
+
+def test_kubectl_failure_is_a_note_and_discovery_returns_what_it_has(config, tmp_path):
+    found = kube(config, tmp_path, ip_target_answers(), FakeKubectl({"get pods": (1, "Unable to connect")}))
+    assert "eks" not in found.resources and found.resources["load_balancer"] == "shop-alb"
+    assert any("KubectlError" in note for note in found.notes)
+    assert not any("Unable to connect" in note for note in found.notes)
+
+
+def test_no_configured_cluster_for_the_account_and_region_is_noted(config_data, tmp_path):
+    config_data["eks_clusters"]["platform-prod"]["region"] = "us-east-1"
+    config = parse_config(config_data)
+    kubectl = FakeKubectl({})
+    found = kube(config, tmp_path, ip_target_answers(), kubectl)
+    assert kubectl.calls == []
+    assert any("no EKS cluster is configured" in note for note in found.notes)
+
+
+def test_pods_beyond_the_cap_are_noted(config, tmp_path):
+    many = pods_answer(*[pod(f"p-{n}-aaaaa", "n", f"10.1.{n // 250}.{n % 250}") for n in range(5001)])
+    found = kube(config, tmp_path, ip_target_answers(), FakeKubectl({"get pods": many}))
+    assert any("first 5000 of 5001 pods" in note for note in found.notes)
+
+
+def test_clusters_beyond_three_are_noted(config_data, tmp_path):
+    for number in range(4):
+        config_data["eks_clusters"][f"extra-{number}"] = {
+            "account": "prod-main", "region": "eu-west-1", "context": f"triage-extra-{number}"}
+    config = parse_config(config_data)
+    kubectl = FakeKubectl({"get pods": pods_answer()})
+    found = kube(config, tmp_path, ip_target_answers(), kubectl)
+    assert len(kubectl.calls) == 3
+    assert any("first 3 of 5 EKS clusters" in note for note in found.notes)
+
+
+def test_ecs_match_does_not_ask_kubernetes(config, tmp_path):
+    kubectl = FakeKubectl({"get pods": deployment_pods()})
+    kube(config, tmp_path, full_walk(), kubectl)
+    assert kubectl.calls == []
+
+
+def test_instance_targets_do_not_ask_kubernetes(config, tmp_path):
+    answers = {**ip_target_answers(), "elbv2 describe-target-groups": {
+        "TargetGroups": [{"TargetGroupArn": TG_ARN, "TargetType": "instance"}]}}
+    kubectl = FakeKubectl({"get pods": deployment_pods()})
+    kube(config, tmp_path, answers, kubectl)
+    assert kubectl.calls == []
+
+
+def test_eks_entry_validates_with_the_real_service_map(config, tmp_path):
+    found = kube(config, tmp_path, ip_target_answers(), FakeKubectl({"get pods": deployment_pods()}))
+    entry = found.proposed_entry(monitors=["Shop"])
+    service_map = parse_map({"services": {"shop": entry}}, config)
+    assert service_map.services["shop"].environments["discovered"].resources["eks"]["namespace"] == "payments"
+
+
+def test_every_kubectl_argv_is_allowed_by_the_guard(config, tmp_path):
+    kubectl = FakeKubectl({"get pods": deployment_pods()})
+    kube(config, tmp_path, ip_target_answers(), kubectl)
+    for argv in kubectl.calls:
+        verdict = check_kubectl(tuple(argv), (), str(tmp_path / "config" / KUBECONFIG_NAME), config.kube_contexts())
+        assert verdict.kind == ALLOW, verdict.reason

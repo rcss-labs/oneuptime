@@ -1,20 +1,28 @@
 """Walk from a hostname to the AWS resources behind it, recording the command behind every step."""
 from __future__ import annotations
 
+import json
 import re
 import shlex
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import urlparse
 
 from triage.awscli import SSO_EXPIRED, Runner, run_aws, subprocess_runner
 from triage.config import Account, TriageConfig
 from triage.context import SignInExpired
+from triage.guard import KUBECONFIG_NAME
+from triage.kubectl import run_kubectl
 from triage.redact import Redactor
 
 MAX_TARGET_GROUPS = 10
 MAX_DNS_FOLLOWS = 3
+MAX_EKS_CLUSTERS = 3
+MAX_PODS = 5000
+RUNNING_PODS = "status.phase=Running"
 MAX_CLUSTERS = 10
 SERVICE_BATCH = 10
 HOSTNAME_RE = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:\d{1,5})?")
@@ -80,9 +88,12 @@ def hostname_from_value(value: str) -> str | None:
 
 
 class _Walk:
-    def __init__(self, hostname: str, config: TriageConfig, runner: Runner):
+    def __init__(self, hostname: str, config: TriageConfig, runner: Runner,
+                 kube_runner: Runner = subprocess_runner, skill_dir: Path | None = None):
         self.config = config
         self.runner = runner
+        self.kube_runner = kube_runner
+        self.skill_dir = skill_dir
         self.discovery = Discovery(hostname, [], None, None, {}, [])
 
     def call(self, account: Account, region: str, service: str, operation: str, args: Sequence[str] = ()) -> tuple[Any, str]:
@@ -172,15 +183,72 @@ class _Walk:
                         return account, region, balancer
         return None
 
-    def target_groups(self, account: Account, region: str, balancer: dict) -> set[str]:
+    def target_groups(self, account: Account, region: str, balancer: dict) -> tuple[set[str], list[str]]:
+        """The target group ARNs (at most 10) and the ARNs of those whose targets are IP addresses."""
         data, command = self.call(account, region, "elbv2", "describe-target-groups",
                                   ["--load-balancer-arn", balancer["LoadBalancerArn"]])
-        all_arns = [group["TargetGroupArn"] for group in (data or {}).get("TargetGroups", [])]
-        self.note_cut("target groups", MAX_TARGET_GROUPS, len(all_arns))
-        arns = all_arns[:MAX_TARGET_GROUPS]
-        if arns:
-            self.step(account, region, command, f"{len(arns)} target group(s)")
-        return set(arns)
+        found = (data or {}).get("TargetGroups", [])
+        self.note_cut("target groups", MAX_TARGET_GROUPS, len(found))
+        kept = found[:MAX_TARGET_GROUPS]
+        if kept:
+            self.step(account, region, command, f"{len(kept)} target group(s)")
+        arns = {group["TargetGroupArn"] for group in kept}
+        ip_arns = [group["TargetGroupArn"] for group in kept if group.get("TargetType") == "ip"]
+        return arns, ip_arns
+
+    def target_addresses(self, account: Account, region: str, group_arns: list[str]) -> set[str]:
+        addresses: set[str] = set()
+        for arn in group_arns:
+            data, command = self.call(account, region, "elbv2", "describe-target-health", ["--target-group-arn", arn])
+            ids = [(d.get("Target") or {}).get("Id", "") for d in (data or {}).get("TargetHealthDescriptions", [])]
+            found = {i for i in ids if i and ":" not in i.split("/")[0] and i.replace(".", "").isdigit()}
+            if found:
+                self.step(account, region, command, f"{len(found)} IP target(s)")
+            addresses |= found
+        return addresses
+
+    def find_eks_workload(self, account: Account, region: str, addresses: set[str]) -> None:
+        clusters = [c for c in self.config.eks_clusters.values() if c.account == account.alias and c.region == region]
+        if not clusters:
+            self.discovery.notes.append(
+                f"no EKS cluster is configured for account {account.alias} in {region}; the pods behind the IP targets were not looked up")
+            return
+        if self.skill_dir is None:
+            self.discovery.notes.append("no skill directory was given, so the EKS clusters were not asked for pods")
+            return
+        self.note_cut("EKS clusters", MAX_EKS_CLUSTERS, len(clusters))
+        for cluster in clusters[:MAX_EKS_CLUSTERS]:
+            result = run_kubectl(
+                ["get", "pods", "-o", "json", "--field-selector", RUNNING_PODS],
+                kubeconfig=self.skill_dir / "config" / KUBECONFIG_NAME, context=cluster.context,
+                all_namespaces=True, runner=self.kube_runner)
+            command = shlex.join(result.argv)
+            try:
+                items = json.loads(result.stdout).get("items", []) if result.ok else None
+            except (ValueError, AttributeError):
+                items = None
+            if items is None:
+                self.discovery.notes.append(f"{command}: KubectlError")
+                continue
+            self.note_cut(f"pods in EKS cluster {cluster.name}", MAX_PODS, len(items))
+            matched = _matching_pods(items[:MAX_PODS], addresses)
+            if not matched:
+                self.discovery.notes.append(f"no pod in EKS cluster {cluster.name} has the target IP addresses")
+                continue
+            namespace = Counter(pod["namespace"] for pod in matched).most_common(1)[0][0]
+            workloads = sorted({pod["workload"] for pod in matched if pod["namespace"] == namespace and pod["workload"]})
+            others = sorted({pod["namespace"] for pod in matched} - {namespace})
+            if others:
+                self.discovery.notes.append(
+                    f"target IP addresses also match pods in namespace(s) {', '.join(others)}; using {namespace}")
+            eks: dict[str, Any] = {"cluster": cluster.name, "namespace": namespace}
+            if workloads:
+                eks["workloads"] = workloads
+            self.discovery.resources["eks"] = eks
+            self.step(account, region, command,
+                      f"{len(matched)} pod(s) in {cluster.name}/{namespace}"
+                      + (f": {', '.join(workloads)}" if workloads else ""))
+            return
 
     def find_ecs_service(self, account: Account, region: str, groups: set[str]) -> dict | None:
         clusters, command = self.call(account, region, "ecs", "list-clusters", ["--max-items", "50"])
@@ -259,6 +327,34 @@ class _Walk:
                 return
 
 
+def _owner_workload(pod: dict) -> str | None:
+    """The workload that owns a pod, from its own ownerReferences only (no second call)."""
+    owners = (pod.get("metadata") or {}).get("ownerReferences") or []
+    owner = next((o for o in owners if o.get("controller")), owners[0] if owners else None)
+    if not owner or not owner.get("name"):
+        return None
+    kind, name = str(owner.get("kind", "")), owner["name"]
+    if kind == "ReplicaSet":
+        # A Deployment names its ReplicaSets <deployment>-<pod-template-hash>.
+        deployment = name.rsplit("-", 1)[0] if "-" in name else None
+        return f"deployment/{deployment}" if deployment else f"replicaset/{name}"
+    return f"{kind.lower()}/{name}"
+
+
+def _matching_pods(items: list[dict], addresses: set[str]) -> list[dict]:
+    """Keep only name, namespace, IP, node and owner of the pods whose IP is a target."""
+    matched = []
+    for item in items:
+        ip = (item.get("status") or {}).get("podIP")
+        if ip in addresses:
+            metadata = item.get("metadata") or {}
+            matched.append({
+                "name": metadata.get("name"), "namespace": metadata.get("namespace"), "ip": ip,
+                "node": (item.get("spec") or {}).get("nodeName"), "workload": _owner_workload(item),
+            })
+    return matched
+
+
 def _best_zone(hostname: str, zones: list[dict]) -> dict | None:
     matching = [z for z in zones if hostname == z["Name"].rstrip(".").lower()
                 or hostname.endswith("." + z["Name"].rstrip(".").lower())]
@@ -299,12 +395,14 @@ def discover_hostname(
     config: TriageConfig,
     runner: Runner = subprocess_runner,
     accounts: Sequence[str] = (),
+    kube_runner: Runner = subprocess_runner,
+    skill_dir: Path | None = None,
 ) -> Discovery:
     unknown = [alias for alias in accounts if alias not in config.accounts]
     if unknown:
         raise ValueError(f"unknown account {', '.join(unknown)}; configured: {', '.join(config.accounts)}")
     searched = [config.accounts[alias] for alias in accounts] or list(config.accounts.values())
-    walk = _Walk(hostname.strip().lower().rstrip("."), config, runner)
+    walk = _Walk(hostname.strip().lower().rstrip("."), config, runner, kube_runner, skill_dir)
     dns_name = walk.resolve_dns(searched)
     located = walk.find_load_balancer(searched, dns_name)
     discovery = walk.discovery
@@ -314,7 +412,7 @@ def discover_hostname(
     account, region, balancer = located
     discovery.account, discovery.region = account.alias, region
     discovery.resources["load_balancer"] = balancer["LoadBalancerName"]
-    groups = walk.target_groups(account, region, balancer)
+    groups, ip_groups = walk.target_groups(account, region, balancer)
     service = walk.find_ecs_service(account, region, groups) if groups else None
     if service:
         discovery.resources["ecs_service"] = service["name"]
@@ -324,4 +422,8 @@ def discover_hostname(
         asg = walk.find_auto_scaling_group(account, region, groups)
         if asg:
             discovery.resources["auto_scaling_group"] = asg
+        elif ip_groups:
+            addresses = walk.target_addresses(account, region, ip_groups)
+            if addresses:
+                walk.find_eks_workload(account, region, addresses)
     return discovery
