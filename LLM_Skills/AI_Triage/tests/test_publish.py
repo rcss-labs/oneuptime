@@ -13,6 +13,7 @@ from triage.publish import (
     PUBLISHED_FILES,
     PublishError,
     audit_case,
+    publish_digests,
     confluence_request,
     page_title,
     previous_page,
@@ -696,3 +697,21 @@ def test_recording_keeps_the_other_publish_entry_and_rewrites_case_md(run_dir):
     os.utime(run_dir / "case.md", ns=(1, 1))
     record_slack(run_dir, "#again", NOW)
     assert (run_dir / "case.md").stat().st_mtime_ns != 1 and before != 1
+
+
+# publish_digests
+
+def test_publish_digests_match_what_each_command_audits(run_dir, config):
+    (run_dir / "report.md").write_text("value " + HIGH_ENTROPY + "\n")
+    digests = publish_digests(run_dir, None)
+    with pytest.raises(PublishError, match=digests["confluence"]):
+        confluence_request(run_dir, config)
+    slack_message(run_dir, None)
+    assert audit_case(run_dir)["set_sha256"] == digests["slack-message"]
+    assert digests["confluence"] != digests["slack-message"]
+
+
+def test_publish_digest_for_slack_is_none_when_the_message_cannot_be_built(run_dir):
+    (run_dir / "report.json").unlink()
+    digests = publish_digests(run_dir, None)
+    assert digests["slack-message"] is None and digests["confluence"]

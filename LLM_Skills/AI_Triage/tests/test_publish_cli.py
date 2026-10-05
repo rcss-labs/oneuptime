@@ -255,3 +255,57 @@ def test_a_configured_account_id_passes_in_the_report_but_not_an_unconfigured_on
     assert run(skill_dir, "audit", "--case-dir", str(case_dir)).returncode == 0
     (case_dir / "report.md").write_text("- Account: other (" + "333" * 4 + ")\n")
     assert run(skill_dir, "audit", "--case-dir", str(case_dir)).returncode == 1
+
+
+def _digests_printed_by_audit(stderr):
+    found = {}
+    for line in stderr.splitlines():
+        for label in ("confluence", "slack-message"):
+            if line.startswith(f"for {label}: "):
+                found[label] = line.split(": ", 1)[1].strip()
+    return found
+
+
+def test_audit_prints_one_labelled_digest_per_command_and_each_is_accepted_only_by_its_command(skill_dir, case_dir):
+    (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    audit = run(skill_dir, "audit", "--case-dir", str(case_dir))
+    assert audit.returncode == 1
+    digests = _digests_printed_by_audit(audit.stderr)
+    assert set(digests) == {"confluence", "slack-message"} and digests["confluence"] != digests["slack-message"]
+    assert HIGH_ENTROPY[:14] not in audit.stdout + audit.stderr
+
+    wrong_for_confluence = run(skill_dir, "confluence", "--case-dir", str(case_dir),
+                               f"--accept-hits={digests['slack-message']}")
+    assert wrong_for_confluence.returncode == 1 and wrong_for_confluence.stdout == ""
+    right_for_confluence = run(skill_dir, "confluence", "--case-dir", str(case_dir),
+                               f"--accept-hits={digests['confluence']}")
+    assert right_for_confluence.returncode == 0, right_for_confluence.stderr
+
+    wrong_for_slack = run(skill_dir, "slack-message", "--case-dir", str(case_dir),
+                          f"--accept-hits={digests['confluence']}")
+    assert wrong_for_slack.returncode == 1 and wrong_for_slack.stdout == ""
+    right_for_slack = run(skill_dir, "slack-message", "--case-dir", str(case_dir),
+                          f"--accept-hits={digests['slack-message']}")
+    assert right_for_slack.returncode == 0, right_for_slack.stderr
+
+
+def test_the_slack_digest_follows_the_confluence_url_given_to_audit(skill_dir, case_dir):
+    (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    url = "https://wiki.example.com/pages/9"
+    audit = run(skill_dir, "audit", "--case-dir", str(case_dir), "--confluence-url", url)
+    digest = _digests_printed_by_audit(audit.stderr)["slack-message"]
+    result = run(skill_dir, "slack-message", "--case-dir", str(case_dir), "--confluence-url", url,
+                 f"--accept-hits={digest}")
+    assert result.returncode == 0, result.stderr
+
+
+def test_audit_without_a_readable_config_still_audits_with_no_allowed_account_ids(tmp_path, case_dir):
+    empty = tmp_path / "empty-skill"
+    empty.mkdir()
+    (case_dir / "report.md").write_text("- Account: prod (" + "1" * 12 + ")\n")
+    result = run(empty, "audit", "--case-dir", str(case_dir))
+    assert result.returncode == 1 and "report.md:1:" in result.stdout
+    assert "no readable config" in result.stderr
+    (case_dir / "report.md").write_text("# Report\n")
+    clean = run(empty, "audit", "--case-dir", str(case_dir))
+    assert clean.returncode == 0 and "no readable config" in clean.stderr

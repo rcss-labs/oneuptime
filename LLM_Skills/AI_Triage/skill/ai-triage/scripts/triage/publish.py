@@ -272,6 +272,32 @@ def previous_page(case_dir: Path) -> dict | None:
     return None
 
 
+def publish_digests(case_dir: Path, confluence_url: str | None) -> dict[str, str | None]:
+    """The --accept-hits value each publishing command would need, from the files as they are now.
+
+    The Slack digest assumes the command rewrites slack-message.md with exactly the text built here.
+    It is None when that text cannot be built.
+    """
+    items = {}
+    for name in ("report.md", "work-order.json"):
+        data = _regular_file_bytes(case_dir, name)
+        if data is not None:
+            items[name] = {"sha256": hashlib.sha256(data).hexdigest()}
+    slack_items = dict(items)
+    try:
+        text = _slack_text(case_dir, confluence_url)
+        slack_items["slack-message.md"] = {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+        slack_digest = _set_digest(slack_items)
+    except PublishError:
+        slack_digest = None
+    on_disk = _regular_file_bytes(case_dir, "slack-message.md")
+    if on_disk is not None:
+        items["slack-message.md"] = {"sha256": hashlib.sha256(on_disk).hexdigest()}
+    title = page_title(_load_case_file(case_dir))
+    items["title"] = {"sha256": hashlib.sha256(title.encode("utf-8")).hexdigest()}
+    return {"confluence": _set_digest(items), "slack-message": slack_digest}
+
+
 def configured_account_ids(config: TriageConfig) -> frozenset[str]:
     return frozenset(account.account_id for account in config.accounts.values())
 
@@ -324,8 +350,8 @@ def _cap(text: str, limit: int) -> str:
     return _PARTIAL_ENTITY_RE.sub("", text[:limit - 1]).rstrip() + "…"
 
 
-def slack_message(case_dir: Path, confluence_url: str | None) -> str:
-    """Build the Slack text, redact and neutralise it, keep it within the limit, and write slack-message.md."""
+def _slack_text(case_dir: Path, confluence_url: str | None) -> str:
+    """Build the Slack text, redact and neutralise it, and keep it within the limit. Writes nothing."""
     report = _read_json(case_dir, "report.json")
     incident = _load_case_file(case_dir).get("incident")
     if not isinstance(incident, dict) or not incident.get("number") or not incident.get("title"):
@@ -354,7 +380,12 @@ def slack_message(case_dir: Path, confluence_url: str | None) -> str:
         footer = "Full report: " + safe(confluence_url)
         if len(footer) > SLACK_LINK_LIMIT:
             footer = LINK_TOO_LONG_LINE
-    text = _cap("\n".join(lines), SLACK_LIMIT - len(footer) - 1) + "\n" + footer
+    return _cap("\n".join(lines), SLACK_LIMIT - len(footer) - 1) + "\n" + footer
+
+
+def slack_message(case_dir: Path, confluence_url: str | None) -> str:
+    """Build the Slack text and write it to slack-message.md."""
+    text = _slack_text(case_dir, confluence_url)
     _write_text(case_dir / "slack-message.md", text)
     return text
 

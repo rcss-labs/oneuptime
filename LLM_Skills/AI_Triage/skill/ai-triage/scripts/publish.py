@@ -20,6 +20,7 @@ from triage.publish import (
     hit_lines,
     load_audit,
     may_proceed,
+    publish_digests,
     read_audited,
     record_confluence,
     record_slack,
@@ -45,7 +46,8 @@ def _build_parser() -> argparse.ArgumentParser:
         child.add_argument("--case-dir", type=Path, required=True)
         return child
 
-    add("audit", "check the published files for secrets and write audit.json")
+    audit = add("audit", "check the published files for secrets and write audit.json")
+    audit.add_argument("--confluence-url", help="link the Slack message will carry, so its digest can be predicted")
     confluence_request_parser = add("confluence", "audit now and print the Confluence request when the audit is clean",
                                     aliases=("confluence-request",))
     add_accept(confluence_request_parser)
@@ -89,15 +91,17 @@ def _account_ids(args: argparse.Namespace) -> frozenset[str]:
 
 
 def _audit(args: argparse.Namespace) -> int:
-    result = audit_case(args.case_dir, allowed_account_ids=_account_ids(args))
+    try:
+        account_ids = _account_ids(args)
+    except ConfigError:
+        account_ids = frozenset()
+        print("no readable config: no account ids are allowed in the report", file=sys.stderr)
+    result = audit_case(args.case_dir, allowed_account_ids=account_ids)
     _print_audit(result, sys.stdout)
     if not result["clean"]:
-        _print_refusal_digest(result)
+        for label, digest in publish_digests(args.case_dir, args.confluence_url).items():
+            print(f"for {label}: {digest or 'not available (the Slack message cannot be built)'}", file=sys.stderr)
     return 0 if result["clean"] else 1
-
-
-def _print_refusal_digest(result: dict) -> None:
-    print(f"set sha256 of the audited items: {result['set_sha256']}", file=sys.stderr)
 
 
 def _confluence(args: argparse.Namespace) -> int:
