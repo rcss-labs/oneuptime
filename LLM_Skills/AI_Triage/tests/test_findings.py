@@ -375,7 +375,9 @@ def test_excerpt_spanning_two_list_entries_is_refused(tmp_path):
 
 def test_a_number_in_data_quoted_as_text_is_refused(tmp_path):
     assert check(_fact_with_data(tmp_path, DATA), [finding(fact_ids=["vpc-0001"], excerpt="4242 4242 4242")])["rejected"] != []
-    assert check(_fact_with_data(tmp_path, {"count": 998877665}), [finding(fact_ids=["vpc-0001"], excerpt="998877665")])["rejected"] != []
+    other = tmp_path / "other"
+    other.mkdir()
+    assert check(_fact_with_data(other, {"count": 998877665}), [finding(fact_ids=["vpc-0001"], excerpt="998877665")])["rejected"] != []
 
 
 def test_a_data_key_name_quoted_is_refused(tmp_path):
@@ -432,14 +434,25 @@ def test_a_real_hit_message_in_the_same_fact_is_accepted(tmp_path, search_cluste
     assert result["rejected"] == []
 
 
-@pytest.mark.parametrize("key", ["asked", "query", "index", "filters", "window", "method", "command", "request", "target", "parameters"])
-def test_strings_under_bookkeeping_keys_are_not_quotable_at_any_depth(tmp_path, key):
+@pytest.mark.parametrize("key", ["asked", "Asked"])
+def test_strings_under_asked_are_not_quotable_at_any_depth(tmp_path, key):
     case = _fact_with_data(tmp_path, {"outer": {key: {"deep": ["searched for needle phrase"]}}})
     assert check(case, [finding(fact_ids=["vpc-0001"], excerpt="searched for needle phrase")])["rejected"] != []
 
 
-def test_strings_under_bookkeeping_keys_never_count_as_whole_values(tmp_path):
-    case = _fact_with_data(tmp_path, {"method": "terms"})
+@pytest.mark.parametrize("key", ["query", "index", "filters", "window", "method", "command", "request", "target", "parameters"])
+def test_real_values_under_other_key_names_are_evidence(tmp_path, key):
+    case = _fact_with_data(tmp_path, {"outer": {key: {"deep": ["upstream connect error or disconnect"]}}})
+    assert check(case, [finding(fact_ids=["vpc-0001"], excerpt="upstream connect error")])["rejected"] == []
+
+
+def test_a_short_value_under_a_former_bookkeeping_name_is_a_whole_value(tmp_path):
+    case = _fact_with_data(tmp_path, {"method": "POST"})
+    assert check(case, [finding(fact_ids=["vpc-0001"], excerpt="POST")])["rejected"] == []
+
+
+def test_strings_under_asked_never_count_as_whole_values(tmp_path):
+    case = _fact_with_data(tmp_path, {"asked": {"method": "terms"}})
     assert check(case, [finding(fact_ids=["vpc-0001"], excerpt="terms")])["rejected"] != []
 
 
@@ -473,3 +486,113 @@ def test_matched_text_is_cut_around_the_match(tmp_path):
 def test_rejection_message_names_summary_excerpt_or_data(case_dir):
     reasons = reasons_of(check(case_dir, [finding(excerpt="out of memory")]))
     assert any("summary, excerpt, or data" in reason for reason in reasons)
+
+
+# What was asked never serves as evidence (ruling 2)
+
+REPEATS = "only repeats what was asked"
+
+
+def _asked_fact(case_dir, summary, data=None, file_asked=None, collector="changes", kind=INCIDENT_TIME, suffix=""):
+    evidence = Evidence(collector, "prod-main", "eu-west-1", WINDOW)
+    if file_asked is not None:
+        evidence.set_asked(file_asked, {"start": "2026-10-04T10:00:00Z", "end": "2026-10-04T12:00:00Z"})
+    evidence.add(kind=kind, resource="r", summary=summary, time="2026-10-04T10:41:00Z", data=data)
+    evidence.write(case_dir, suffix)
+    return case_dir
+
+
+def test_an_excerpt_inside_a_facts_asked_string_is_refused_even_when_the_summary_echoes_it(tmp_path):
+    case = _asked_fact(tmp_path, "Found nothing for OutOfMemoryError checkout today",
+                       data={"asked": {"query": "OutOfMemoryError checkout"}})
+    reasons = reasons_of(check(case, [finding(fact_ids=["changes-0001"], excerpt="OutOfMemoryError checkout", provenance="inferred")]))
+    assert any(REPEATS in reason and "quote what was found" in reason for reason in reasons)
+
+
+def test_an_excerpt_inside_a_file_level_asked_target_is_refused(tmp_path):
+    case = _asked_fact(tmp_path, "No change was recorded for OutOfMemoryError in checkout between two times",
+                       file_asked={"resource_names": "OutOfMemoryError in checkout"})
+    reasons = reasons_of(check(case, [finding(fact_ids=["changes-0001"], excerpt="OutOfMemoryError in checkout", provenance="inferred")]))
+    assert any(REPEATS in reason for reason in reasons)
+
+
+def test_an_excerpt_inside_one_item_of_an_asked_list_is_refused(tmp_path):
+    case = _asked_fact(tmp_path, "skipped: /aws/a, /aws/checkout/OutOfMemoryError-killed",
+                       file_asked={"log_groups": ["/aws/a", "/aws/checkout/OutOfMemoryError-killed"]})
+    assert check(case, [finding(fact_ids=["changes-0001"], excerpt="OutOfMemoryError", provenance="inferred")])["valid"] == []
+
+
+def test_asked_matching_ignores_case_and_whitespace(tmp_path):
+    case = _asked_fact(tmp_path, "outofmemoryerror checkout seen", data={"asked": {"query": "OutOfMemoryError\n   Checkout"}})
+    assert check(case, [finding(fact_ids=["changes-0001"], excerpt="outofmemoryerror  CHECKOUT", provenance="inferred")])["valid"] == []
+
+
+def test_the_whole_value_exception_never_applies_to_an_asked_string(tmp_path):
+    case = _asked_fact(tmp_path, "checkout", data={"service": "checkout"}, file_asked={"service": "checkout"})
+    reasons = reasons_of(check(case, [finding(fact_ids=["changes-0001"], excerpt="checkout", provenance="inferred")]))
+    assert any(REPEATS in reason for reason in reasons)
+
+
+def test_an_excerpt_with_an_asked_string_plus_found_text_is_accepted(tmp_path):
+    case = _asked_fact(tmp_path, "No change was recorded for checkout-api between 10:00 and 10:55",
+                       file_asked={"resource_names": "checkout-api"})
+    result = check(case, [finding(fact_ids=["changes-0001"], excerpt="No change was recorded for checkout-api", provenance="inferred")])
+    assert result["rejected"] == []
+
+
+def test_asked_strings_of_one_fact_do_not_refuse_the_excerpt_in_another_cited_fact(tmp_path):
+    _asked_fact(tmp_path, "OutOfMemoryError checkout", data={"asked": {"query": "OutOfMemoryError checkout"}}, collector="opensearch")
+    _asked_fact(tmp_path, "java.lang.OutOfMemoryError checkout heap", collector="logs")
+    result = check(tmp_path, [finding(fact_ids=["opensearch-0001", "logs-0001"], excerpt="OutOfMemoryError checkout")])
+    assert result["rejected"] == []
+    assert result["valid"][0]["matched_text"] == "java.lang.OutOfMemoryError checkout heap"
+
+
+def test_asked_strings_of_another_evidence_file_do_not_refuse_an_excerpt(tmp_path):
+    _asked_fact(tmp_path, "unrelated", file_asked={"resource_names": "OutOfMemoryError checkout"}, collector="changes")
+    _asked_fact(tmp_path, "java.lang.OutOfMemoryError checkout heap", collector="logs")
+    assert check(tmp_path, [finding(fact_ids=["logs-0001"], excerpt="OutOfMemoryError checkout")])["rejected"] == []
+
+
+def test_the_asked_window_is_an_asked_string(tmp_path):
+    case = _asked_fact(tmp_path, "first line at 2026-10-04T10:00:00Z", file_asked={"service": "x"})
+    assert check(case, [finding(fact_ids=["changes-0001"], excerpt="2026-10-04T10:00:00Z", provenance="inferred")])["valid"] == []
+
+
+def test_a_finding_refused_for_repeating_the_request_is_not_also_called_missing(tmp_path):
+    case = _asked_fact(tmp_path, "Found nothing for OutOfMemoryError checkout", data={"asked": {"query": "OutOfMemoryError checkout"}})
+    reasons = reasons_of(check(case, [finding(fact_ids=["changes-0001"], excerpt="OutOfMemoryError checkout", provenance="inferred")]))
+    assert not any("not found" in reason for reason in reasons)
+
+
+# Excerpt length and placeholder-only excerpts (ruling 3)
+
+def test_an_excerpt_of_300_characters_is_accepted_and_301_refused(tmp_path):
+    text = "x" * 150 + " " + "y" * 200
+    case = _fact_with_data(tmp_path, {"rows": [text]})
+    assert check(case, [finding(fact_ids=["vpc-0001"], excerpt=text[:300])])["rejected"] == []
+    reasons = reasons_of(check(case, [finding(fact_ids=["vpc-0001"], excerpt=text[:301])]))
+    assert any("300 characters" in reason for reason in reasons)
+
+
+@pytest.mark.parametrize("excerpt", ["<SECRET-1> <TOKEN-2>", "  <SECRET-1>   <SECRET-2>  <EMAIL-3> "])
+def test_an_excerpt_made_only_of_placeholders_is_refused(tmp_path, excerpt):
+    case = _fact_with_data(tmp_path, {"value": excerpt}, summary=excerpt)
+    reasons = reasons_of(check(case, [finding(fact_ids=["vpc-0001"], excerpt=excerpt)]))
+    assert any("placeholder" in reason for reason in reasons)
+
+
+def test_an_excerpt_with_placeholders_and_found_text_is_accepted(tmp_path):
+    case = _fact_with_data(tmp_path, {"value": "login failed for <EMAIL-1> from <IP-2>"})
+    assert check(case, [finding(fact_ids=["vpc-0001"], excerpt="login failed for <EMAIL-1>")])["rejected"] == []
+
+
+def test_matched_text_always_holds_a_300_character_excerpt(tmp_path):
+    case = _fact_with_data(tmp_path, {"rows": ["placeholder"]})
+    path = next((case / "evidence").glob("*.json"))
+    document = json.loads(path.read_text())
+    needle = "N" * 299 + "E"
+    document["facts"][0]["data"]["rows"] = ["a" * 499 + " " + needle + " " + "b" * 900]
+    path.write_text(json.dumps(document))
+    matched = check(case, [finding(fact_ids=["vpc-0001"], excerpt=needle)])["valid"][0]["matched_text"]
+    assert len(matched) == 500 and needle in matched

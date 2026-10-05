@@ -11,12 +11,12 @@ from triage.window import WindowError, parse_time
 
 CHECKED_NAME = "checked.json"
 MIN_EXCERPT = 12
+MAX_EXCERPT = 300
 MAX_MATCHED_TEXT = 500
-# Data under these keys says what was asked of a source, not what it returned, so a finding
-# must not quote it: a search query would otherwise "prove" the claim it was typed to look for.
-NOT_QUOTABLE_KEYS = frozenset({
-    "asked", "query", "index", "filters", "window", "method", "command", "request", "target", "parameters",
-})
+# What was asked of a source (a query, a target name) is kept under this one key, in a fact's data and at
+# the top of its evidence file. It is never evidence: a search query would otherwise "prove" the claim it
+# was typed to look for.
+ASKED_KEY = "asked"
 MIN_WHOLE_VALUE = 3
 PROVENANCES = ("incident_time", "current", "inferred")
 CONFIDENCES = ("high", "medium", "low")
@@ -25,6 +25,47 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 def _collapse(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+def _strings_in(value: object) -> list[str]:
+    """Every string anywhere in value, dict keys included."""
+    strings, pending = [], [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            strings.append(item)
+        elif isinstance(item, dict):
+            strings.extend(str(key) for key in item)
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return strings
+
+
+def _asked_under(value: object) -> list[object]:
+    """The values of every ASKED_KEY entry at any depth of value."""
+    found, pending = [], [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            for key, child in item.items():
+                (found if str(key).lower() == ASKED_KEY else pending).append(child)
+        elif isinstance(item, list):
+            pending.extend(item)
+    return found
+
+
+def _comparable(text: str) -> str:
+    return _collapse(text).lower()
+
+
+def asked_strings(fact: dict, file_asked: object = None) -> list[str]:
+    """What was asked for this fact, lower-cased with whitespace collapsed.
+
+    Every string under the fact's data["asked"] (at any depth) and under its evidence file's top-level asked.
+    """
+    sources = [*_asked_under(fact.get("data")), file_asked]
+    return [text for text in (_comparable(item) for source in sources for item in _strings_in(source)) if text]
 
 
 def evidence_documents(case_dir: Path, warnings: list[str] | None = None) -> list[tuple[str, dict]]:
@@ -48,20 +89,26 @@ def qualified_id(file_name: str, fact_id: str) -> str:
     return f"{Path(file_name).stem}:{fact_id}"
 
 
-def load_facts(case_dir: Path, warnings: list[str] | None = None) -> dict[str, dict]:
-    """Qualified fact id ("<evidence file stem>:<fact id>") to fact, across all evidence files.
-
-    Fact ids are numbered per file, so only the qualified id is unique in a case.
-    """
+def _load_facts_and_asked(case_dir: Path, warnings: list[str] | None) -> tuple[dict[str, dict], dict[str, object]]:
     facts: dict[str, dict] = {}
+    file_asked: dict[str, object] = {}
     for file_name, document in evidence_documents(case_dir, warnings):
+        file_asked[file_name] = document.get(ASKED_KEY)
         for fact in document.get("facts", []):
             if not isinstance(fact, dict) or not isinstance(fact.get("id"), str):
                 if warnings is not None:
                     warnings.append(f"a fact in {file_name} has no text id and was skipped")
                 continue
             facts[qualified_id(file_name, fact["id"])] = {**fact, "file": file_name}
-    return facts
+    return facts, file_asked
+
+
+def load_facts(case_dir: Path, warnings: list[str] | None = None) -> dict[str, dict]:
+    """Qualified fact id ("<evidence file stem>:<fact id>") to fact, across all evidence files.
+
+    Fact ids are numbered per file, so only the qualified id is unique in a case.
+    """
+    return _load_facts_and_asked(case_dir, warnings)[0]
 
 
 def _resolve_citation(cited: str, facts: dict[str, dict]) -> tuple[str | None, str | None]:
@@ -108,7 +155,7 @@ def _field_problems(finding: dict) -> list[str]:
 def quotable_strings(fact: dict) -> list[str]:
     """The text a finding may quote: summary, excerpt, and every string in data (never keys or numbers).
 
-    Strings under NOT_QUOTABLE_KEYS are skipped at any depth.
+    Strings under ASKED_KEY are skipped at any depth.
     """
     strings = [_collapse(fact[name]) for name in ("summary", "excerpt") if isinstance(fact.get(name), str)]
     pending = [fact.get("data")]
@@ -117,7 +164,7 @@ def quotable_strings(fact: dict) -> list[str]:
         if isinstance(item, str):
             strings.append(_collapse(item))
         elif isinstance(item, dict):
-            pending.extend(value for key, value in item.items() if str(key).lower() not in NOT_QUOTABLE_KEYS)
+            pending.extend(value for key, value in item.items() if str(key).lower() != ASKED_KEY)
         elif isinstance(item, list):
             pending.extend(item)
     return strings
@@ -132,10 +179,13 @@ def _around(text: str, needle: str) -> str:
     return text[start:start + MAX_MATCHED_TEXT]
 
 
+def _repeats_request(needle: str, asked: list[str]) -> bool:
+    comparable = _comparable(needle)
+    return any(comparable in text for text in asked)
+
+
 def _matched_string(fact: dict, needle: str) -> str | None:
     """The quotable string holding the excerpt. A short excerpt must equal a whole string."""
-    if PLACEHOLDER_RE.fullmatch(needle):
-        return None
     for text in quotable_strings(fact):
         if len(needle) >= MIN_EXCERPT:
             if needle in text:
@@ -145,7 +195,19 @@ def _matched_string(fact: dict, needle: str) -> str | None:
     return None
 
 
-def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str], dict[str, dict], str]:
+def _excerpt_shape_problem(needle: str) -> str | None:
+    if not needle:
+        return "excerpt is empty"
+    if len(needle) > MAX_EXCERPT:
+        return f"excerpt is longer than {MAX_EXCERPT} characters; quote the part that shows the claim"
+    if not PLACEHOLDER_RE.sub("", needle).strip():
+        return "excerpt is only redaction placeholders, which carry no evidence"
+    return None
+
+
+def _citation_problems(
+    finding: dict, facts: dict[str, dict], file_asked: dict[str, object] | None = None,
+) -> tuple[list[str], dict[str, dict], str]:
     """Problems with the cited facts and the excerpt, plus the cited facts that exist by qualified id."""
     problems: list[str] = []
     cited: dict[str, dict] = {}
@@ -162,13 +224,24 @@ def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str]
     matched_text = ""
     if isinstance(excerpt, str):
         needle = _collapse(excerpt)
-        for fact in cited.values():
-            text = _matched_string(fact, needle) if needle else None
-            if text is not None:
-                matching.append(fact)
-                matched_text = matched_text or _around(text, needle)
-        if not needle:
-            problems.append("excerpt is empty")
+        shape_problem = _excerpt_shape_problem(needle)
+        repeats = False
+        for fact in cited.values() if shape_problem is None else ():
+            text = _matched_string(fact, needle)
+            if text is None:
+                continue
+            if _repeats_request(needle, asked_strings(fact, (file_asked or {}).get(fact.get("file")))):
+                repeats = True
+                continue
+            matching.append(fact)
+            matched_text = matched_text or _around(text, needle)
+        if shape_problem:
+            problems.append(shape_problem)
+        elif not matching and repeats:
+            problems.append(
+                "excerpt only repeats what was asked (the request, a query, or a target), "
+                "not what was found; the finding must quote what was found"
+            )
         elif not matching and len(needle) < MIN_EXCERPT:
             problems.append(
                 f"excerpt is shorter than {MIN_EXCERPT} characters and is not a whole value "
@@ -185,11 +258,13 @@ def _citation_problems(finding: dict, facts: dict[str, dict]) -> tuple[list[str]
     return problems, cited, matched_text
 
 
-def _finding_problems(finding: object, analyst: str, facts: dict[str, dict], seen_ids: set[str]) -> tuple[list[str], dict[str, dict], str]:
+def _finding_problems(
+    finding: object, analyst: str, facts: dict[str, dict], seen_ids: set[str], file_asked: dict[str, object] | None = None,
+) -> tuple[list[str], dict[str, dict], str]:
     if not isinstance(finding, dict):
         return ["finding is not an object"], {}, ""
     problems = _field_problems(finding)
-    citation_problems, cited, matched_text = _citation_problems(finding, facts)
+    citation_problems, cited, matched_text = _citation_problems(finding, facts, file_asked)
     problems += citation_problems
     finding_id = finding.get("id")
     if isinstance(finding_id, str) and finding_id:
@@ -221,7 +296,7 @@ def _read_finding_file(path: Path, case_dir: Path) -> tuple[dict | None, str]:
 
 def check_findings(case_dir: Path) -> dict:
     warnings: list[str] = []
-    facts = load_facts(case_dir, warnings)
+    facts, file_asked = _load_facts_and_asked(case_dir, warnings)
     redactor = Redactor()
     result: dict = {"valid": [], "rejected": [], "unreadable": [], "requests": [], "checked": {}, "warnings": warnings}
     seen_ids: set[str] = set()
@@ -238,7 +313,7 @@ def check_findings(case_dir: Path) -> dict:
             result["unreadable"].append({"file": f"findings/{path.name}", "reason": reason})
             continue
         for finding in data["findings"]:
-            problems, cited, matched_text = _finding_problems(finding, analyst, facts, seen_ids)
+            problems, cited, matched_text = _finding_problems(finding, analyst, facts, seen_ids, file_asked)
             finding_id = finding.get("id") if isinstance(finding, dict) else None
             if problems:
                 result["rejected"].append({"analyst": analyst, "id": finding_id, "reasons": problems})
