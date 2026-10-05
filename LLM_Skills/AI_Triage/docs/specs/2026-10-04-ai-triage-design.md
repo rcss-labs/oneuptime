@@ -837,7 +837,7 @@ Every evidence file records what was asked (`asked`), and the file name is the i
 
 ### Redaction (section 9)
 
-Redaction is a module that never raises, normalises text before matching, and masks key-like tokens in free text with stable placeholders (R7, R11). Secret keys are decided by name components, not by substring (R1). Environment values are shown by value type for each kind of setting name, and under a secret-like name only a URL origin is shown (R2, R3, R5, R9, R10). IP addresses are not masked, which differs from section 9, which replaced client IP addresses; phone numbers with a leading `+` are masked (R8). Free text that an application raises inside a database log is a stated limit (E13).
+Redaction is a module that never raises, normalises text before matching, and masks key-like tokens in free text with stable placeholders (R7, R11). Secret keys are decided by name components, not by substring (R1). Environment values are shown by value type for each kind of setting name, and under a secret-like name only a URL origin is shown (R2, R3, R5, R9, R10). Public IPv4 addresses are masked as `<IP-n>` with numbering that restarts in each evidence file, so section 9's stable placeholders hold within a file and not across files; private addresses stay readable, and phone numbers with a leading `+` are masked (R8, R11). A value after a secret word is masked whatever its shape (R14). Free text that an application raises inside a database log is a stated limit (E13).
 
 ### Findings (sections 7, 8)
 
@@ -858,4 +858,27 @@ The publish audit has a second, independent detector besides the redaction rules
 ### Skill text (section 7)
 
 The method in section 7 became `SKILL.md`, a 13-step recipe, with exact file formats in `reference/formats.md` and 21 playbooks, tested against the code (S1 to S3).
+
+### After the final review
+
+The final whole-branch review led to further changes, and it listed what sections 1 to 17 describe but the build did not deliver. Reasons are in [../decisions.md](../decisions.md).
+
+Changed:
+
+- Case folders are only `<cases_dir>/<incident>/<run>`, and every command checks it (G29). Replay cases are marked and cannot be published (G31).
+- The hook also decides connector calls: OneUptime writes are denied, Slack sends ask, and a Confluence page write is allowed only for the audited body (G30). Section 6 had only the shell guard.
+- The inline policy has 77 actions, not the 95 of section 15. Unused actions were removed, and `verify_access.py` simulates the reads that rest on `ViewOnlyAccess` (G32). API Gateway usage plans are not granted.
+- `depends_on` is used: the plan runs a light set (changes, and alarms when mapped) for each direct dependency, one level deep (E23). Sections 4 and 7 did not say how.
+- The plan runs `alarms`, `ecr` and `opensearch_domain` from new map keys (E23). Change lookups also go by event source (E21). Metric facts state lowest, highest, the comparison with last week and the first departure (E22).
+- `discover.py --save`, `case.py collect`, `publish.py verify-confluence` and `reference/intake.md` exist (E24, E27, P11, S4). `timeline.json` is the timeline file.
+- Report free text may not state a label, and the page prints the judged top cause with the author's sentences under their own heading (RP5). The report prints quotes (RP6). The judge is sent the quoted passage (F12).
+- Each script exits through one wrapper with one exit-code table (G35).
+
+Not built:
+
+- The staleness check of section 4 (`last_verified` is stored and not compared with anything).
+- Discovery by tags, and discovery down to the database for anything but an ECS task definition.
+- "Profiles used" in the run details of the report.
+- Slack to named people: the message goes to a channel, after you say yes.
+- Open questions 1, 2, 4 and 5 of section 15 are all still open, and are settled only by the live check: whether skill hooks fire in subagents, whether the policy simulator works against a permission set's role, the OneUptime tool shapes, and the Confluence and Slack connector behaviour.
 

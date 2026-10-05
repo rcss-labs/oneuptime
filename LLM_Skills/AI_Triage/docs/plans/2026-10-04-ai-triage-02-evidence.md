@@ -10,6 +10,8 @@
 
 **Spec:** `LLM_Skills/AI_Triage/docs/specs/2026-10-04-ai-triage-design.md`, sections 3, 5.2, 5.3, 7 (playbook table), 9, and build stage 2 of section 14. Stage 1 is complete; read `docs/plans/2026-10-04-ai-triage-01-foundation.md` only for the interfaces named below.
 
+> **Superseded:** the interfaces and requirements in this plan were changed by later fix rounds and the final review. The repository, not this plan, is the reference. Decisions are in `docs/decisions.md`.
+
 This plan specifies interfaces, behaviour, and required tests. It does not carry complete code. Each task is implemented test-first by its implementer.
 
 ## Global Constraints

@@ -10,6 +10,8 @@
 
 **Spec:** `LLM_Skills/AI_Triage/docs/specs/2026-10-04-ai-triage-design.md`, sections 4 (map suggestions), 9 (redaction), 11 (publishing), and 13 (replay tests). This is build stage 5, code part. The skill text, playbooks, and prompts are written by the controller after this plan, test-first, using the replay scenarios from Task 3.
 
+> **Superseded:** the interfaces in this plan were changed by later fix rounds and the final review (for example, both detectors must be clean, and publishing refuses unless the render marker is current). The repository, not this plan, is the reference.
+
 This plan specifies interfaces, behaviour, and required tests. Each task is implemented test-first.
 
 ## Global Constraints

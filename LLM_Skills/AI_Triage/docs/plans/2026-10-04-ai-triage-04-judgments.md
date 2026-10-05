@@ -10,6 +10,8 @@
 
 **Spec:** `LLM_Skills/AI_Triage/docs/specs/2026-10-04-ai-triage-design.md`, section 8. This is build stage 4. It depends on the stage 3 contracts in `docs/plans/2026-10-04-ai-triage-03-method-code.md` ("Shared Contracts").
 
+> **Superseded:** the rules in this plan were changed by later fix rounds (for example, the fallback option is not always last: the second ranking request reverses the whole list, decision J5). The repository, not this plan, is the reference.
+
 This plan specifies interfaces, behaviour, and required tests. Each task is implemented test-first.
 
 ## Global Constraints

@@ -10,6 +10,8 @@
 
 **Spec:** `LLM_Skills/AI_Triage/docs/specs/2026-10-04-ai-triage-design.md`, sections 3 (run flow, case folder), 7 (method), and 10 (report and work order). This is build stage 3, code only. The skill text, playbooks, and prompts are written in the stage 5 plan, after the judgment and publishing code exist.
 
+> **Superseded:** the interfaces in this plan were changed by later fix rounds and the final review (for example, findings cite qualified fact ids, and `valid_findings` is no longer the loader). The repository, not this plan, is the reference.
+
 This plan specifies interfaces, behaviour, and required tests. Each task is implemented test-first.
 
 ## Global Constraints
