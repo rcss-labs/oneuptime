@@ -319,3 +319,30 @@ def test_a_vpc_taken_from_the_target_is_called_an_assumption(config_data, tmp_pa
     COLLECTOR.run(ctx, {"subnet_ids": SUBNET, "vpc_id": VPC})
     fact = by_summary(ctx, "Route table rtb-0main")[0]
     assert f"VPC {VPC} is assumed from the target, not read" in fact.summary
+
+
+def test_facts_carry_resource_ids_and_the_arns_the_answers_return(config_data, tmp_path):
+    group_arn = "arn:aws:ec2:eu-west-1:111111111111:security-group/sg-0aaa1111"
+    subnet_arn = "arn:aws:ec2:eu-west-1:111111111111:subnet/subnet-0aaa1111"
+    answers = healthy_answers(**{
+        "ec2 describe-security-groups": {"SecurityGroups": [{**security_group(), "SecurityGroupArn": group_arn}]},
+        "ec2 describe-subnets": {"Subnets": [{
+            "SubnetId": SUBNET, "VpcId": VPC, "AvailabilityZone": "eu-west-1a", "AvailableIpAddressCount": 5,
+            "SubnetArn": subnet_arn}]},
+        "ec2 describe-vpc-endpoints": {"VpcEndpoints": [
+            {"VpcEndpointId": "vpce-0bbb", "ServiceName": "s", "State": "failed"}]}})
+    ctx, _, _ = run(config_data, tmp_path, answers)
+    group = by_summary(ctx, "Security group sg-0aaa1111")[0].data
+    assert group["resource_id"] == "sg-0aaa1111" and group["arn"] == group_arn
+    subnets = [f for f in ctx.evidence.facts if f.resource == f"subnet/{SUBNET}"]
+    assert all(f.data == {"resource_id": SUBNET, "arn": subnet_arn} for f in subnets) and len(subnets) == 2
+    assert by_summary(ctx, "Route table rtb-0aaa")[0].data == {"resource_id": "rtb-0aaa"}
+    assert by_summary(ctx, "Network ACL acl-0aaa")[0].data == {"resource_id": "acl-0aaa"}
+    assert by_summary(ctx, "NAT gateway nat-0aaa")[0].data == {"resource_id": "nat-0aaa"}
+    assert by_summary(ctx, "VPC endpoint vpce-0bbb")[0].data == {"resource_id": "vpce-0bbb"}
+
+
+def test_answers_without_an_arn_write_no_arn_key(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, healthy_answers())
+    assert "arn" not in by_summary(ctx, "Security group sg-0aaa1111")[0].data
+    assert by_summary(ctx, "Subnet subnet-0aaa1111")[0].data == {"resource_id": SUBNET}

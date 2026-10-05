@@ -20,6 +20,14 @@ ROUTE_TARGET_KEYS = (
 )
 
 
+def _ids(resource_id: str | None, arn: str | None = None) -> dict:
+    """The id of a resource and, only when the answer returned one, its ARN; no ARN is ever constructed."""
+    data = {"resource_id": resource_id}
+    if arn:
+        data["arn"] = arn
+    return data
+
+
 def _cidr_words(cidr: str) -> str:
     """Name the open-to-everyone ranges in words, which reads more clearly than 0.0.0.0/0."""
     return {"0.0.0.0/0": "anywhere (IPv4)", "::/0": "anywhere (IPv6)"}.get(cidr, cidr)
@@ -70,7 +78,7 @@ def _add_security_groups(ctx: CollectContext, ids: list[str]) -> None:
     for group in groups:
         inbound, outbound = group.get("IpPermissions", []), group.get("IpPermissionsEgress", [])
         open_count = sum(1 for p in inbound if _is_open_to_anywhere(p))
-        data: dict = {"rules": _rule_list(inbound)}
+        data: dict = {**_ids(group.get("GroupId"), group.get("SecurityGroupArn")), "rules": _rule_list(inbound)}
         if len(inbound) > MAX_RULES_LISTED:
             data["rules_omitted"] = len(inbound) - MAX_RULES_LISTED
         ctx.evidence.add(
@@ -93,13 +101,14 @@ def _add_subnets(ctx: CollectContext, ids: list[str]) -> dict[str, str | None]:
     for subnet in subnets:
         free = subnet.get("AvailableIpAddressCount")
         resource = f"subnet/{subnet.get('SubnetId')}"
+        identity = _ids(subnet.get("SubnetId"), subnet.get("SubnetArn"))
         ctx.evidence.add(
-            kind=CURRENT, resource=resource, command=ctx.last_command,
+            kind=CURRENT, resource=resource, command=ctx.last_command, data=identity,
             summary=f"Subnet {subnet.get('SubnetId')} in {subnet.get('AvailabilityZone')} has {free} free addresses",
         )
         if isinstance(free, int) and free < LOW_ADDRESS_COUNT:
             ctx.evidence.add(
-                kind=DERIVED, resource=resource, command=ctx.last_command,
+                kind=DERIVED, resource=resource, command=ctx.last_command, data=identity,
                 summary=f"Subnet {subnet.get('SubnetId')} has only {free} free addresses (fewer than {LOW_ADDRESS_COUNT})",
             )
     _add_not_found(ctx, "subnet", "Subnet", ids, {s.get("SubnetId") for s in subnets})
@@ -154,7 +163,7 @@ def _add_route_tables(ctx: CollectContext, subnet_vpcs: dict[str, str | None], d
         explicit |= _explicit_subnets(table)
         ctx.evidence.add(
             kind=CURRENT, resource=f"route-table/{table.get('RouteTableId')}", command=ctx.last_command,
-            summary=_route_summary(table, ""),
+            data=_ids(table.get("RouteTableId")), summary=_route_summary(table, ""),
         )
     implicit = [identifier for identifier in subnet_ids if identifier not in explicit]
     vpcs = {i: subnet_vpcs[i] or default_vpc for i in implicit}
@@ -183,7 +192,7 @@ def _add_main_route_table(ctx: CollectContext, vpc_id: str, subnets: list[str], 
         used_by = f" (the main route table of {vpc_id}, used by {', '.join(subnets)} implicitly{note})"
         ctx.evidence.add(
             kind=CURRENT, resource=f"route-table/{table.get('RouteTableId')}", command=ctx.last_command,
-            summary=_route_summary(table, used_by),
+            data=_ids(table.get("RouteTableId")), summary=_route_summary(table, used_by),
         )
 
 
@@ -211,6 +220,7 @@ def _add_network_acls(ctx: CollectContext, subnet_ids: list[str]) -> None:
         detail = "; ".join(_deny_text(e) for e in denies) or "no deny entries besides the default rule"
         ctx.evidence.add(
             kind=CURRENT, resource=f"network-acl/{acl.get('NetworkAclId')}", command=ctx.last_command,
+            data=_ids(acl.get("NetworkAclId")),
             summary=f"Network ACL {acl.get('NetworkAclId')}: {detail}",
         )
 
@@ -222,6 +232,7 @@ def _add_nat_gateways(ctx: CollectContext, vpc_id: str) -> None:
         failure = f": {gateway['FailureMessage']}" if gateway.get("FailureMessage") else ""
         ctx.evidence.add(
             kind=CURRENT, resource=f"nat-gateway/{gateway.get('NatGatewayId')}", command=ctx.last_command,
+            data=_ids(gateway.get("NatGatewayId")),
             summary=f"NAT gateway {gateway.get('NatGatewayId')} is {gateway.get('State')}{failure}",
         )
     specs = [
@@ -240,6 +251,7 @@ def _add_endpoints(ctx: CollectContext, vpc_id: str) -> None:
             continue
         ctx.evidence.add(
             kind=CURRENT, resource=f"vpc-endpoint/{endpoint.get('VpcEndpointId')}", command=ctx.last_command,
+            data=_ids(endpoint.get("VpcEndpointId")),
             summary=f"VPC endpoint {endpoint.get('VpcEndpointId')} ({endpoint.get('ServiceName')}) is {endpoint.get('State')}",
         )
 
