@@ -13,7 +13,12 @@ from triage.publish import (
     PUBLISHED_FILES,
     PublishError,
     audit_case,
+    SPACE_ID_NOTE,
     publish_digests,
+    publish_state_entry,
+    slack_context,
+    verify_confluence,
+    write_publish_state,
     confluence_request,
     page_title,
     previous_page,
@@ -372,6 +377,8 @@ def test_confluence_request_audits_the_file_itself_without_a_prior_audit(run_dir
         "parent_page_id": config.confluence_parent_page_id,
         "title": "INC-123 Triage: Checkout API is down",
         "body_file": str(run_dir.resolve() / "report.md"),
+        "body_format": "markdown",
+        "space_id_note": SPACE_ID_NOTE,
         "body_sha256": hashlib.sha256((run_dir / "report.md").read_bytes()).hexdigest(),
         "existing_page": None,
     }
@@ -715,3 +722,112 @@ def test_publish_digest_for_slack_is_none_when_the_message_cannot_be_built(run_d
     (run_dir / "report.json").unlink()
     digests = publish_digests(run_dir, None)
     assert digests["slack-message"] is None and digests["confluence"]
+
+
+# publish state, slack context, read-back verification
+
+def test_publish_state_is_written_atomically_and_merged(cases_dir, run_dir):
+    write_publish_state(cases_dir, "confluence", {"case_dir": str(run_dir), "title": "T", "body_sha256": "a" * 64,
+                                                  "written_at": "2026-10-04T12:00:00Z"})
+    write_publish_state(cases_dir, "slack", {"case_dir": str(run_dir), "text_sha256": "b" * 64,
+                                             "written_at": "2026-10-04T12:01:00Z"})
+    state = json.loads((cases_dir / ".publish-state.json").read_text())
+    assert state["confluence"]["title"] == "T" and state["slack"]["text_sha256"] == "b" * 64
+    assert not list(cases_dir.glob(".publish-state.json.*"))
+
+
+def test_publish_state_survives_a_damaged_earlier_file(cases_dir, run_dir):
+    (cases_dir / ".publish-state.json").write_text("{broken")
+    write_publish_state(cases_dir, "slack", {"text_sha256": "b" * 64})
+    assert json.loads((cases_dir / ".publish-state.json").read_text()) == {"slack": {"text_sha256": "b" * 64}}
+
+
+def test_publish_state_is_replaced_not_written_through_a_link(cases_dir, run_dir, tmp_path):
+    outside = tmp_path / "outside.json"
+    outside.write_text("keep")
+    (cases_dir / ".publish-state.json").symlink_to(outside)
+    write_publish_state(cases_dir, "slack", {"text_sha256": "b" * 64})
+    assert outside.read_text() == "keep"
+    assert json.loads((cases_dir / ".publish-state.json").read_text())["slack"]
+
+
+def test_publish_state_entries_hold_the_hashes_of_what_was_prepared(run_dir, config):
+    request = confluence_request(run_dir, config)
+    entry = publish_state_entry(run_dir, "confluence", request, NOW)
+    assert entry == {"case_dir": str(run_dir.resolve()), "title": request["title"],
+                     "body_sha256": request["body_sha256"], "written_at": "2026-10-04T12:00:00Z"}
+    text = slack_message(run_dir, None)
+    entry = publish_state_entry(run_dir, "slack", text, NOW)
+    assert entry["text_sha256"] == hashlib.sha256(text.encode()).hexdigest() and "title" not in entry
+
+
+def test_the_request_names_a_space_id_when_the_config_holds_one(run_dir, config):
+    object.__setattr__(config, "confluence_space_id", "98765")
+    request = confluence_request(run_dir, config)
+    assert request["space_id"] == "98765" and "space_id_note" not in request and request["body_format"] == "markdown"
+
+
+def test_slack_context_has_the_default_channel_and_incident_url(config):
+    case = case_data()
+    case["incident"]["url"] = "https://oneuptime.example.com/incident/abc"
+    assert slack_context(case, config) == {"default_channel": config.slack_default_channel,
+                                           "incident_url": "https://oneuptime.example.com/incident/abc"}
+    case["incident"]["url"] = ""
+    assert slack_context(case, config)["incident_url"] is None
+
+
+def make_intake_file(config, text, name="readback.md"):
+    intake = config.cases_dir.parent / "intake"
+    intake.mkdir(parents=True, exist_ok=True)
+    path = intake / name
+    path.write_text(text)
+    return path
+
+
+def test_verify_confluence_matches_after_normalising_line_ends_and_trailing_space(run_dir, config):
+    audit_case(run_dir)
+    body = (run_dir / "report.md").read_text()
+    readback = make_intake_file(config, body.replace("\n", "  \r\n"))
+    assert verify_confluence(run_dir, readback, config) == {"matches": True}
+
+
+def test_verify_confluence_names_the_first_differing_line(run_dir, config):
+    audit_case(run_dir)
+    readback = make_intake_file(config, "# Report\n\nAll gone wrong.\n")
+    result = verify_confluence(run_dir, readback, config)
+    assert result["matches"] is False and result["line"] == 3
+    assert result["expected"] == "All clear." and result["got"] == "All gone wrong."
+
+
+def test_verify_confluence_redacts_the_line_it_reports(run_dir, config):
+    audit_case(run_dir)
+    readback = make_intake_file(config, "# Report\n\nkey " + AWS_KEY + "\n")
+    result = verify_confluence(run_dir, readback, config)
+    assert AWS_KEY not in json.dumps(result)
+
+
+def test_verify_confluence_refuses_a_file_outside_the_intake_folder(run_dir, config, tmp_path):
+    audit_case(run_dir)
+    outside = tmp_path / "elsewhere.md"
+    outside.write_text("x")
+    with pytest.raises(PublishError, match="intake"):
+        verify_confluence(run_dir, outside, config)
+
+
+def test_verify_confluence_refuses_a_link_out_of_the_intake_folder(run_dir, config, tmp_path):
+    audit_case(run_dir)
+    outside = tmp_path / "elsewhere.md"
+    outside.write_text("x")
+    intake = config.cases_dir.parent / "intake"
+    intake.mkdir(parents=True, exist_ok=True)
+    (intake / "link.md").symlink_to(outside)
+    with pytest.raises(PublishError, match="intake"):
+        verify_confluence(run_dir, intake / "link.md", config)
+
+
+def test_verify_confluence_needs_the_audited_report(run_dir, config):
+    audit_case(run_dir)
+    (run_dir / "report.md").write_text("# changed\n")
+    readback = make_intake_file(config, "# changed\n")
+    with pytest.raises(PublishError, match="audit"):
+        verify_confluence(run_dir, readback, config)

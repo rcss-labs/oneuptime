@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check the report for secrets, prepare what is published to Confluence and Slack, and record what was published.
 
-Exit codes: 0 done, 1 the audit found something or a precondition failed, 2 usage or config error.
+Exit codes: 0 done, 1 the audit found something or a precondition failed (including a replay case), 2 usage,
+config, or case folder error.
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from triage.case import CaseError, resolve_case_dir
 from triage.config import ConfigError, default_config_path, load_config
 from triage.publish import (
     PublishError,
@@ -19,12 +21,17 @@ from triage.publish import (
     confluence_request,
     hit_lines,
     load_audit,
+    load_case_file,
     may_proceed,
     publish_digests,
+    publish_state_entry,
     read_audited,
     record_confluence,
     record_slack,
+    slack_context,
     slack_message,
+    verify_confluence,
+    write_publish_state,
 )
 from triage.report import render_is_current
 from triage.window import WindowError, parse_time
@@ -45,6 +52,8 @@ def _build_parser() -> argparse.ArgumentParser:
         child = sub.add_parser(name, help=help_text, description=help_text, aliases=list(aliases), allow_abbrev=False)
         child.add_argument("--skill-dir", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         child.add_argument("--case-dir", type=Path, required=True)
+        child.add_argument("--allow-replay", action="store_true",
+                           help="engineer only: publish a case that was made from recordings (for tests)")
         return child
 
     audit = add("audit", "check the published files for secrets and write audit.json")
@@ -52,9 +61,14 @@ def _build_parser() -> argparse.ArgumentParser:
     confluence_request_parser = add("confluence", "audit now and print the Confluence request when the audit is clean",
                                     aliases=("confluence-request",))
     add_accept(confluence_request_parser)
+    confluence_request_parser.add_argument("--now", help=argparse.SUPPRESS)
     slack = add("slack-message", "write the Slack message, audit, and print it when the audit is clean")
     add_accept(slack)
+    slack.add_argument("--now", help=argparse.SUPPRESS)
     slack.add_argument("--confluence-url", help="link to the Confluence page")
+    verify = add("verify-confluence", "compare text read back from the Confluence page with the audited report")
+    verify.add_argument("--body-file", type=Path, required=True,
+                        help="the text the agent saved from the page, under the intake folder")
     confluence = add("record-confluence", "record the Confluence page that was published")
     confluence.add_argument("--page-id", required=True)
     confluence.add_argument("--url", required=True)
@@ -98,19 +112,14 @@ def _note_accepted(result: dict) -> None:
         _print_audit(result, sys.stderr)
 
 
-def _account_ids(args: argparse.Namespace) -> frozenset[str]:
-    return configured_account_ids(load_config(default_config_path(args.skill_dir)))
+def _account_ids(config) -> frozenset[str]:
+    return configured_account_ids(config)
 
 
-def _audit(args: argparse.Namespace) -> int:
+def _audit(args: argparse.Namespace, config) -> int:
     if not _render_is_current(args.case_dir):
         return 1
-    try:
-        account_ids = _account_ids(args)
-    except ConfigError:
-        account_ids = frozenset()
-        print("no readable config: no account ids are allowed in the report", file=sys.stderr)
-    result = audit_case(args.case_dir, allowed_account_ids=account_ids)
+    result = audit_case(args.case_dir, allowed_account_ids=_account_ids(config))
     _print_audit(result, sys.stdout)
     if not result["clean"]:
         for label, digest in publish_digests(args.case_dir, args.confluence_url).items():
@@ -118,51 +127,82 @@ def _audit(args: argparse.Namespace) -> int:
     return 0 if result["clean"] else 1
 
 
-def _confluence(args: argparse.Namespace) -> int:
+def _confluence(args: argparse.Namespace, config) -> int:
     if not _render_is_current(args.case_dir):
         return 1
-    config = load_config(default_config_path(args.skill_dir))
     request = confluence_request(args.case_dir, config, args.accept_hits)
+    write_publish_state(args.case_dir.parent.parent, "confluence",
+                        publish_state_entry(args.case_dir, "confluence", request, _now(args)))
     _note_accepted(load_audit(args.case_dir))
     print(json.dumps(request, indent=2))
     return 0
 
 
-def _slack_message(args: argparse.Namespace) -> int:
+def _slack_message(args: argparse.Namespace, config) -> int:
     if not _render_is_current(args.case_dir):
         return 1
-    account_ids = _account_ids(args)
     slack_message(args.case_dir, args.confluence_url)
-    result = audit_case(args.case_dir, args.accept_hits, account_ids)
+    result = audit_case(args.case_dir, args.accept_hits, _account_ids(config))
     if not may_proceed(result):
         _print_refusal(result)
         return 1
+    text = read_audited(args.case_dir, "slack-message.md", result)
+    write_publish_state(args.case_dir.parent.parent, "slack", publish_state_entry(args.case_dir, "slack", text, _now(args)))
     _note_accepted(result)
-    print(read_audited(args.case_dir, "slack-message.md", result))
+    print(text)
+    for name, value in slack_context(load_case_file(args.case_dir), config).items():
+        print(f"{name}: {value if value else '(none)'}", file=sys.stderr)
     return 0
 
 
-def _record_confluence(args: argparse.Namespace) -> int:
+def _verify_confluence(args: argparse.Namespace, config) -> int:
+    result = verify_confluence(args.case_dir, args.body_file, config)
+    if result["matches"]:
+        print("matches")
+        return 0
+    print(f"line {result['line']} differs")
+    print(f"expected: {result['expected']}")
+    print(f"got:      {result['got']}")
+    return 1
+
+
+def _record_confluence(args: argparse.Namespace, config) -> int:
     record_confluence(args.case_dir, args.page_id, args.url, _now(args))
     return 0
 
 
-def _record_slack(args: argparse.Namespace) -> int:
+def _record_slack(args: argparse.Namespace, config) -> int:
     record_slack(args.case_dir, args.destination, _now(args))
     return 0
+
+
+def _refuse_replay(args: argparse.Namespace) -> bool:
+    if load_case_file(args.case_dir).get("replay") and not args.allow_replay:
+        print("this case is a replay: its evidence comes from recordings, not from live systems; nothing is published",
+              file=sys.stderr)
+        return True
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"audit": _audit, "confluence": _confluence, "confluence-request": _confluence, "slack-message": _slack_message,
-               "record-confluence": _record_confluence, "record-slack": _record_slack}[args.subcommand]
+               "verify-confluence": _verify_confluence, "record-confluence": _record_confluence,
+               "record-slack": _record_slack}[args.subcommand]
     try:
-        return handler(args)
+        config = load_config(default_config_path(args.skill_dir))
+        args.case_dir = resolve_case_dir(args.case_dir, config)
+        if _refuse_replay(args):
+            return 1
+        return handler(args, config)
     except PublishError as error:
         print(str(error), file=sys.stderr)
         return 1
-    except (ConfigError, WindowError) as error:
-        print("\n".join(error.errors) if isinstance(error, ConfigError) else str(error), file=sys.stderr)
+    except (ConfigError, CaseError) as error:
+        print("\n".join(error.errors), file=sys.stderr)
+        return 2
+    except WindowError as error:
+        print(str(error), file=sys.stderr)
         return 2
 
 

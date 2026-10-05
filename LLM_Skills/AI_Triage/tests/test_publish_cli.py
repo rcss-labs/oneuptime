@@ -104,7 +104,9 @@ def test_confluence_prints_the_request_as_json(skill_dir, case_dir):
     result = run(skill_dir, "confluence", "--case-dir", str(case_dir))
     assert result.returncode == 0, result.stderr
     request = json.loads(result.stdout)
-    assert set(request) == {"space_key", "parent_page_id", "title", "body_file", "body_sha256", "existing_page"}
+    assert set(request) == {"space_key", "parent_page_id", "title", "body_file", "body_format", "body_sha256",
+                           "existing_page", "space_id_note"}
+    assert request["body_format"] == "markdown"
     assert request["title"] == "INC-123 Triage: Checkout API is down"
     assert request["existing_page"] is None
 
@@ -164,9 +166,9 @@ def test_record_slack_accumulates(skill_dir, case_dir):
     assert [s["destination"] for s in load_case(case_dir)["publish"]["slack"]] == ["#incidents", "#oncall"]
 
 
-def test_record_with_a_missing_case_exits_one(skill_dir, tmp_path):
+def test_record_with_a_missing_case_exits_two(skill_dir, tmp_path):
     result = run(skill_dir, "record-slack", "--case-dir", str(tmp_path / "nope"), "--destination", "#x")
-    assert result.returncode == 1
+    assert result.returncode == 2 and "not a case folder" in result.stderr
 
 
 def test_missing_required_option_is_a_usage_error(skill_dir, case_dir):
@@ -322,15 +324,125 @@ def test_the_slack_digest_follows_the_confluence_url_given_to_audit(skill_dir, c
     assert result.returncode == 0, result.stderr
 
 
-def test_audit_without_a_readable_config_still_audits_with_no_allowed_account_ids(tmp_path, case_dir):
+def test_audit_without_a_readable_config_exits_two(tmp_path, case_dir):
     empty = tmp_path / "empty-skill"
     empty.mkdir()
-    (case_dir / "report.md").write_text("- Account: prod (" + "1" * 12 + ")\n")
-    resign(case_dir)
     result = run(empty, "audit", "--case-dir", str(case_dir))
-    assert result.returncode == 1 and "report.md:1:" in result.stdout
-    assert "no readable config" in result.stderr
-    (case_dir / "report.md").write_text("# Report\n")
+    assert result.returncode == 2 and result.stdout == ""
+
+
+# case folders, replay, publish state, verify-confluence
+
+SUBCOMMANDS = (("audit",), ("confluence",), ("slack-message",), ("record-confluence", "--page-id", "1", "--url", "https://x.example.com/1"),
+               ("record-slack", "--destination", "#x"), ("verify-confluence", "--body-file", "x"))
+
+
+@pytest.mark.parametrize("command", SUBCOMMANDS)
+def test_every_subcommand_refuses_a_folder_that_is_not_a_run_under_the_cases_root(skill_dir, case_dir, tmp_path, command):
+    import shutil
+    copy_dir = tmp_path / "copy" / "INC-123" / "20261004-110000"
+    shutil.copytree(case_dir, copy_dir)
+    result = run(skill_dir, command[0], "--case-dir", str(copy_dir), *command[1:])
+    assert result.returncode == 2 and "not a case folder" in result.stderr and result.stdout == ""
+    assert not (copy_dir / "audit.json").exists() and not (copy_dir / "slack-message.md").exists()
+
+
+def test_a_link_to_a_run_outside_the_root_is_refused(skill_dir, case_dir, tmp_path):
+    import shutil
+    outside = tmp_path / "outside" / "INC-123" / "20261004-110000"
+    shutil.copytree(case_dir, outside)
+    link = case_dir.parent / "20261004-120000"
+    link.symlink_to(outside)
+    assert run(skill_dir, "audit", "--case-dir", str(link)).returncode == 2
+
+
+def _make_replay(case_dir):
+    case = load_case(case_dir)
+    case["replay"] = True
+    save_case(case_dir, case)
+
+
+@pytest.mark.parametrize("command", [("audit",), ("confluence",), ("slack-message",),
+                                     ("record-confluence", "--page-id", "1", "--url", "https://x.example.com/1"),
+                                     ("record-slack", "--destination", "#x")])
+def test_a_replay_case_is_refused_unless_allowed(skill_dir, case_dir, command):
+    _make_replay(case_dir)
+    result = run(skill_dir, command[0], "--case-dir", str(case_dir), *command[1:])
+    assert result.returncode == 1 and "this case is a replay" in result.stderr and result.stdout == ""
+    assert not (case_dir / "slack-message.md").exists()
+    assert not (case_dir.parent.parent / ".publish-state.json").exists()
+
+
+def test_a_replay_case_publishes_with_allow_replay(skill_dir, case_dir):
+    _make_replay(case_dir)
+    result = run(skill_dir, "confluence", "--case-dir", str(case_dir), "--allow-replay")
+    assert result.returncode == 0, result.stderr
+
+
+def test_confluence_writes_the_publish_state_after_a_clean_audit(skill_dir, case_dir):
+    result = run(skill_dir, "confluence", "--case-dir", str(case_dir), "--now", "2026-10-04T12:00:00Z")
+    assert result.returncode == 0, result.stderr
+    request = json.loads(result.stdout)
+    state = json.loads((case_dir.parent.parent / ".publish-state.json").read_text())
+    assert state["confluence"] == {"case_dir": str(case_dir.resolve()), "title": request["title"],
+                                   "body_sha256": request["body_sha256"], "written_at": "2026-10-04T12:00:00Z"}
+    assert "slack" not in state
+
+
+def test_a_refused_confluence_request_writes_no_state(skill_dir, case_dir):
+    (case_dir / "report.md").write_text("a\nkey " + AWS_KEY + "\n")
     resign(case_dir)
-    clean = run(empty, "audit", "--case-dir", str(case_dir))
-    assert clean.returncode == 0 and "no readable config" in clean.stderr
+    assert run(skill_dir, "confluence", "--case-dir", str(case_dir)).returncode == 1
+    assert not (case_dir.parent.parent / ".publish-state.json").exists()
+
+
+def test_slack_message_adds_its_state_next_to_the_confluence_state(skill_dir, case_dir):
+    import hashlib
+    assert run(skill_dir, "confluence", "--case-dir", str(case_dir)).returncode == 0
+    result = run(skill_dir, "slack-message", "--case-dir", str(case_dir), "--now", "2026-10-04T12:05:00Z")
+    assert result.returncode == 0, result.stderr
+    state = json.loads((case_dir.parent.parent / ".publish-state.json").read_text())
+    text = (case_dir / "slack-message.md").read_text()
+    assert state["slack"] == {"case_dir": str(case_dir.resolve()), "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                              "written_at": "2026-10-04T12:05:00Z"}
+    assert "confluence" in state
+
+
+def test_slack_output_names_the_default_channel_and_incident_url(skill_dir, case_dir):
+    case = load_case(case_dir)
+    case["incident"]["url"] = "https://oneuptime.example.com/incident/abc"
+    save_case(case_dir, case)
+    result = run(skill_dir, "slack-message", "--case-dir", str(case_dir))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (case_dir / "slack-message.md").read_text() + "\n"
+    assert "default_channel: #incidents" in result.stderr
+    assert "incident_url: https://oneuptime.example.com/incident/abc" in result.stderr
+
+
+def _intake(case_dir, text, name="readback.md"):
+    intake = case_dir.parent.parent.parent / "intake"
+    intake.mkdir(exist_ok=True)
+    (intake / name).write_text(text)
+    return intake / name
+
+
+def test_verify_confluence_reports_a_match(skill_dir, case_dir):
+    assert run(skill_dir, "audit", "--case-dir", str(case_dir)).returncode == 0
+    path = _intake(case_dir, (case_dir / "report.md").read_text() + "\n\n")
+    result = run(skill_dir, "verify-confluence", "--case-dir", str(case_dir), "--body-file", str(path))
+    assert result.returncode == 0 and "matches" in result.stdout
+
+
+def test_verify_confluence_prints_the_first_differing_line(skill_dir, case_dir):
+    assert run(skill_dir, "audit", "--case-dir", str(case_dir)).returncode == 0
+    path = _intake(case_dir, "# Report\nchanged\n")
+    result = run(skill_dir, "verify-confluence", "--case-dir", str(case_dir), "--body-file", str(path))
+    assert result.returncode == 1 and "line 2" in result.stdout and "changed" in result.stdout
+
+
+def test_verify_confluence_refuses_a_path_outside_the_intake_folder(skill_dir, case_dir, tmp_path):
+    assert run(skill_dir, "audit", "--case-dir", str(case_dir)).returncode == 0
+    outside = tmp_path / "elsewhere.md"
+    outside.write_text("# Report\n")
+    result = run(skill_dir, "verify-confluence", "--case-dir", str(case_dir), "--body-file", str(outside))
+    assert result.returncode == 1 and "intake" in result.stderr

@@ -5,6 +5,7 @@ import errno
 import hashlib
 import json
 import os
+import itertools
 import re
 import stat
 import sys
@@ -25,6 +26,9 @@ SLACK_ACTION_LIMIT = 3
 SLACK_LINK_LIMIT = 1400
 NO_LINK_LINE = "Full report: not published to Confluence"
 LINK_TOO_LONG_LINE = "Full report: link too long to include"
+SPACE_ID_NOTE = "the config holds no Confluence space id; the connector may need it looked up from space_key"
+PUBLISH_STATE_NAME = ".publish-state.json"
+REPORTED_LINE_LIMIT = 200
 ZERO_WIDTH_SPACE = "​"
 _WHITESPACE_RE = re.compile(r"\s+")
 _PARTIAL_ENTITY_RE = re.compile(r"&[a-z]*$")
@@ -112,6 +116,10 @@ def _load_case_file(run_dir: Path) -> dict:
     if not isinstance(data, dict):
         raise PublishError(f"{path}: damaged, must hold a JSON object")
     return data
+
+
+def load_case_file(run_dir: Path) -> dict:
+    return _load_case_file(run_dir)
 
 
 def _regular_file_bytes(case_dir: Path, name: str) -> bytes | None:
@@ -311,14 +319,21 @@ def confluence_request(case_dir: Path, config: TriageConfig, accept_hits: str | 
     result = _audit(case_dir, title, accept_hits, configured_account_ids(config))
     if not may_proceed(result):
         raise PublishError(_refusal(result))
-    return {
+    request = {
         "space_key": config.confluence_space_key,
         "parent_page_id": config.confluence_parent_page_id,
         "title": title,
         "body_file": str(case_dir.resolve() / "report.md"),
+        "body_format": "markdown",
         "body_sha256": result["sha256"]["report.md"],
         "existing_page": previous_page(case_dir),
     }
+    space_id = getattr(config, "confluence_space_id", None)
+    if space_id:
+        request["space_id"] = str(space_id)
+    else:
+        request["space_id_note"] = SPACE_ID_NOTE
+    return request
 
 
 def _field(item: dict, key: str, where: str) -> str:
@@ -410,3 +425,68 @@ def record_slack(case_dir: Path, destination: str, now: datetime) -> None:
         raise PublishError(f"{case_dir / 'case.json'}: damaged, publish.slack must be a list")
     entries.append({"destination": destination, "at": format_time(now)})
     save_case(case_dir, case)
+
+
+def publish_state_entry(case_dir: Path, section: str, prepared, now: datetime) -> dict:
+    """What the guard learns about a prepared publication: the case, the hashes, and when."""
+    entry = {"case_dir": str(case_dir.resolve())}
+    if section == "confluence":
+        entry.update({"title": prepared["title"], "body_sha256": prepared["body_sha256"]})
+    else:
+        entry["text_sha256"] = hashlib.sha256(prepared.encode("utf-8")).hexdigest()
+    entry["written_at"] = format_time(now)
+    return entry
+
+
+def write_publish_state(cases_root: Path, section: str, entry: dict) -> None:
+    """Merge one section into <cases root>/.publish-state.json, replacing the file atomically."""
+    path = cases_root / PUBLISH_STATE_NAME
+    try:
+        data = json.loads(_read_text(path))
+        state = data if isinstance(data, dict) else {}
+    except (PublishError, ValueError):
+        state = {}
+    state[section] = entry
+    temporary = cases_root / f"{PUBLISH_STATE_NAME}.tmp-{os.getpid()}"
+    try:
+        temporary.write_text(json.dumps(state, indent=2) + "\n")
+        os.replace(temporary, path)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        raise PublishError(f"{PUBLISH_STATE_NAME}: {error.strerror or error}") from error
+
+
+def slack_context(case: dict, config: TriageConfig) -> dict:
+    """What the agent needs besides the text: where to post by default, and the incident link if there is one."""
+    incident = case.get("incident") if isinstance(case.get("incident"), dict) else {}
+    return {"default_channel": config.slack_default_channel, "incident_url": incident.get("url") or None}
+
+
+def _normalised_lines(text: str) -> list[str]:
+    lines = [line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def verify_confluence(case_dir: Path, body_file: Path, config: TriageConfig) -> dict:
+    """Compare the text read back from the page with the audited report.md, after normalising line ends."""
+    intake = (config.cases_dir.parent / "intake").resolve()
+    path = Path(body_file).resolve()
+    if not path.is_relative_to(intake):
+        raise PublishError(f"{body_file}: the read-back file must be under the intake folder {intake}")
+    audit = load_audit(case_dir)
+    report = _regular_file_bytes(case_dir, "report.md")
+    if report is None or hashlib.sha256(report).hexdigest() != audit.get("sha256", {}).get("report.md"):
+        raise PublishError("report.md changed since the audit; run the audit again")
+    read_back = _read_regular(path)
+    if read_back is None:
+        raise PublishError(f"{body_file}: file not found")
+    expected = _normalised_lines(_decode("report.md", report))
+    got = _normalised_lines(_decode(path.name, read_back))
+    redactor = Redactor()
+    for number, (want, have) in enumerate(itertools.zip_longest(expected, got, fillvalue=""), start=1):
+        if want != have:
+            return {"matches": False, "line": number, "expected": want[:REPORTED_LINE_LIMIT],
+                    "got": redactor.text(have)[:REPORTED_LINE_LIMIT]}
+    return {"matches": True}
