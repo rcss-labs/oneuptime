@@ -12,6 +12,7 @@ from triage.window import format_time
 
 GLOBAL_REGION = "us-east-1"
 NOT_FOUND = ("NoSuchDistribution",)
+MAX_ARNS = 20
 MAX_SAMPLES = "20"
 MAX_BLOCKING_RULES = 5
 SAMPLING_HORIZON = timedelta(hours=3)
@@ -43,6 +44,7 @@ def _add_distribution(ctx: CollectContext, distribution_id: str) -> str | None:
     inside_text = " and was modified inside the window" if inside else ""
     ctx.evidence.add(
         kind=INCIDENT_TIME if inside else CURRENT, resource=resource, time=modified, command=ctx.last_command,
+        data={"resource_id": distribution_id, **({"arn": found["ARN"]} if found.get("ARN") else {})},
         summary=(
             f"Distribution {distribution_id} is {found.get('Status')}{when}{inside_text}; "
             f"domain names {', '.join(d for d in domains if d)}; origins {origins}; "
@@ -79,6 +81,10 @@ def _action_text(rule: dict) -> str:
     return "no action"
 
 
+def _rule_group_arn(rule: dict) -> str | None:
+    return ((rule.get("Statement") or {}).get("RuleGroupReferenceStatement") or {}).get("ARN")
+
+
 def _cannot_block_text(name: str, default: str, rules: list[dict]) -> str:
     if default == "block":
         return f"The default action of web ACL {name} is block, but it has no metric name, so it was not sampled"
@@ -102,13 +108,22 @@ def _add_web_acl(ctx: CollectContext, arn: str, now: datetime) -> None:
     resource = f"web-acl/{name}"
     default = next(iter(acl.get("DefaultAction", {})), "unknown").lower()
     rules = acl.get("Rules", [])
+    group_arns = [_rule_group_arn(rule) for rule in rules]
+    group_arns = [group for group in group_arns if group]
+    acl_data: dict = {"arn": acl.get("ARN") or arn}
+    if group_arns:
+        acl_data["rule_group_arns"] = group_arns[:MAX_ARNS]
+    if len(group_arns) > MAX_ARNS:
+        acl_data["rule_group_arns_omitted"] = len(group_arns) - MAX_ARNS
     ctx.evidence.add(
-        kind=CURRENT, resource=resource, command=ctx.last_command,
+        kind=CURRENT, resource=resource, command=ctx.last_command, data=acl_data,
         summary=f"Web ACL {name} ({scope}) default action {default}, {len(rules)} rules",
     )
     for rule in rules:
+        group_arn = _rule_group_arn(rule)
         ctx.evidence.add(
             kind=CURRENT, resource=resource, command=ctx.last_command,
+            data={"rule_group_arn": group_arn} if group_arn else {},
             summary=f"Rule {rule.get('Name')} priority {rule.get('Priority')} {_action_text(rule)}",
         )
     # Sampling by a rule's own metric name is the only way to know which rule blocked a request.

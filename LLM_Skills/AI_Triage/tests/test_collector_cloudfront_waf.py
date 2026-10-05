@@ -428,3 +428,25 @@ def test_distribution_modification_time_is_carried_as_the_facts_time(config_data
     ctx, _, _ = run(config_data, tmp_path, answers_for(), {"distribution_id": "E1EXAMPLE"})
     fact = by_summary(ctx, "Distribution E1EXAMPLE")[0]
     assert fact.kind == "current" and fact.time == "2026-10-01T07:00:00Z"
+
+
+def test_distribution_and_web_acl_facts_carry_their_arns(config_data, tmp_path):
+    dist = distribution(web_acl_id=GLOBAL_ACL)
+    dist["Distribution"]["ARN"] = f"arn:aws:cloudfront::{ACCOUNT}:distribution/E1EXAMPLE"
+    group_arn = f"arn:aws:wafv2:us-east-1:{ACCOUNT}:global/rulegroup/own-group/cccc1111-2222-3333-4444-5555aaaa5555"
+    acl = web_acl()
+    acl["WebACL"]["Rules"].append({"Name": "own-group", "Priority": 9, "OverrideAction": {"Count": {}},
+                                   "VisibilityConfig": {"MetricName": "og"},
+                                   "Statement": {"RuleGroupReferenceStatement": {"ARN": group_arn}}})
+    ctx, _, _ = run(config_data, tmp_path, answers_for(**{"cloudfront get-distribution": dist, "wafv2 get-web-acl": acl}),
+                    {"distribution_id": "E1EXAMPLE"})
+    fact = by_summary(ctx, "Distribution E1EXAMPLE")[0].data
+    assert fact["arn"] == f"arn:aws:cloudfront::{ACCOUNT}:distribution/E1EXAMPLE" and fact["resource_id"] == "E1EXAMPLE"
+    web = by_summary(ctx, "Web ACL edge-acl")[0].data
+    assert web["arn"] == GLOBAL_ACL and web["rule_group_arns"] == [group_arn]
+    assert by_summary(ctx, "Rule own-group")[0].data == {"rule_group_arn": group_arn}
+
+
+def test_missing_distribution_arn_writes_no_arn_key(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, answers_for(), {"distribution_id": "E1EXAMPLE"})
+    assert by_summary(ctx, "Distribution E1EXAMPLE")[0].data == {"resource_id": "E1EXAMPLE"}
