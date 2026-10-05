@@ -110,15 +110,17 @@ def _add_nodegroup_updates(ctx: CollectContext, cluster: str, region: str, names
             region=region,
         )
         ids = (listed or {}).get("updateIds", [])
-        if len(ids) > MAX_NODEGROUP_UPDATES:
+        # The order of the ids is not documented and they carry no time, so read both ends of the list.
+        chosen = ids[:MAX_NODEGROUP_UPDATES] + [i for i in ids[-MAX_NODEGROUP_UPDATES:] if i not in ids[:MAX_NODEGROUP_UPDATES]]
+        if len(ids) > len(chosen):
             ctx.evidence.add(
                 kind=DERIVED, resource=f"nodegroup/{cluster}/{group_name}",
                 summary=(
-                    f"Nodegroup {group_name} has {len(ids)} or more updates; only {MAX_NODEGROUP_UPDATES} were "
-                    "described and older ones may not be shown"
+                    f"Nodegroup {group_name} has {len(ids)} updates listed; {len(ids) - len(chosen)} were not described "
+                    "(the first and last three were), so an update in the middle may not be shown"
                 ),
             )
-        for update_id in ids[:MAX_NODEGROUP_UPDATES]:
+        for update_id in chosen:
             reply = ctx.aws(
                 "eks", "describe-update", ["--name", cluster, "--nodegroup-name", group_name, "--update-id", update_id],
                 region=region,

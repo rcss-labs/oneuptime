@@ -112,6 +112,9 @@ class NodegroupUpdateAws(FakeAws):
     def __call__(self, argv, timeout):
         if argv[1] == "eks" and argv[2] in ("list-updates", "describe-update") and "--nodegroup-name" in argv:
             self.calls.append(argv)
+            by_id = self.answers.get("describe-update nodegroup by id", {})
+            if argv[2] == "describe-update" and argv[argv.index("--update-id") + 1] in by_id:
+                return 0, json.dumps(by_id[argv[argv.index("--update-id") + 1]]), ""
             answer = self.answers.get(f"{argv[2]} nodegroup", {"updateIds": []} if argv[2] == "list-updates" else {})
             if isinstance(answer, tuple):
                 return answer[0], "", answer[1]
@@ -751,12 +754,42 @@ def test_old_and_later_nodegroup_updates_are_dropped(config_data, tmp_path):
         assert with_text(ctx, "Nodegroup workers update") == []
 
 
-def test_at_most_three_updates_per_nodegroup_with_a_note(config_data, tmp_path):
-    ctx, aws, _ = run(config_data, tmp_path, ng_answers(ng_update(), ids=[f"nu{n}" for n in range(6)]))
-    described = [c for c in aws.calls if c[1:3] == ["eks", "describe-update"] and "--nodegroup-name" in c]
-    assert len(described) == 3
-    note = with_text(ctx, "more updates")
+def eight_updates(in_period_id):
+    ids = [f"nu{n}" for n in range(8)]
+    old = ng_update(created="2026-09-01T09:30:00Z")
+    by_id = {i: old for i in ids}
+    by_id[in_period_id] = ng_update(update_id=in_period_id, created="2026-10-04T09:30:00Z")
+    return ids, aws_answers(**{"list-updates nodegroup": {"updateIds": ids}, "describe-update nodegroup by id": by_id})
+
+
+def test_the_last_of_many_update_ids_is_found_whatever_the_order(config_data, tmp_path):
+    _, answers = eight_updates("nu7")
+    ctx, aws, _ = run(config_data, tmp_path, answers)
+    assert len(with_text(ctx, "Nodegroup workers update nu7")) == 1
+
+
+def test_the_first_of_many_update_ids_is_found_whatever_the_order(config_data, tmp_path):
+    _, answers = eight_updates("nu0")
+    ctx, aws, _ = run(config_data, tmp_path, answers)
+    assert len(with_text(ctx, "Nodegroup workers update nu0")) == 1
+
+
+def test_six_updates_are_described_and_the_note_counts_the_rest(config_data, tmp_path):
+    _, answers = eight_updates("nu7")
+    ctx, aws, kube = run(config_data, tmp_path, answers)
+    described = [c[c.index("--update-id") + 1] for c in aws.calls
+                 if c[1:3] == ["eks", "describe-update"] and "--nodegroup-name" in c]
+    assert described == ["nu0", "nu1", "nu2", "nu5", "nu6", "nu7"]
+    note = with_text(ctx, "2 were not described")
     assert len(note) == 1 and note[0].kind == "derived" and "workers" in note[0].summary
+    assert_read_only(ctx, aws, kube)
+
+
+def test_few_updates_are_all_described_without_duplicates_or_a_note(config_data, tmp_path):
+    ctx, aws, _ = run(config_data, tmp_path, ng_answers(ng_update(), ids=["a", "b", "c", "d"]))
+    described = [c[c.index("--update-id") + 1] for c in aws.calls
+                 if c[1:3] == ["eks", "describe-update"] and "--nodegroup-name" in c]
+    assert described == ["a", "b", "c", "d"] and not with_text(ctx, "not described")
 
 
 def test_at_most_five_nodegroups_are_checked_for_updates(config_data, tmp_path):
