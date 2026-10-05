@@ -20,6 +20,12 @@ ASKED_KEY = "asked"
 MIN_WHOLE_VALUE = 3
 # Once every asked string is cut out of an excerpt, this much other text must remain for it to show a finding.
 MIN_FOUND_TEXT = 12
+MAX_ASKED_ENTRY = 200
+MAX_ASKED_ENTRIES = 20
+REPEATS_REQUEST = (
+    "excerpt only repeats what was asked (the request, a query, or a target), not what was found; "
+    "quote a longer span of what was found"
+)
 PROVENANCES = ("incident_time", "current", "inferred")
 CONFIDENCES = ("high", "medium", "low")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -62,14 +68,42 @@ def _comparable(text: str) -> str:
     return _collapse(text).lower()
 
 
+def _asked_form(text: str) -> str:
+    """Lower-cased, whitespace collapsed, and without a trailing dot (collectors echo a hostname without it)."""
+    return _comparable(text).rstrip(".")
+
+
+def _normalised(sources: list[object], with_keys: bool) -> list[str]:
+    return [text for text in (_asked_form(item) for source in sources for item in _strings_in(source, with_keys)) if text]
+
+
 def asked_strings(fact: dict, file_asked: object = None, with_keys: bool = True) -> list[str]:
-    """What was asked for this fact, lower-cased with whitespace collapsed.
+    """What was asked for this fact, normalised by _asked_form.
 
     Every string under the fact's data["asked"] (at any depth) and under its evidence file's top-level asked.
     Keys count too (a filter field name is free text), unless with_keys is False.
     """
-    sources = [*_asked_under(fact.get("data")), file_asked]
-    return [text for text in (_comparable(item) for source in sources for item in _strings_in(source, with_keys)) if text]
+    return _normalised([*_asked_under(fact.get("data")), file_asked], with_keys)
+
+
+def _readable(value: object, name: str) -> list[str]:
+    """name=value lines for every leaf of value; nested names are joined with dots and lists with commas."""
+    if isinstance(value, dict):
+        return [line for key, item in value.items() for line in _readable(item, f"{name}.{key}" if name else str(key))]
+    if value is None:
+        return []
+    if isinstance(value, list):
+        value = ", ".join(item if isinstance(item, str) else json.dumps(item) for item in value)
+    return [f"{name or ASKED_KEY}={value}"]
+
+
+def asked_entries(fact: dict, file_asked: object = None) -> list[str]:
+    """What was asked for this fact, for a reader: the fact's own data["asked"] first, then the file's targets."""
+    entries = [line for asked in _asked_under(fact.get("data")) for line in _readable(asked, "")]
+    if isinstance(file_asked, dict):
+        entries += _readable(file_asked.get("targets"), "")
+    cut = [entry if len(entry) <= MAX_ASKED_ENTRY else entry[: MAX_ASKED_ENTRY - 1] + "…" for entry in entries]
+    return cut[:MAX_ASKED_ENTRIES]
 
 
 def evidence_documents(case_dir: Path, warnings: list[str] | None = None) -> list[tuple[str, dict]]:
@@ -183,13 +217,17 @@ def _around(text: str, needle: str) -> str:
     return text[start:start + MAX_MATCHED_TEXT]
 
 
-def _repeats_request(needle: str, asked: list[str], asked_values: list[str]) -> bool:
-    """True when the excerpt sits inside one asked string, or when cutting every asked value out of it leaves
-    fewer than MIN_FOUND_TEXT non-space characters (asked names with a few words around them).
+def _repeats_request(fact: dict, file_asked: object, needle: str) -> bool:
+    """True when the excerpt sits inside any asked string of the fact, or when cutting the file's asked values
+    (collector targets) out of it leaves fewer than MIN_FOUND_TEXT non-space characters.
 
-    Only values are cut: cutting key names such as "end" out of words would refuse real text.
+    A fact's own data["asked"] (what a search was asked) is never cut: a search hit holds its search terms by
+    design, so "OOMKilled api exit 137" from a search for OOMKilled is evidence. Keys are never cut either:
+    cutting names such as "end" out of words would refuse real text.
     """
-    comparable = _comparable(needle)
+    asked = asked_strings(fact, file_asked)
+    asked_values = _normalised([file_asked], with_keys=False)
+    comparable = _asked_form(needle)
     if any(comparable in text for text in asked):
         return True
     covered = _asked_coverage(comparable, [text for text in asked_values if len(text) >= MIN_WHOLE_VALUE])
@@ -269,8 +307,7 @@ def _citation_problems(
             text = _matched_string(fact, needle)
             if text is None:
                 continue
-            fact_file_asked = (file_asked or {}).get(fact.get("file"))
-            if _repeats_request(needle, asked_strings(fact, fact_file_asked), asked_strings(fact, fact_file_asked, with_keys=False)):
+            if _repeats_request(fact, (file_asked or {}).get(fact.get("file")), needle):
                 repeats = True
                 continue
             matching.append(fact)
@@ -278,10 +315,7 @@ def _citation_problems(
         if shape_problem:
             problems.append(shape_problem)
         elif not matching and repeats:
-            problems.append(
-                "excerpt only repeats what was asked (the request, a query, or a target), "
-                "not what was found; the finding must quote what was found"
-            )
+            problems.append(REPEATS_REQUEST)
         elif not matching and len(needle) < MIN_EXCERPT:
             problems.append(
                 f"excerpt is shorter than {MIN_EXCERPT} characters and is not a whole value "
@@ -337,6 +371,10 @@ def _read_finding_file(path: Path, case_dir: Path) -> tuple[dict | None, str]:
 def check_findings(case_dir: Path) -> dict:
     warnings: list[str] = []
     facts, file_asked = _load_facts_and_asked(case_dir, warnings)
+    files_with_fact_asked = {fact["file"] for fact in facts.values() if _asked_under(fact.get("data"))}
+    for file_name, asked in file_asked.items():
+        if asked is None and file_name not in files_with_fact_asked:
+            warnings.append(f"evidence file {file_name} does not record what was asked")
     redactor = Redactor()
     result: dict = {"valid": [], "rejected": [], "unreadable": [], "requests": [], "checked": {}, "warnings": warnings}
     seen_ids: set[str] = set()
@@ -364,6 +402,9 @@ def check_findings(case_dir: Path) -> dict:
             stored["fact_ids"] = list(cited)
             stored["fact_summaries"] = {key: fact.get("summary", "") for key, fact in cited.items()}
             stored["matched_text"] = matched_text
+            # Written from the evidence only (never from the analyst's file), so the judge can see what each fact
+            # was asked; the evidence is already redacted.
+            stored["asked"] = {key: asked_entries(fact, file_asked.get(fact.get("file"))) for key, fact in cited.items()}
             result["valid"].append(stored)
         if isinstance(data.get("checked"), list):
             result["checked"][analyst] = [redactor.text(item) for item in data["checked"] if isinstance(item, str)]

@@ -506,7 +506,7 @@ def test_an_excerpt_inside_a_facts_asked_string_is_refused_even_when_the_summary
     case = _asked_fact(tmp_path, "Found nothing for OutOfMemoryError checkout today",
                        data={"asked": {"query": "OutOfMemoryError checkout"}})
     reasons = reasons_of(check(case, [finding(fact_ids=["changes-0001"], excerpt="OutOfMemoryError checkout", provenance="inferred")]))
-    assert any(REPEATS in reason and "quote what was found" in reason for reason in reasons)
+    assert any(REPEATS in reason and "quote a longer span of what was found" in reason for reason in reasons)
 
 
 def test_an_excerpt_inside_a_file_level_asked_target_is_refused(tmp_path):
@@ -666,3 +666,102 @@ def test_part_of_an_asked_value_with_enough_found_text_is_accepted(tmp_path):
     result = check(_killer_fact(tmp_path), [finding(fact_ids=["changes-0001"], excerpt="Error-killer was not found in the region",
                                                     provenance="inferred")])
     assert result["rejected"] == []
+
+
+
+# Second follow-up: a search's own asked text is checked by containment only (I-A)
+
+def _search_hit_fact(tmp_path, message="OOMKilled api exit 137"):
+    evidence = Evidence("opensearch", "prod-main", "logs-prod", WINDOW)
+    evidence.add(kind=INCIDENT_TIME, resource="app-logs-1", summary="ERROR log line in app-logs-1", time="2026-10-04T10:41:00Z",
+                 excerpt=message, data={"asked": {"index": "app-logs-*", "query": "OOMKilled",
+                                                  "filters": {"kubernetes.container": "api"}}})
+    evidence.write(tmp_path)
+    return tmp_path
+
+
+def test_a_short_honest_hit_that_holds_the_search_terms_is_accepted(tmp_path):
+    result = check(_search_hit_fact(tmp_path), [finding(fact_ids=["opensearch-0001"], excerpt="OOMKilled api exit 137")])
+    assert result["rejected"] == []
+
+
+@pytest.mark.parametrize("excerpt", ["OOMKilled", "  OOMKilled  ", "app-logs-*"])
+def test_the_search_query_itself_is_still_refused_for_the_same_fact(tmp_path, excerpt):
+    case = _search_hit_fact(tmp_path, message="OOMKilled")
+    assert check(case, [finding(fact_ids=["opensearch-0001"], excerpt=excerpt)])["valid"] == []
+
+
+def test_a_collector_target_with_a_short_word_is_still_cut(tmp_path):
+    case = _asked_fact(tmp_path, "Role OOMKilled-api was not found", file_asked={"role": "OOMKilled-api"})
+    reasons = reasons_of(check(case, [finding(fact_ids=["changes-0001"], excerpt="Role OOMKilled-api was not", provenance="inferred")]))
+    assert any(REPEATS in reason for reason in reasons)
+
+
+# Trailing dot on host-like asked values (m-1)
+
+def test_an_asked_hostname_with_a_trailing_dot_is_cut_from_its_echo(tmp_path):
+    case = _asked_fact(tmp_path, "No A, AAAA, or CNAME record named oom.killed.example.com exists in the zone",
+                       file_asked={"hostname": "OOM.Killed.example.com."})
+    reasons = reasons_of(check(case, [finding(fact_ids=["changes-0001"], excerpt="oom.killed.example.com exists in",
+                                              provenance="inferred")]))
+    assert any(REPEATS in reason for reason in reasons)
+
+
+def test_an_excerpt_ending_in_a_dot_after_an_asked_hostname_is_refused(tmp_path):
+    case = _asked_fact(tmp_path, "Name resolves: oom.killed.example.com.", file_asked={"hostname": "oom.killed.example.com"})
+    assert check(case, [finding(fact_ids=["changes-0001"], excerpt="oom.killed.example.com.", provenance="inferred")])["valid"] == []
+
+
+# Files that do not record what was asked (m-3)
+
+def test_an_evidence_file_without_asked_gives_one_warning(case_dir):
+    result = check(case_dir, [finding()])
+    assert result["warnings"].count("evidence file ecs-prod-main-eu-west-1.json does not record what was asked") == 1
+
+
+def test_an_evidence_file_with_asked_gives_no_warning(tmp_path):
+    _asked_fact(tmp_path, "Service has 0 running tasks", file_asked={"service": "x"})
+    _search_hit_fact(tmp_path)
+    assert not any("does not record what was asked" in warning for warning in check(tmp_path, [])["warnings"])
+
+
+# What was asked, for the judge (J-1)
+
+def test_each_valid_finding_lists_what_was_asked_per_cited_fact(tmp_path):
+    _search_hit_fact(tmp_path)
+    _asked_fact(tmp_path, "No change was recorded for checkout-api between two times",
+                file_asked={"resource_names": ["checkout-api", "payments-api"], "stack": "shop"})
+    result = check(tmp_path, [finding(fact_ids=["opensearch-0001", "changes-0001"], excerpt="OOMKilled api exit 137",
+                                      provenance="inferred", asked={"x": ["forged"]})])
+    stored = json.loads((tmp_path / "findings" / "checked.json").read_text())["valid"][0]
+    assert stored["asked"] == {
+        "opensearch-prod-main-logs-prod:opensearch-0001": ["index=app-logs-*", "query=OOMKilled", "filters.kubernetes.container=api"],
+        "changes-prod-main-eu-west-1:changes-0001": ["resource_names=checkout-api, payments-api", "stack=shop"],
+    }
+    assert result["valid"][0]["asked"] == stored["asked"]
+
+
+def test_asked_entries_are_cut_to_200_characters_and_20_per_fact(tmp_path):
+    targets = {f"target_{n:02d}": "v" * 300 for n in range(25)}
+    _asked_fact(tmp_path, "Service checkout has 0 running tasks right now", file_asked=targets)
+    check(tmp_path, [finding(fact_ids=["changes-0001"], excerpt="has 0 running tasks right now", provenance="inferred")])
+    entries = json.loads((tmp_path / "findings" / "checked.json").read_text())["valid"][0]["asked"]["changes-prod-main-eu-west-1:changes-0001"]
+    assert len(entries) == 20 and all(len(entry) <= 200 for entry in entries)
+    assert entries[0].startswith("target_00=vvv")
+
+
+def test_asked_entries_are_copied_from_evidence_without_redaction(tmp_path):
+    case = _asked_fact(tmp_path, "Service checkout has 0 running tasks right now", file_asked={"service": "x"})
+    path = next((case / "evidence").glob("*.json"))
+    document = json.loads(path.read_text())
+    email = "alice" + "@" + "example.com"
+    document["asked"]["targets"]["owner"] = email
+    path.write_text(json.dumps(document))
+    check(case, [finding(fact_ids=["changes-0001"], excerpt="has 0 running tasks right now", provenance="inferred")])
+    entries = json.loads((case / "findings" / "checked.json").read_text())["valid"][0]["asked"]["changes-prod-main-eu-west-1:changes-0001"]
+    assert f"owner={email}" in entries
+
+
+def test_a_fact_with_nothing_asked_has_an_empty_list(case_dir):
+    result = check(case_dir, [finding()])
+    assert result["valid"][0]["asked"] == {"ecs-prod-main-eu-west-1:ecs-0001": []}
