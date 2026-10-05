@@ -1697,3 +1697,83 @@ def test_numbers_under_a_plain_secret_name_stay_masked(source, expected):
 
 def test_numbers_under_a_plain_secret_name_stay_masked_in_value():
     assert Redactor().value({"password": 123456, "pin": 1234}) == {"password": "<SECRET-1>", "pin": "<SECRET-2>"}
+
+
+# ---------------------------------------------------------------------------
+# Fix round 5
+# ---------------------------------------------------------------------------
+
+# Ruling 1: a two-item list never bypasses text()
+
+@pytest.mark.parametrize(
+    "obj, secret",
+    [
+        ({"Env": ["DB_PASSWORD=" + PW, "PATH=/usr/bin"]}, PW),
+        (["token " + "Zx9" * 9 + " rejected", "retrying"], "Zx9" * 9),
+        (["secret_key " + AWS_KEY, "x"], AWS_KEY),
+        (["password reset for jane.doe@corp.example.com", "sent"], "jane.doe@corp.example.com"),
+        (["db_password postgres://app:" + PW + "@db.example.com/x", "ok"], PW),
+    ],
+)
+def test_two_item_lists_never_bypass_text(obj, secret):
+    out = Redactor().value(obj)
+    assert secret not in repr(out)
+
+
+def test_docker_env_list_keeps_path_and_masks_password():
+    assert Redactor().value({"Env": ["DB_PASSWORD=" + PW, "PATH=/usr/bin"]}) == {
+        "Env": ["DB_PASSWORD=<SECRET-1>", "PATH=/usr/bin"]
+    }
+
+
+def test_real_header_pair_still_masks_its_value():
+    assert Redactor().value([["Cookie", "sid=" + PW]]) == [["Cookie", "<SECRET-1>"]]
+
+
+# Ruling 2: cost and a time budget
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "command:\n- curl\nargs:\n- -u\n- a:b\n",
+        "<a><![CDATA[x",
+        '"name":"DB_PASSWORD",',
+        "name=DB_PASSWORD, ",
+        '{"name":"DB_PASSWORD","a":"b"} ',
+        "- name: DB_PASSWORD\n  type: x\n",
+    ],
+)
+def test_round_four_slow_shapes_are_fast(shape):
+    source = shape * (MEGABYTE // len(shape)) + '"value":"x"'
+    for call in (Redactor().text, lambda s: Redactor().value({"m": s}), audit_text):
+        started = time.perf_counter()
+        call(source)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 2, (shape, elapsed)
+
+
+@pytest.mark.parametrize("key", ["command", "args"])
+def test_a_200000_item_argument_list_is_fast(key):
+    obj = {"command": ["curl"], "args": ["-u", "a:b"] * 100_000} if key == "args" else {"command": ["curl"] + ["-u", "a:b"] * 100_000}
+    started = time.perf_counter()
+    Redactor().value(obj)
+    assert time.perf_counter() - started < 2
+
+
+def test_time_budget_turns_a_slow_string_into_one_placeholder(monkeypatch):
+    clock = iter(range(0, 10_000, 3))
+    monkeypatch.setattr(redact_module, "_monotonic", lambda: next(clock))
+    out = Redactor().text(f"password={PW} " + "x " * 50)
+    assert out == "<UNREADABLE-1>"
+
+
+def test_safety_net_never_swallows_base_exceptions(monkeypatch):
+    class Alarm(BaseException):
+        pass
+
+    def ring(text):
+        raise Alarm()
+
+    monkeypatch.setattr(redact_module, "SECRET_RULES", (("ring", ring),))
+    with pytest.raises(Alarm):
+        Redactor().text("anything")

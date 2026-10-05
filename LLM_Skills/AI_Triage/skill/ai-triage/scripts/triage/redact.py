@@ -12,6 +12,7 @@ import math
 import json
 import re
 import threading
+import time
 import unicodedata
 import urllib.parse
 import warnings
@@ -334,7 +335,7 @@ KV_START_RE = re.compile(
 )
 _XML_NAME = r"(?:[A-Za-z_][\w.\-]*:)?[A-Za-z_][\w.\-]*"
 XML_PAIR_RE = re.compile(r"<(?P<key>" + _XML_NAME + r")(?:[ \t][^<>]*)?>(?P<value>[^<]+)</(?P=key)>")
-XML_CDATA_RE = re.compile(r"<(?P<key>" + _XML_NAME + r")(?:[ \t][^<>]*)?>\s*<!\[CDATA\[(?P<value>.*?)\]\]>\s*</(?P=key)>", re.DOTALL)
+XML_CDATA_OPEN_RE = re.compile(r"<(?P<key>" + _XML_NAME + r")(?:[ \t][^<>]*)?>\s*<!\[CDATA\[")
 XML_TAG_RE = re.compile(r"<" + _XML_NAME + r"(?P<attrs>(?:\s+" + _XML_NAME + r"""\s*=\s*(?:"[^"]*"|'[^']*'))+)\s*/?>""")
 XML_ATTR_RE = re.compile(r"(?P<name>" + _XML_NAME + r""")\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""")
 XML_NAME_VALUE_RE = re.compile(
@@ -436,14 +437,34 @@ def _aws_secret_key_spans(text: str) -> list[Span]:
 
 
 _line_cache = threading.local()
+_monotonic = time.monotonic
+_budget = threading.local()  # the deadline of the outermost text() call on this thread
+
+
+def _tick() -> None:
+    """Called in the rules' outer loops: every 256 calls, check the text() time budget."""
+    count = getattr(_budget, "count", 0) + 1
+    _budget.count = count
+    deadline = getattr(_budget, "deadline", None)
+    if deadline is not None and count % 256 == 0 and _monotonic() > deadline:
+        raise _OverBudget()
 
 
 def _newlines(text: str) -> list[int]:
-    """Newline offsets of text, computed once per text."""
-    if getattr(_line_cache, "text", None) is not text:
-        _line_cache.text = text
-        _line_cache.newlines = [m.start() for m in re.finditer("\n", text)]
-    return _line_cache.newlines
+    """Newline offsets of text, computed once per text. A few texts are kept, because a rule
+    that runs the command rule on a short joined line must not evict the long text it walks."""
+    entries = getattr(_line_cache, "entries", None)
+    if entries is None:
+        entries = _line_cache.entries = []
+    for index, (cached, newlines) in enumerate(entries):
+        if cached is text:
+            if index:
+                entries.insert(0, entries.pop(index))  # least recently used goes first
+            return newlines
+    newlines = [m.start() for m in re.finditer("\n", text)]
+    entries.insert(0, (text, newlines))
+    del entries[4:]
+    return newlines
 
 
 def _line_end(text: str, start: int) -> int:
@@ -567,9 +588,13 @@ def _xml_local(name: str) -> str:
 def _xml_spans(text: str) -> list[Span]:
     """Secret element bodies (namespaced, multi-line, CDATA), attributes and Name/Value pairs."""
     spans: list[Span] = []
-    for match in XML_CDATA_RE.finditer(text):
-        if looks_secret_key(_xml_local(match.group("key"))):
-            spans.append(match.span("value"))
+    if "<![CDATA[" in text:
+        for match in XML_CDATA_OPEN_RE.finditer(text):
+            close = text.find("]]>", match.end())
+            if close == -1:
+                break  # no later CDATA section is closed either
+            if looks_secret_key(_xml_local(match.group("key"))):
+                spans.append((match.end(), close))
     for match in XML_PAIR_RE.finditer(text):
         if looks_secret_key(_xml_local(match.group("key"))):
             start, end = match.span("value")
@@ -601,6 +626,7 @@ def _key_value_spans(text: str) -> list[Span]:
         match = KV_START_RE.search(text, position)
         if not match:
             break
+        _tick()
         key, quote, sep = match.group("key"), match.group("quote"), match.group("sep")
         if not _kv_candidate_is_secret(key, quote, sep):
             position = match.end("key")
@@ -748,6 +774,7 @@ def _command_spans(text: str) -> list[Span]:
     matches = list(_COMMAND_RE.finditer(text))
     spans: list[Span] = []
     for index, match in enumerate(matches):
+        _tick()
         limit = min(_line_end(text, match.end()), match.end() + 2000)
         if index + 1 < len(matches):
             limit = min(limit, matches[index + 1].start())
@@ -895,6 +922,7 @@ def _yaml_argument_spans(text: str) -> list[Span]:
     spans: list[Span] = []
     pending: dict[int, tuple[list[str], list[int], int]] = {}  # command lists by key column
     for match in _YAML_LIST_KEY_RE.finditer(text):
+        _tick()
         items, offsets, end = _yaml_list_items(text, match)
         if not items:
             continue
@@ -937,45 +965,76 @@ def _loose_value_span(text: str, start: int) -> Span | None:
 def _loose_name_value_spans(text: str) -> list[Span]:
     """The value of a name/value object whose name is secret, wherever the value key sits in the
     same object: after nested objects, many other pairs or non-literal values, or before the name.
-    Brackets are counted so that only keys of the same object are paired."""
+
+    Brackets are counted so that only keys of the same object are paired. Two linear sweeps over
+    the bracket and value-key tokens find, for every name, the nearest value key at its depth
+    that comes before its object closes (forward) or after it opens (backward).
+    """
     if "alue" not in text:
         return []
-    spans: list[Span] = []
-    for match in _LOOSE_NAME_RE.finditer(text):
-        if not looks_secret_key(match.group("name")):
+    names = [m for m in _LOOSE_NAME_RE.finditer(text) if looks_secret_key(m.group("name"))]
+    if not names:
+        return []
+    tokens = []  # (position, kind, depth before, end)
+    depth = 0
+    for token in _LOOSE_TOKEN_RE.finditer(text):
+        if token.group("vk"):
+            tokens.append((token.start(), "v", depth, token.end()))
+        elif token.group() in "{[":
+            tokens.append((token.start(), "o", depth, token.end()))
+            depth += 1
+        else:
+            tokens.append((token.start(), "c", depth, token.end()))
+            depth -= 1
+    starts = [token[0] for token in tokens]
+    name_depths = []
+    for match in names:
+        index = bisect.bisect_left(starts, match.start())
+        before = tokens[index - 1] if index else None
+        if before is None:
+            name_depths.append(0)
+        else:
+            position, kind, token_depth, _ = before
+            name_depths.append(token_depth + (1 if kind == "o" else -1 if kind == "c" else 0))
+    found: dict[int, int] = {}
+    # forward: walk names and tokens from right to left
+    upcoming: dict[int, tuple[str, int, int]] = {}  # depth -> (kind, start, value start)
+    token_index = len(tokens) - 1
+    for name_index in range(len(names) - 1, -1, -1):
+        match = names[name_index]
+        while token_index >= 0 and tokens[token_index][0] >= match.end():
+            position, kind, token_depth, end = tokens[token_index]
+            if kind == "v":
+                upcoming[token_depth] = ("v", position, end)
+            elif kind == "c":
+                upcoming[token_depth] = ("c", position, end)
+            token_index -= 1
+        hit = upcoming.get(name_depths[name_index])
+        if hit and hit[0] == "v" and hit[1] - match.end() <= LOOSE_WINDOW:
+            found[name_index] = hit[2]
+    # backward: walk names and tokens from left to right
+    previous: dict[int, tuple[str, int, int]] = {}
+    token_index = 0
+    for name_index, match in enumerate(names):
+        while token_index < len(tokens) and tokens[token_index][0] < match.start():
+            position, kind, token_depth, end = tokens[token_index]
+            if kind == "v":
+                previous[token_depth] = ("v", position, end)
+            elif kind == "o":
+                previous[token_depth + 1] = ("o", position, end)
+            token_index += 1
+        if name_index in found:
             continue
-        depth, found = 0, None
-        for token in _LOOSE_TOKEN_RE.finditer(text, match.end(), min(len(text), match.end() + LOOSE_WINDOW)):
-            if token.group("vk"):
-                if depth == 0:
-                    found = token.end()
-                    break
-            elif token.group() in "{[":
-                depth += 1
-            else:
-                depth -= 1
-                if depth < 0:
-                    break
-        if found is None:  # the value key may come before the name in the same object
-            depth, opening = 0, max(0, match.start() - LOOSE_WINDOW)
-            tokens = list(_LOOSE_TOKEN_RE.finditer(text, opening, match.start()))
-            for token in reversed(tokens):
-                if token.group("vk"):
-                    if depth == 0:
-                        found = token.end()
-                        break
-                elif token.group() in "}]":
-                    depth += 1
-                else:
-                    depth -= 1
-                    if depth < 0:
-                        break
-        if found is not None:
-            span = _loose_value_span(text, found)
-            if span and _BLOCK_SCALAR_RE.fullmatch(text[span[0]:span[1]]):
-                continue  # a YAML block scalar: the YAML rules mask its lines
-            if span and _usable(text, span) and not _harmless_secret_value(text[span[0]:span[1]]):
-                spans.append(span)
+        hit = previous.get(name_depths[name_index])
+        if hit and hit[0] == "v" and match.start() - hit[1] <= LOOSE_WINDOW:
+            found[name_index] = hit[2]
+    spans: list[Span] = []
+    for value_start in sorted(set(found.values())):
+        span = _loose_value_span(text, value_start)
+        if span and _BLOCK_SCALAR_RE.fullmatch(text[span[0]:span[1]]):
+            continue  # a YAML block scalar: the YAML rules mask its lines
+        if span and _usable(text, span) and not _harmless_secret_value(text[span[0]:span[1]]):
+            spans.append(span)
     return spans
 
 
@@ -1258,6 +1317,7 @@ def _token_spans(text: str) -> list[Span]:
     arn_starts = [start for start, _ in arns]
     spans: list[Span] = []
     for match in _TOKEN_CANDIDATE_RE.finditer(text):
+        _tick()
         index = bisect.bisect_right(arn_starts, match.start()) - 1
         if index >= 0 and match.start() < arns[index][1]:
             continue
@@ -1328,7 +1388,19 @@ def _secret_header_pair(items: list) -> bool:
     if len(items) != 2 or not all(isinstance(item, (str, bytes)) for item in items):
         return False
     name = items[0].decode("utf-8", errors="replace") if isinstance(items[0], bytes) else items[0]
-    return not name.startswith("-") and len(name) <= 64 and looks_secret_key(name)
+    return bool(_HEADER_NAME_RE.fullmatch(name)) and looks_secret_key(name)
+
+
+_HEADER_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}")
+
+
+TEXT_TIME_BUDGET = 5.0  # seconds per outermost text() call
+MEMO_MAX_LENGTH = 256
+MEMO_MAX_ENTRIES = 50_000
+
+
+class _OverBudget(Exception):
+    """Raised when one text() call has used up its time budget."""
 
 
 class _TooDeep(Exception):
@@ -1388,6 +1460,8 @@ class Redactor:
         self._embedded_nesting = 0
         self._parses_left = MAX_EMBEDDED_PARSES
         self._chars_left = MAX_EMBEDDED_CHARS
+        self._deadline: float | None = None
+        self._memo: dict[str, str] = {}
 
     def _reserve_existing_placeholders(self, text: str) -> None:
         for match in _NUMBERED_PLACEHOLDER_RE.finditer(text):
@@ -1484,6 +1558,7 @@ class Redactor:
             replacements: list[tuple[int, int, str]] = []
             pending = collections.deque(_balanced_spans(text))
             while pending:
+                self._check_budget()
                 start, end, children = pending.popleft()
                 outcome = self._redact_span(text[start:end])
                 if outcome is _FAILED:
@@ -1499,6 +1574,8 @@ class Redactor:
                 position = end
             pieces.append(text[position:])
             return "".join(pieces)
+        except _OverBudget:
+            raise
         except Exception:
             return text
         finally:
@@ -1518,10 +1595,36 @@ class Redactor:
         return f"<UNREADABLE-{numbers[digest]}>"
 
     def text(self, value: str) -> str:
+        outermost = self._deadline is None
+        memo_key = None
         try:
-            return self._text(value)
-        except Exception:
-            return self._unreadable(value)
+            if isinstance(value, str) and len(value) <= MEMO_MAX_LENGTH:
+                memo_key = _digest(value)  # keyed by digest: the original is never held
+                if memo_key in self._memo:
+                    return self._memo[memo_key]
+            if outermost:
+                self._set_deadline(_monotonic() + TEXT_TIME_BUDGET)
+            result = self._text(value)
+        except _OverBudget:
+            if not outermost:
+                raise  # the outermost call turns the whole string into one placeholder
+            result = self._unreadable(value)
+        except Exception:  # never BaseException: an interrupt or an alarm is not swallowed
+            result = self._unreadable(value)
+        finally:
+            if outermost:
+                self._set_deadline(None)
+        if memo_key is not None and len(self._memo) < MEMO_MAX_ENTRIES:
+            self._memo[memo_key] = result
+        return result
+
+    def _check_budget(self) -> None:
+        if self._deadline is not None and _monotonic() > self._deadline:
+            raise _OverBudget()
+
+    def _set_deadline(self, deadline: float | None) -> None:
+        self._deadline = deadline
+        _budget.deadline = deadline
 
     def _replace_phones(self, text: str) -> str:
         if "+" not in text:
@@ -1548,7 +1651,9 @@ class Redactor:
         self._reserve_existing_placeholders(value)
         value = self._redact_embedded(value)
         for _, rule in SECRET_RULES:
+            self._check_budget()
             value = self._replace_spans(value, rule(value))
+        self._check_budget()
         value = self._replace_emails(value)
         value = self._replace_phones(value)
         value = IPV4_RE.sub(
@@ -1622,6 +1727,8 @@ class Redactor:
     def _walk_scalar(self, obj: Any, secret: bool, immediate: bool, authorization: bool) -> Any:
         try:
             return self._walk_scalar_unguarded(obj, secret, immediate, authorization)
+        except _OverBudget:
+            raise
         except Exception:
             return self._unreadable(obj)
 
@@ -1660,7 +1767,7 @@ class Redactor:
     ) -> list:
         if not secret and not keep and _secret_header_pair(items):
             name = items[0].decode("utf-8", errors="replace") if isinstance(items[0], bytes) else items[0]
-            return [name, self._walk(items[1], True, True, is_authorization_key(name))]
+            return [self.text(name), self._walk(items[1], True, True, is_authorization_key(name))]
         if argv is None:
             argv = {} if secret or keep else _argv_spans(items)
         result, previous = [], None
