@@ -15,9 +15,18 @@ from triage.collectors import Collector, all_collectors
 
 @pytest.fixture
 def skill_dir(tmp_path, config_data):
+    config_data["cases_dir"] = str(tmp_path / "cases")
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "triage-config.yaml").write_text(yaml.safe_dump(config_data))
     return tmp_path
+
+
+def case_folder(tmp_path, run="20261004-110000"):
+    """A case folder where resolve_case_dir accepts it: <cases root>/<incident>/<run> with a case.json."""
+    folder = tmp_path / "cases" / "INC-1" / run
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "case.json").write_text("{}")
+    return folder
 
 
 @pytest.fixture
@@ -95,7 +104,7 @@ def test_region_option(skill_dir, fake_collector):
 
 
 def test_case_dir_writes_a_file(skill_dir, fake_collector, tmp_path, capsys):
-    case = tmp_path / "case"
+    case = case_folder(tmp_path)
     code = collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case), "--suffix", "a b"), runner=FakeAws({}))
     assert code == 0
     path = case / "evidence" / "fake-prod-main-eu-west-1-ab.json"
@@ -259,7 +268,7 @@ def test_collector_exception_is_written_to_the_case_dir(skill_dir, monkeypatch, 
         raise KeyError("nope")
 
     monkeypatch.setattr(collect, "all_collectors", lambda: {"boom": Collector("boom", "d", (), (), run)})
-    case = tmp_path / "case"
+    case = case_folder(tmp_path)
     assert collect.main(args(skill_dir, "--case-dir", str(case), name="boom"), runner=FakeAws({})) == 0
     assert any((case / "evidence").iterdir())
 
@@ -318,7 +327,7 @@ def test_one_of_value_with_a_real_item_passes(skill_dir, one_of_collector):
 # Fix round 4
 
 def test_existing_evidence_file_is_not_overwritten(skill_dir, fake_collector, tmp_path, capsys):
-    case = tmp_path / "case"
+    case = case_folder(tmp_path)
     argv = args(skill_dir, "--target", "thing=x", "--case-dir", str(case))
     assert collect.main(argv, runner=FakeAws({})) == 0
     capsys.readouterr()
@@ -335,7 +344,7 @@ def test_comma_only_required_target_exits_4(skill_dir, fake_collector, value):
 
 
 def test_asked_holds_every_target_as_given(skill_dir, fake_collector, tmp_path):
-    case = tmp_path / "case"
+    case = case_folder(tmp_path)
     argv = args(skill_dir, "--target", "thing=x", "--target", "extra=a, b", "--case-dir", str(case))
     assert collect.main(argv, runner=FakeAws({})) == 0
     document = json.loads(next((case / "evidence").iterdir()).read_text())
@@ -350,7 +359,7 @@ def test_asked_is_written_when_the_collector_fails(skill_dir, monkeypatch, tmp_p
         raise KeyError("nope")
 
     monkeypatch.setattr(collect, "all_collectors", lambda: {"boom": Collector("boom", "d", ("thing",), (), run)})
-    case = tmp_path / "case"
+    case = case_folder(tmp_path)
     assert collect.main(args(skill_dir, "--target", "thing=y", "--case-dir", str(case), name="boom"), runner=FakeAws({})) == 0
     document = json.loads(next((case / "evidence").iterdir()).read_text())
     assert document["asked"]["targets"] == {"thing": "y"}
@@ -365,7 +374,7 @@ def test_asked_lists_items_only_for_targets_the_collector_declares_as_lists(skil
     entry = Collector("listy", "d", ("groups",), ("pattern",), run)
     object.__setattr__(entry, "list_targets", ("groups",))  # the registry's declaration, once it exists
     monkeypatch.setattr(collect, "all_collectors", lambda: {"listy": entry})
-    case = tmp_path / "case"
+    case = case_folder(tmp_path)
     argv = args(skill_dir, "--target", "groups=/aws/a", "--target", "pattern=ERROR, timeout", "--case-dir", str(case), name="listy")
     assert collect.main(argv, runner=FakeAws({})) == 0
     asked = json.loads(next((case / "evidence").iterdir()).read_text())["asked"]
@@ -374,7 +383,7 @@ def test_asked_lists_items_only_for_targets_the_collector_declares_as_lists(skil
 
 
 def test_replay_evidence_file_is_marked_and_the_banner_is_printed(skill_dir, replay_dir, tmp_path, fake_collector, no_real_calls, capsys):
-    case = tmp_path / "case"
+    case = case_folder(tmp_path)
     assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case))) == 0
     assert "REPLAY" in capsys.readouterr().err
     document = json.loads(next((case / "evidence").iterdir()).read_text())
@@ -383,7 +392,7 @@ def test_replay_evidence_file_is_marked_and_the_banner_is_printed(skill_dir, rep
 
 def test_live_evidence_file_has_no_replay_mark(skill_dir, fake_collector, tmp_path, monkeypatch):
     monkeypatch.delenv("AI_TRIAGE_FIXTURES", raising=False)
-    case = tmp_path / "case"
+    case = case_folder(tmp_path)
     assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case)), runner=FakeAws({})) == 0
     assert "replay" not in json.loads(next((case / "evidence").iterdir()).read_text())
 
@@ -398,3 +407,29 @@ def test_list_shows_optional_targets(monkeypatch, capsys):
     changes_line = next(line for line in lines if line.startswith("changes"))
     assert "log_groups" in logs_line and "optional: pattern" in logs_line
     assert "optional: resource_names, stack" in changes_line
+
+
+
+# Final review C: I1 and M6
+
+def test_a_folder_outside_the_cases_root_is_refused_before_any_call(skill_dir, fake_collector, tmp_path, capsys):
+    runner = FakeAws({})
+    code = collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(tmp_path / "elsewhere")), runner=runner)
+    assert code == 2
+    assert "not a case folder under" in capsys.readouterr().err
+    assert not fake_collector and not runner.calls
+    assert not (tmp_path / "elsewhere").exists()
+
+
+def test_the_evidence_file_is_written_only_when_it_is_new(skill_dir, fake_collector, tmp_path, monkeypatch, capsys):
+    # a file that appears while the collector runs is still not replaced
+    case = case_folder(tmp_path)
+    target = case / "evidence" / "fake-prod-main-eu-west-1.json"
+
+    def run(ctx, targets):
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("written by another run")
+    monkeypatch.setattr(collect, "all_collectors", lambda: {"fake": Collector("fake", "d", ("thing",), (), run)})
+    assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case)), runner=FakeAws({})) == 2
+    assert "already exists; pass another --suffix to keep both" in capsys.readouterr().err
+    assert target.read_text() == "written by another run"

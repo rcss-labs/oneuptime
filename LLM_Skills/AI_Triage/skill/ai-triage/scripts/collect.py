@@ -16,7 +16,8 @@ from triage.collectors import Collector, all_collectors
 from triage.collectors.common import split_csv
 from triage.config import ConfigError, default_config_path, load_config
 from triage.context import CollectContext, SignInExpired
-from triage.evidence import Evidence
+from triage.case import CaseError, resolve_case_dir
+from triage.evidence import Evidence, EvidenceExists
 from triage.fixtures import FixtureError, fixture_dir, kube_runner_from_env, replay_banner, runner_from_env
 from triage.window import WindowError, make_window
 from triage.cli import add_exit_codes, run
@@ -140,9 +141,14 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
         return _fail(f"region {region} is not allowed for {account.alias}; use one of: {', '.join(allowed_regions)}", 2)
     evidence = Evidence(collector.name, account.alias, region, window, replay=replay is not None)
     evidence.set_asked(dict(targets), {"start": args.start, "end": args.end}, _asked_items(collector, targets))
-    if args.case_dir and evidence.path_for(args.case_dir, args.suffix).exists():
-        existing = evidence.path_for(args.case_dir, args.suffix)
-        return _fail(f"{existing} already exists; pass another --suffix to keep both", 2)
+    if args.case_dir:
+        try:
+            args.case_dir = resolve_case_dir(args.case_dir, config)
+            evidence.ensure_new(args.case_dir, args.suffix)
+        except CaseError as error:
+            return _fail("; ".join(error.errors), 2)
+        except EvidenceExists as error:
+            return _fail(str(error), 2)
     ctx = CollectContext(
         config, account, region, window, evidence, args.skill_dir,
         runner=runner or subprocess_runner, kube_runner=kube_runner or subprocess_runner,
@@ -155,7 +161,10 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     except Exception as error:  # noqa: BLE001 - one bad field must not cost the evidence already collected
         evidence.add_error("", "CollectorError", f"{type(error).__name__}: {error}")
     if args.case_dir:
-        path = evidence.write(args.case_dir, args.suffix)
+        try:
+            path = evidence.write_new(args.case_dir, args.suffix)
+        except EvidenceExists as error:
+            return _fail(str(error), 2)
         print(f"{path} facts={len(evidence.facts)} errors={len(evidence.errors)} truncated={evidence.truncated}")
     else:
         print(evidence.to_json())

@@ -304,3 +304,17 @@ def test_replay_evidence_says_so_at_the_top_level():
     evidence = make_evidence(replay=True)
     assert evidence.to_dict()["replay"] is True
     assert "replay" not in make_evidence().to_dict()
+
+
+
+def test_a_new_evidence_path_is_checked_once_for_both_commands(tmp_path):
+    from triage.evidence import EvidenceExists
+    evidence = make_evidence()
+    assert evidence.ensure_new(tmp_path, "x") == tmp_path / "evidence" / "ecs-prod-main-eu-west-1-x.json"
+    evidence.write_new(tmp_path, "x")
+    with pytest.raises(EvidenceExists) as raised:
+        make_evidence().ensure_new(tmp_path, "x")
+    assert str(raised.value).endswith("already exists; pass another --suffix to keep both")
+    with pytest.raises(EvidenceExists):
+        make_evidence().write_new(tmp_path, "x")
+    assert make_evidence().write(tmp_path, "x").is_file()  # the library write still replaces

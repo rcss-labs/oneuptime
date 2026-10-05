@@ -134,6 +134,14 @@ def _limit_data(data: dict) -> dict:
     return kept
 
 
+class EvidenceExists(Exception):
+    """An evidence file of that name is already in the case: the commands never replace one."""
+
+
+def _exists_message(path: Path) -> str:
+    return f"{path} already exists; pass another --suffix to keep both"
+
+
 class Evidence:
     """Collects the facts and errors of one collector for one account and region."""
 
@@ -236,6 +244,25 @@ class Evidence:
         if cleaned:
             name += f"-{cleaned}"
         return case_dir / "evidence" / f"{name}.json"
+
+    def ensure_new(self, case_dir: Path, suffix: str = "") -> Path:
+        """The path write_new would use; EvidenceExists when a file is already there. The evidence commands
+        (collect, opensearch_query) call this before any outside call, so a refused run costs nothing."""
+        path = self.path_for(case_dir, suffix)
+        if path.exists():
+            raise EvidenceExists(_exists_message(path))
+        return path
+
+    def write_new(self, case_dir: Path, suffix: str = "") -> Path:
+        """Write the evidence file only when it does not exist yet (also when one appeared since ensure_new)."""
+        path = self.path_for(case_dir, suffix)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("x", encoding="utf-8") as handle:
+                handle.write(self.to_json() + "\n")
+        except FileExistsError:
+            raise EvidenceExists(_exists_message(path)) from None
+        return path
 
     def write(self, case_dir: Path, suffix: str = "") -> Path:
         path = self.path_for(case_dir, suffix)

@@ -52,6 +52,7 @@ class FakeTransport:
 
 @pytest.fixture
 def skill_dir(tmp_path, config_data):
+    config_data["cases_dir"] = str(tmp_path / "cases")
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "triage-config.yaml").write_text(yaml.safe_dump(config_data))
     return tmp_path
@@ -201,8 +202,15 @@ def test_there_is_no_way_to_pass_a_raw_path_or_body(skill_dir):
         assert caught.value.code == 2
 
 
+def case_folder(tmp_path):
+    folder = tmp_path / "cases" / "INC-1" / "20261004-110000"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "case.json").write_text("{}")
+    return folder
+
+
 def test_case_dir_writes_the_evidence_file(skill_dir, tmp_path, capsys):
-    case_dir = tmp_path / "case"
+    case_dir = case_folder(tmp_path)
     code, _ = run(skill_dir, "count", *WINDOWED, "--case-dir", str(case_dir), "--suffix", "errors")
     path = case_dir / "evidence" / "opensearch-prod-main-logs-prod-errors.json"
     assert code == 0 and path.is_file()
@@ -322,3 +330,36 @@ def test_an_out_of_range_bucket_time_exits_6_without_a_traceback(skill_dir, caps
     code, _ = run(skill_dir, "histogram", *WINDOWED, transport=FakeTransport(answers))
     assert code == 6
     assert "unexpected response" in capsys.readouterr().err
+
+
+
+# Final review C: I1 and M6
+
+def test_an_existing_evidence_file_is_refused_before_the_query(skill_dir, tmp_path, capsys):
+    case_dir = case_folder(tmp_path)
+    assert run(skill_dir, "count", *WINDOWED, "--case-dir", str(case_dir), "--suffix", "errors")[0] == 0
+    path = case_dir / "evidence" / "opensearch-prod-main-logs-prod-errors.json"
+    before = path.read_text()
+    capsys.readouterr()
+    code, transport = run(skill_dir, "histogram", *WINDOWED, "--case-dir", str(case_dir), "--suffix", "errors")
+    assert code == 2
+    assert "already exists; pass another --suffix to keep both" in capsys.readouterr().err
+    assert path.read_text() == before
+    assert not transport.requests
+
+
+def test_a_folder_outside_the_cases_root_is_refused(skill_dir, tmp_path, capsys):
+    code, transport = run(skill_dir, "count", *WINDOWED, "--case-dir", str(tmp_path / "elsewhere"))
+    assert code == 2
+    assert "not a case folder under" in capsys.readouterr().err
+    assert not transport.requests and not (tmp_path / "elsewhere").exists()
+
+
+def test_replay_evidence_is_marked(skill_dir, tmp_path, monkeypatch):
+    fixtures = tmp_path / "fixtures"
+    fixtures.mkdir()
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(fixtures))
+    case_dir = case_folder(tmp_path)
+    assert run(skill_dir, "count", *WINDOWED, "--case-dir", str(case_dir))[0] == 0
+    document = json.loads(next((case_dir / "evidence").iterdir()).read_text())
+    assert document["replay"] is True

@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Callable
 
 from triage.config import ConfigError, default_config_path, load_config
-from triage.evidence import Evidence
+from triage.case import CaseError, resolve_case_dir
+from triage.evidence import Evidence, EvidenceExists
 from triage.fixtures import FixtureError, fixture_dir, replay_banner, transport_from_env
 from triage.opensearch import queries
 from triage.opensearch.client import OpenSearchClient, OpenSearchError, Transport, urllib_transport
@@ -169,7 +170,15 @@ def main(argv: list[str] | None = None, transport: Transport | None = None) -> i
         window = _window_for(args, config.limits["max_window_hours"])
     except WindowError as error:
         return _fail(str(error), 2)
-    evidence = Evidence("opensearch", cluster.account, cluster.name, window)
+    evidence = Evidence("opensearch", cluster.account, cluster.name, window, replay=replay is not None)
+    if args.case_dir:
+        try:
+            args.case_dir = resolve_case_dir(args.case_dir, config)
+            evidence.ensure_new(args.case_dir, args.suffix)
+        except CaseError as error:
+            return _fail("; ".join(error.errors), 2)
+        except EvidenceExists as error:
+            return _fail(str(error), 2)
     client = OpenSearchClient(cluster, config.limits, transport=transport or urllib_transport)
     ctx = queries.QueryContext(client, cluster, config.limits, window, evidence, _invocation(args))
     try:
@@ -181,7 +190,10 @@ def main(argv: list[str] | None = None, transport: Transport | None = None) -> i
     except (KeyError, TypeError, AttributeError, ValueError, IndexError, OverflowError, OSError) as error:
         return _fail(f"unexpected response from the cluster ({type(error).__name__})", 6)
     if args.case_dir:
-        path = evidence.write(args.case_dir, args.suffix)
+        try:
+            path = evidence.write_new(args.case_dir, args.suffix)
+        except EvidenceExists as error:
+            return _fail(str(error), 2)
         print(f"{path} facts={len(evidence.facts)} errors={len(evidence.errors)} truncated={evidence.truncated}")
     else:
         print(evidence.to_json())
