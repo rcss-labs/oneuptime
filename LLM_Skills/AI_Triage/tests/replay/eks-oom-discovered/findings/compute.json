@@ -5,9 +5,9 @@
       "id": "compute-1",
       "claim": "All three pods of orders-api are in CrashLoopBackOff and the last state of their container is OOMKilled with exit code 137.",
       "fact_ids": [
-        "eks-prod-apps-eu-central-1:eks-0003",
         "eks-prod-apps-eu-central-1:eks-0004",
-        "eks-prod-apps-eu-central-1:eks-0005"
+        "eks-prod-apps-eu-central-1:eks-0005",
+        "eks-prod-apps-eu-central-1:eks-0006"
       ],
       "excerpt": "container orders-api last terminated OOMKilled exit code 137",
       "provenance": "current",
@@ -17,7 +17,7 @@
       "id": "compute-2",
       "claim": "Back-off warnings for the containers of orders-api began at 14:18, two minutes before the impact started.",
       "fact_ids": [
-        "eks-prod-apps-eu-central-1:eks-0006"
+        "eks-prod-apps-eu-central-1:eks-0007"
       ],
       "excerpt": "Back-off restarting failed container orders-api in pod orders-api-7d9f8c6b5d-4xkq2_orders",
       "provenance": "incident_time",
@@ -26,11 +26,12 @@
     },
     {
       "id": "compute-3",
-      "claim": "The rollout history records that revision 7 of the deployment set the memory limit to 256Mi.",
+      "claim": "The container orders-api has a memory limit of 256Mi and a request of 192Mi, in its pods and in the deployment.",
       "fact_ids": [
+        "eks-prod-apps-eu-central-1:eks-0004",
         "eks-prod-apps-eu-central-1:eks-0011"
       ],
-      "excerpt": "kubectl set resources deployment/orders-api -n orders --limits=memory=256Mi",
+      "excerpt": "container orders-api: memory limit 256Mi, request 192Mi",
       "provenance": "current",
       "confidence": "high"
     },
@@ -38,7 +39,7 @@
       "id": "compute-4",
       "claim": "A previous instance of the container logged memory use of 241Mi against a limit of 256Mi shortly before it was killed.",
       "fact_ids": [
-        "eks-prod-apps-eu-central-1:eks-0012"
+        "eks-prod-apps-eu-central-1:eks-0013"
       ],
       "excerpt": "WARN memory usage 241Mi of 256Mi limit",
       "provenance": "incident_time",
@@ -54,11 +55,23 @@
       "excerpt": "Nodegroup apps-ng is ACTIVE: min 3, max 9, desired 6, no health issues",
       "provenance": "current",
       "confidence": "high"
+    },
+    {
+      "id": "compute-6",
+      "claim": "A nodegroup update of apps-ng was created at 13:30 and its status is Successful.",
+      "fact_ids": [
+        "eks-prod-apps-eu-central-1:eks-0003"
+      ],
+      "excerpt": "is Successful, created 2026-10-04T13:30:00Z",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T13:30:00Z"
     }
   ],
   "checked": [
     "pods, warning events, workload and rollout history of the orders namespace",
     "nodegroup state",
-    "previous container logs"
+    "previous container logs",
+    "node group updates"
   ]
 }

@@ -29,9 +29,12 @@
       "id": "C2",
       "label": "candidate",
       "statement": "The node group update of platform-prod, finished at 13:55, made the orders pods unhealthy",
-      "supporting": [],
+      "supporting": [
+        "changes-2"
+      ],
       "contradicting": [
         "compute-5",
+        "compute-6",
         "compute-2"
       ]
     },
@@ -64,10 +67,10 @@
       "id": "H2",
       "statement": "The node group update broke the orders pods",
       "prediction": "Pods fail at or soon after the update, or the nodegroup is unhealthy",
-      "test": "Compare the nodegroup state and the time the back-off began with the end of the update",
+      "test": "Compare the time and status of the nodegroup update with the time the back-off began",
       "result": "rejected",
       "finding_ids": [
-        "compute-5",
+        "compute-6",
         "compute-2"
       ],
       "cause": "C2"

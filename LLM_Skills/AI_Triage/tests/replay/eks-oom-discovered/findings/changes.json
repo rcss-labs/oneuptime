@@ -5,14 +5,25 @@
       "id": "changes-1",
       "claim": "CloudTrail recorded no change to the database before the incident.",
       "fact_ids": [
-        "changes-prod-apps-eu-central-1:changes-0002"
+        "changes-prod-apps-eu-central-1:changes-0003"
       ],
       "excerpt": "No change was recorded for orders-prod-db between 2026-10-04T13:20:00Z and 2026-10-04T14:25:00Z",
       "provenance": "inferred",
       "confidence": "high"
+    },
+    {
+      "id": "changes-2",
+      "claim": "A platform engineer ran UpdateNodegroupVersion on platform-prod at 13:30.",
+      "fact_ids": [
+        "changes-prod-apps-eu-central-1:changes-0001"
+      ],
+      "excerpt": "UpdateNodegroupVersion (eks.amazonaws.com) by platform-engineer on platform-prod",
+      "provenance": "incident_time",
+      "confidence": "high",
+      "time": "2026-10-04T13:30:00Z"
     }
   ],
   "checked": [
-    "CloudTrail write events for the load balancer and the database"
+    "CloudTrail write events for the cluster, the load balancer and the database"
   ]
 }

@@ -1,12 +1,5 @@
 {
   "resources": {
-    "eks": {
-      "cluster": "platform-prod",
-      "namespace": "orders",
-      "workloads": [
-        "deployment/orders-api"
-      ]
-    },
     "rds": "orders-prod-db"
   }
 }

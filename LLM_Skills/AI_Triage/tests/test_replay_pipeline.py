@@ -223,19 +223,40 @@ def eks_run(tmp_path_factory):
             "expected": expected_of("eks-oom-discovered")}
 
 
-def test_the_service_is_found_by_discovery_and_the_engineer_adds_what_discovery_cannot_reach(eks_run):
+def test_the_service_is_found_by_discovery_and_the_engineer_adds_the_database(eks_run):
     steps = [record["step"] for record in eks_run["log"]]
     assert steps.index("case init") < steps.index("discover") < steps.index("case target")
     init = json.loads(next(r for r in eks_run["log"] if r["step"] == "case init")["stdout"])
     assert init["match"]["status"] == "none"
     discovery = json.loads(next(r for r in eks_run["log"] if r["step"] == "discover")["stdout"])["discovery"]
-    # Limit: discover.py follows a load balancer only to an ECS service or an Auto Scaling group, so for pods behind
-    # IP targets it finds the account, region, and load balancer; the cluster and database come from the engineer.
-    assert discovery["resources"] == {"load_balancer": "orders-prod-alb"}
+    # Discovery follows the IP targets to the pods of the configured cluster; it cannot find the database of a pod,
+    # so the engineer adds that one (engineer-additions.json).
+    assert discovery["resources"] == {"load_balancer": "orders-prod-alb", "eks": {
+        "cluster": "platform-prod", "namespace": "orders", "workloads": ["deployment/orders-api"]}}
+    assert json.loads((eks_run["scenario"] / "engineer-additions.json").read_text()) == {"resources": {"rds": "orders-prod-db"}}
     assert discovery["account"] == "prod-apps" and discovery["region"] == "eu-central-1"
     target = read_json(eks_run["case_dir"] / "case.json")["target"]
     assert target["source"] == "discovered"
     assert target["resources"]["eks"]["cluster"] == "platform-prod" and target["resources"]["rds"] == "orders-prod-db"
+    discover_calls = [call for call in load_call_log(eks_run["base"]) if call["tool"] == "kubectl" and "-A" in call["argv"]]
+    assert len(discover_calls) == 1 and "status.phase=Running" in discover_calls[0]["argv"]
+
+
+def test_the_node_group_update_is_in_the_evidence_as_an_eks_update_and_a_cloudtrail_event(eks_run):
+    facts = [fact["summary"] for path in sorted((eks_run["case_dir"] / "evidence").glob("*.json"))
+             for fact in read_json(path)["facts"]]
+    assert any("Nodegroup apps-ng update" in text and "is Successful, created 2026-10-04T13:30:00Z" in text for text in facts)
+    assert any(text.startswith("UpdateNodegroupVersion (eks.amazonaws.com) by platform-engineer on platform-prod") for text in facts)
+    checked = read_json(eks_run["case_dir"] / "findings" / "checked.json")
+    assert {"compute-6", "changes-2"} <= {item["id"] for item in checked["valid"]}
+
+
+def test_the_memory_limit_and_the_kill_are_stated_in_the_same_pod_fact(eks_run):
+    pods = [fact for path in (eks_run["case_dir"] / "evidence").glob("eks-*.json") for fact in read_json(path)["facts"]
+            if fact["summary"].startswith("Pod orders-api-")]
+    assert len(pods) == 3
+    assert all("last terminated OOMKilled exit code 137" in fact["summary"] and "memory limit 256Mi" in fact["summary"]
+               for fact in pods)
 
 
 def test_the_denied_optional_call_is_a_coverage_note_of_the_report(eks_run):
@@ -251,7 +272,8 @@ def test_every_kubectl_command_was_answered_from_the_recording_and_passes_the_gu
     context = context_from_config(load_config(skill_dir / "config" / "triage-config.yaml"), skill_dir)
     calls = [call for call in load_call_log(eks_run["base"]) if call["tool"] == "kubectl"]
     assert {call["operation"].split()[0] for call in calls} == {"get", "rollout", "logs"}
-    assert len(calls) == 7  # pods, events, the workload, its rollout history, and the previous log of three pods
+    # discovery's pod list, then the namespace's pods, events, the workload, its rollout history, and the previous log of three pods
+    assert len(calls) == 8
     assert [call["argv"] for call in calls if call["entry"] is None] == []
     refused = [call["argv"][-3:] for call in calls if decide(skill_style(call["argv"], home), context).kind != ALLOW]
     assert refused == []
@@ -265,7 +287,9 @@ def test_the_work_order_mitigation_names_the_workload_and_both_memory_limits(eks
     text = json.dumps(mitigation)
     for word in ("deployment/orders-api", "namespace orders", "cluster platform-prod", "256Mi", "512Mi"):
         assert word in text, word
-    assert mitigation["target"]["arn"] == "arn:aws:eks:eu-central-1:222222222222:cluster/platform-prod"
+    cluster_fact = next(fact for path in (eks_run["case_dir"] / "evidence").glob("eks-*.json")
+                        for fact in read_json(path)["facts"] if fact["summary"].startswith("Cluster platform-prod"))
+    assert mitigation["target"]["arn"] == cluster_fact["data"]["arn"]  # the ARN the evidence states, not a constructed one
     assert mitigation["label"] == "recommended"
 
 

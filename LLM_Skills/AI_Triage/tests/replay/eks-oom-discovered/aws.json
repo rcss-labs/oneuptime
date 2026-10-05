@@ -1025,6 +1025,7 @@
   "result": {
    "nodegroup": {
     "nodegroupName": "apps-ng",
+    "nodegroupArn": "arn:aws:eks:eu-central-1:222222222222:nodegroup/platform-prod/apps-ng/b6c0d1e2-f3a4-4b5c-8d6e-7f8091a2b3c4",
     "clusterName": "platform-prod",
     "status": "ACTIVE",
     "scalingConfig": {
@@ -1103,6 +1104,50 @@
   "error": {
    "code": 254,
    "stderr": "An error occurred (AccessDeniedException) when calling the DescribeAddon operation: User: arn:aws:sts::222222222222:assumed-role/ai-triage-read-only/replay is not authorized to perform: eks:DescribeAddon on resource: arn:aws:eks:eu-central-1:222222222222:addon/platform-prod/coredns/*"
+  }
+ },
+ {
+  "match": [
+   "eks",
+   "list-updates"
+  ],
+  "contains": [
+   "--nodegroup-name",
+   "apps-ng"
+  ],
+  "result": {
+   "updateIds": [
+    "8f2a41c6-7b3d-4e19-a0c5-d2e6f1b97a30"
+   ]
+  }
+ },
+ {
+  "match": [
+   "eks",
+   "describe-update"
+  ],
+  "contains": [
+   "--nodegroup-name",
+   "8f2a41c6-7b3d-4e19-a0c5-d2e6f1b97a30"
+  ],
+  "result": {
+   "update": {
+    "id": "8f2a41c6-7b3d-4e19-a0c5-d2e6f1b97a30",
+    "status": "Successful",
+    "type": "VersionUpdate",
+    "params": [
+     {
+      "type": "Version",
+      "value": "1.30"
+     },
+     {
+      "type": "ReleaseVersion",
+      "value": "1.30.4-20260929"
+     }
+    ],
+    "createdAt": "2026-10-04T13:30:00+00:00",
+    "errors": []
+   }
   }
  },
  {
@@ -1739,6 +1784,33 @@
       0.0013
      ],
      "StatusCode": "Complete"
+    }
+   ]
+  }
+ },
+ {
+  "match": [
+   "cloudtrail",
+   "lookup-events"
+  ],
+  "contains": [
+   "AttributeValue=platform-prod"
+  ],
+  "result": {
+   "Events": [
+    {
+     "EventId": "22222222-bbbb-4ccc-8ddd-c0ffee000101",
+     "EventName": "UpdateNodegroupVersion",
+     "EventSource": "eks.amazonaws.com",
+     "EventTime": "2026-10-04T13:30:00+00:00",
+     "ReadOnly": "false",
+     "Username": "platform-engineer",
+     "Resources": [
+      {
+       "ResourceType": "AWS::EKS::Cluster",
+       "ResourceName": "platform-prod"
+      }
+     ]
     }
    ]
   }
