@@ -6,6 +6,8 @@ when it is known.
 """
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -16,6 +18,7 @@ from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
 from triage.window import Window, describe_offset, format_time
 
 MAX_RESOURCE_NAMES = 10
+MAX_SOURCE_PAGES = 10
 MAX_EVENTS_PER_NAME = 40
 LOOKUP_ITEMS = "50"
 LOOKUP_GRACE_MINUTES = 5
@@ -33,6 +36,13 @@ CONFIG_LIMIT = "10"
 NOT_DISCOVERED = "ResourceNotDiscoveredException"
 STACK_TYPE = "AWS::CloudFormation::Stack"
 STACK_UPDATE_STATUSES = ("UPDATE_IN_PROGRESS", "UPDATE_COMPLETE")
+
+
+@dataclass(frozen=True)
+class _Lookup:
+    ok: bool  # the call succeeded
+    cut: bool  # the answer had more pages than were read
+    found: int  # write events in the period (before removing duplicates)
 
 
 def _gap(incident_start: str | None, when: Any) -> str:
@@ -53,12 +63,35 @@ def _lookup_end(ctx: CollectContext, incident_start: str | None) -> datetime:
     return min(ctx.window.end, incident + timedelta(minutes=LOOKUP_GRACE_MINUTES))
 
 
+def _is_write(event: dict) -> bool:
+    return str(event.get("ReadOnly")).lower() == "false"
+
+
+def _add_event_fact(
+    ctx: CollectContext, item: dict, fallback: str, recorded: str, incident_start: str | None,
+) -> None:
+    """One fact from the named fields of a CloudTrail event; the CloudTrailEvent text is never copied."""
+    resources = [r.get("ResourceName") for r in item.get("Resources", []) if r.get("ResourceName")]
+    resource = ", ".join(resources) or fallback
+    ctx.evidence.add(
+        kind=INCIDENT_TIME, resource=resource, time=item.get("EventTime"), command=ctx.last_command,
+        summary=(
+            f"{item.get('EventName')} ({item.get('EventSource')}) by {item.get('Username') or 'unknown user'} "
+            f"on {resource}{recorded}{_gap(incident_start, item.get('EventTime'))}"
+        ),
+    )
+
+
 def _add_cloudtrail(
     ctx: CollectContext, lookup: str, name: str, incident_start: str | None, label: str | None = None,
-    global_source: str | None = None,
-) -> None:
-    """One CloudTrail lookup. With global_source set it runs in us-east-1 and keeps only that event source."""
+    global_source: str | None = None, seen: set[str] | None = None, absence: bool = True,
+) -> _Lookup:
+    """One CloudTrail lookup. With global_source set it runs in us-east-1 and keeps only that event source.
+
+    seen holds the ids of events already written; with absence False the caller words the "nothing found" fact.
+    """
     label = label or name
+    seen = set() if seen is None else seen
     region = GLOBAL_REGION if global_source else None
     start, end = ctx.window.start, _lookup_end(ctx, incident_start)
     reply = ctx.aws(
@@ -68,34 +101,30 @@ def _add_cloudtrail(
         region=region,
     )
     if reply is None:
-        return
+        return _Lookup(ok=False, cut=False, found=0)
     writes = [
         e for e in reply.get("Events", [])
-        if str(e.get("ReadOnly")).lower() == "false" and (global_source is None or e.get("EventSource") == global_source)
+        if _is_write(e) and (global_source is None or e.get("EventSource") == global_source)
     ]
     recorded = f", recorded in {GLOBAL_REGION}" if global_source else ""
     in_period = newest_in_window(Window(start, end), writes, lambda e: e.get("EventTime"), len(writes))
     shown = in_period[:MAX_EVENTS_PER_NAME]
     for item in shown:
-        resources = [r.get("ResourceName") for r in item.get("Resources", []) if r.get("ResourceName")]
-        resource = ", ".join(resources) or name
-        ctx.evidence.add(
-            kind=INCIDENT_TIME, resource=resource, time=item.get("EventTime"), command=ctx.last_command,
-            summary=(
-                f"{item.get('EventName')} ({item.get('EventSource')}) by {item.get('Username') or 'unknown user'} "
-                f"on {resource}{recorded}{_gap(incident_start, item.get('EventTime'))}"
-            ),
-        )
+        if item.get("EventId") in seen:
+            continue
+        seen.add(item.get("EventId"))
+        _add_event_fact(ctx, item, name, recorded, incident_start)
     returned = len(reply.get("Events", []))
     period = f"between {format_time(start)} and {format_time(end)}"
-    if reply.get("NextToken"):
+    cut = bool(reply.get("NextToken"))
+    if cut:
         summary = (
             f"More events exist than the {returned} read; they may include changes"
             if shown else
             f"No change was found among the {returned} newest events for {label} {period}; older events were not read"
         )
         ctx.evidence.add(kind=DERIVED, resource=name, command=ctx.last_command, summary=summary)
-    elif not shown and not global_source:
+    elif not shown and not global_source and absence:
         ctx.evidence.add(
             kind=DERIVED, resource=name, command=ctx.last_command,
             summary=f"No change was recorded for {label} {period}",
@@ -105,6 +134,98 @@ def _add_cloudtrail(
             kind=DERIVED, resource=name, command=ctx.last_command,
             summary=f"{len(in_period) - len(shown)} older changes for {label} {period} were not shown",
         )
+    return _Lookup(ok=True, cut=cut, found=len(in_period))
+
+
+def _names_in_record(event: dict, names: list[str]) -> list[str]:
+    """The names that appear as whole words in the event's resources or anywhere in its CloudTrail record."""
+    text = " ".join([r.get("ResourceName") or "" for r in event.get("Resources", [])] + [event.get("CloudTrailEvent") or ""])
+    return [n for n in names if re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", text)]
+
+
+def _search_source(
+    ctx: CollectContext, source: str, names: list[str], incident_start: str | None, seen: set[str],
+) -> tuple[bool, set[str]]:
+    """Read up to MAX_SOURCE_PAGES pages of write events of one source; keep those naming one of names.
+
+    Returns whether the whole period was read, and the names found.
+    """
+    start, end = ctx.window.start, _lookup_end(ctx, incident_start)
+    base = ["--lookup-attributes", f"AttributeKey=EventSource,AttributeValue={source}",
+            "--start-time", format_time(start), "--end-time", format_time(end), "--max-items", LOOKUP_ITEMS]
+    matched: list[tuple[dict, list[str]]] = []
+    events_read, token, complete = 0, None, True
+    for _ in range(MAX_SOURCE_PAGES):
+        reply = ctx.aws("cloudtrail", "lookup-events", base + (["--starting-token", token] if token else []))
+        if reply is None:
+            return False, set()
+        events_read += len(reply.get("Events", []))
+        matched += [(e, hit) for e in reply.get("Events", []) if _is_write(e) and (hit := _names_in_record(e, names))]
+        token = reply.get("NextToken")
+        if not token:
+            break
+    else:
+        complete = False
+    command = ctx.last_command
+    period = f"between {format_time(start)} and {format_time(end)}"
+    found: set[str] = set()
+    pairs = {id(e): hit for e, hit in matched}
+    in_period = newest_in_window(Window(start, end), [e for e, _ in matched], lambda e: e.get("EventTime"), len(matched))
+    for item in in_period[:MAX_EVENTS_PER_NAME]:
+        found.update(pairs[id(item)])
+        if item.get("EventId") in seen:
+            continue
+        seen.add(item.get("EventId"))
+        _add_event_fact(ctx, item, ", ".join(pairs[id(item)]), "", incident_start)
+    for item in in_period[MAX_EVENTS_PER_NAME:]:
+        found.update(pairs[id(item)])
+    if len(in_period) > MAX_EVENTS_PER_NAME:
+        ctx.evidence.add(
+            kind=DERIVED, resource=source, command=command,
+            summary=f"{len(in_period) - MAX_EVENTS_PER_NAME} older changes by event source {source} {period} were not shown",
+        )
+    if not complete:
+        ctx.evidence.add(
+            kind=DERIVED, resource=source, command=command,
+            summary=(
+                f"Search by event source {source} stopped after {events_read} events ({MAX_SOURCE_PAGES} pages) {period}; "
+                f"absence of changes naming {', '.join(names)} is not established"
+            ),
+        )
+    return complete, found
+
+
+def _add_named_changes(
+    ctx: CollectContext, names: list[str], sources: list[str], incident_start: str | None,
+) -> None:
+    """Look up each name exactly, then by event source, and word absence as exactly what was asked."""
+    seen: set[str] = set()
+    found: dict[str, int] = {}
+    complete = True
+    for name in names:
+        result = _add_cloudtrail(
+            ctx, f"AttributeKey=ResourceName,AttributeValue={name}", name, incident_start, seen=seen, absence=False,
+        )
+        found[name] = result.found
+        complete = complete and result.ok and not result.cut
+    for source in sources:
+        source_complete, names_found = _search_source(ctx, source, names, incident_start, seen)
+        complete = complete and source_complete
+        for name in names_found:
+            found[name] += 1
+    if not complete:
+        return
+    how = (
+        f"looked up by resource name and by event source {', '.join(sources)}" if sources
+        else "looked up by resource name only; some services record ARNs or ids instead"
+    )
+    period = f"between {format_time(ctx.window.start)} and {format_time(_lookup_end(ctx, incident_start))}"
+    for name in names:
+        if not found[name]:
+            ctx.evidence.add(
+                kind=DERIVED, resource=name, command=ctx.last_command,
+                summary=f"CloudTrail returned no write event naming '{name}' {period} ({how})",
+            )
 
 
 def _add_global_services(ctx: CollectContext, incident_start: str | None) -> None:
@@ -223,8 +344,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         incident_start = None
     names = split_csv(targets.get("resource_names"))[:MAX_RESOURCE_NAMES]
     if names:
-        for name in names:
-            _add_cloudtrail(ctx, f"AttributeKey=ResourceName,AttributeValue={name}", name, incident_start)
+        _add_named_changes(ctx, names, split_csv(targets.get("event_sources")), incident_start)
     else:
         _add_cloudtrail(ctx, "AttributeKey=ReadOnly,AttributeValue=false", "account", incident_start,
                         label="any resource")
@@ -242,6 +362,6 @@ COLLECTOR = Collector(
     name="changes",
     description="What changed just before the incident: CloudTrail write events, CloudFormation, CodePipeline, AWS Config",
     required=(),
-    optional=("resource_names", "stack", "pipeline", "config_resource", "incident_start"),
+    optional=("resource_names", "event_sources", "stack", "pipeline", "config_resource", "incident_start"),
     run=collect,
 )

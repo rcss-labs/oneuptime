@@ -25,11 +25,19 @@ def event(name, when="2026-10-04T10:46:00+00:00", read_only="false", user="alice
 class RegionAws(FakeAws):
     """Answers CloudTrail lookups made in us-east-1 from by_source (event source -> reply or error tuple)."""
 
-    def __init__(self, answers, by_source):
+    def __init__(self, answers, by_source, by_attribute=None):
         super().__init__(answers)
         self.by_source = by_source
+        self.by_attribute = by_attribute or {}
 
     def __call__(self, argv, timeout):
+        if argv[1:3] == ["cloudtrail", "lookup-events"] and argv[argv.index("--region") + 1] != "us-east-1":
+            value = argv[argv.index("--lookup-attributes") + 1].split("AttributeValue=")[1]
+            if value in self.by_attribute:
+                self.calls.append(argv)
+                token = argv[argv.index("--starting-token") + 1] if "--starting-token" in argv else "0"
+                pages = self.by_attribute[value]
+                return 0, json.dumps(pages[min(int(token), len(pages) - 1)]), ""
         if argv[1:3] == ["cloudtrail", "lookup-events"] and argv[argv.index("--region") + 1] == "us-east-1":
             self.calls.append(argv)
             attribute = argv[argv.index("--lookup-attributes") + 1]
@@ -41,10 +49,10 @@ class RegionAws(FakeAws):
         return super().__call__(argv, timeout)
 
 
-def run(config_data, tmp_path, answers, targets, global_events=None, region="eu-west-1"):
+def run(config_data, tmp_path, answers, targets, global_events=None, region="eu-west-1", by_attribute=None):
     ctx, aws, kube = make_context(config_data, tmp_path, answers, collector="changes", region=region)
     if region != "us-east-1":
-        aws = ctx.runner = RegionAws(answers, global_events or {})
+        aws = ctx.runner = RegionAws(answers, global_events or {}, by_attribute)
     COLLECTOR.run(ctx, dict(targets))
     return ctx, aws, kube
 
@@ -60,7 +68,7 @@ def by_summary(ctx, text):
 def test_declares_its_targets():
     assert COLLECTOR.name == "changes"
     assert COLLECTOR.required == ()
-    assert set(COLLECTOR.optional) == {"resource_names", "stack", "pipeline", "config_resource", "incident_start"}
+    assert set(COLLECTOR.optional) == {"resource_names", "event_sources", "stack", "pipeline", "config_resource", "incident_start"}
 
 
 def test_cloudtrail_event_fact_says_who_what_and_how_long_before(config_data, tmp_path):
@@ -276,7 +284,7 @@ def test_nothing_changed_says_so_with_the_range_scanned(config_data, tmp_path):
     ctx, aws, kube = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}}, {"resource_names": "x"})
     assert ctx.evidence.errors == []
     assert fact_summaries(ctx) == [
-        "No change was recorded for x between 2026-10-04T10:00:00Z and 2026-10-04T12:00:00Z"
+        "CloudTrail returned no write event naming 'x' between 2026-10-04T10:00:00Z and 2026-10-04T12:00:00Z (looked up by resource name only; some services record ARNs or ids instead)"
     ]
     assert ctx.evidence.facts[0].kind == "derived"
     assert_read_only(ctx, aws, kube)
@@ -285,7 +293,7 @@ def test_nothing_changed_says_so_with_the_range_scanned(config_data, tmp_path):
 def test_only_read_events_counts_as_nothing_changed(config_data, tmp_path):
     answers = {"cloudtrail lookup-events": {"Events": [event("DescribeServices", read_only="true")]}}
     ctx, _, _ = run(config_data, tmp_path, answers, {"resource_names": "x"})
-    assert fact_summaries(ctx)[0].startswith("No change was recorded for x")
+    assert fact_summaries(ctx)[0].startswith("CloudTrail returned no write event naming 'x'")
 
 
 def test_failed_lookup_is_not_reported_as_nothing_changed(config_data, tmp_path):
@@ -301,7 +309,8 @@ def test_lookup_ends_five_minutes_after_the_incident_start(config_data, tmp_path
     assert call[call.index("--start-time") + 1] == "2026-10-04T10:00:00Z"
     assert call[call.index("--end-time") + 1] == "2026-10-04T10:55:00Z"
     assert fact_summaries(ctx) == [
-        "No change was recorded for x between 2026-10-04T10:00:00Z and 2026-10-04T10:55:00Z"
+        "CloudTrail returned no write event naming 'x' between 2026-10-04T10:00:00Z and 2026-10-04T10:55:00Z "
+        "(looked up by resource name only; some services record ARNs or ids instead)"
     ]
 
 
@@ -422,3 +431,88 @@ def test_in_us_east_1_there_is_no_extra_lookup(config_data, tmp_path):
     answers = {"cloudtrail lookup-events": {"Events": []}}
     ctx, aws, _ = run(config_data, tmp_path, answers, {"resource_names": "x"}, region="us-east-1")
     assert len(aws.called("cloudtrail", "lookup-events")) == 1
+
+
+ECS = "ecs.amazonaws.com"
+ELB = "elasticloadbalancing.amazonaws.com"
+CHECKOUT_ARN = f"arn:aws:ecs:eu-west-1:{ACCOUNT}:service/checkout/checkout-api"
+
+
+def arn_event(name, text, source=ECS, event_id=None, read_only="false", when="2026-10-04T10:46:00+00:00"):
+    """An event whose Resources carry an ARN and whose record mentions text in its request parameters."""
+    body = event(name, when=when, source=source, read_only=read_only, resource=f"{CHECKOUT_ARN.rsplit('/', 1)[0]}/{text}")
+    body["CloudTrailEvent"] = '{"requestParameters": {"service": "%s"}}' % text
+    body["EventId"] = event_id or f"id-{name}-{text}-{read_only}"
+    return body
+
+
+def source_run(config_data, tmp_path, by_attribute, sources=ECS, **extra):
+    targets = {"resource_names": "checkout-api", "event_sources": sources, **extra}
+    return run(config_data, tmp_path, {}, targets, by_attribute=by_attribute)
+
+
+def test_declares_event_sources_as_optional_target():
+    assert "event_sources" in COLLECTOR.optional
+
+
+def test_event_found_only_by_event_source_is_a_fact(config_data, tmp_path):
+    events = [
+        arn_event("UpdateService", "checkout-api"),
+        arn_event("UpdateService", "billing-api"),
+        arn_event("DescribeServices", "checkout-api", read_only="true"),
+    ]
+    ctx, aws, kube = source_run(config_data, tmp_path, {ECS: [{"Events": events}]})
+    facts = [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+    assert len(facts) == 1 and "UpdateService" in facts[0].summary
+    call = [c for c in aws.called("cloudtrail", "lookup-events")
+            if "AttributeKey=EventSource,AttributeValue=" + ECS in c][0]
+    assert call[call.index("--start-time") + 1] == "2026-10-04T10:00:00Z"
+    assert call[call.index("--end-time") + 1] == "2026-10-04T12:00:00Z"
+    assert "hunter2" not in ctx.evidence.to_json() and "requestParameters" not in ctx.evidence.to_json()
+    assert_read_only(ctx, aws, kube)
+
+
+def test_name_match_is_whole_word_not_a_substring(config_data, tmp_path):
+    events = [arn_event("UpdateService", "checkout-api-canary")]
+    ctx, _, _ = source_run(config_data, tmp_path, {ECS: [{"Events": events}]})
+    assert not [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+
+
+def test_same_event_from_both_lookups_is_written_once(config_data, tmp_path):
+    same = arn_event("UpdateService", "checkout-api", event_id="evt-1")
+    ctx, _, _ = source_run(config_data, tmp_path, {"checkout-api": [{"Events": [same]}], ECS: [{"Events": [same]}]})
+    assert len([f for f in ctx.evidence.facts if f.kind == "incident_time"]) == 1
+
+
+def test_source_lookup_follows_pages_up_to_ten_and_says_absence_is_not_established(config_data, tmp_path):
+    pages = [{"Events": [arn_event("Other", "billing", event_id=f"e{n}") for n in range(50)], "NextToken": str(n + 1)}
+             for n in range(20)]
+    ctx, aws, _ = source_run(config_data, tmp_path, {ECS: pages})
+    source_calls = [c for c in aws.called("cloudtrail", "lookup-events") if "AttributeKey=EventSource,AttributeValue=" + ECS in c]
+    assert len(source_calls) == 10
+    notes = [s for s in fact_summaries(ctx) if "stopped after 500 events" in s]
+    assert len(notes) == 1 and "absence" in notes[0] and "not established" in notes[0] and ECS in notes[0]
+    assert not any("returned no write event" in s for s in fact_summaries(ctx))
+
+
+def test_absence_wording_names_what_was_asked(config_data, tmp_path):
+    ctx, _, _ = source_run(config_data, tmp_path, {ECS: [{"Events": []}]}, sources=f"{ECS},{ELB}")
+    assert fact_summaries(ctx) == [
+        "CloudTrail returned no write event naming 'checkout-api' between 2026-10-04T10:00:00Z and "
+        f"2026-10-04T12:00:00Z (looked up by resource name and by event source {ECS}, {ELB})"
+    ]
+
+
+def test_found_by_source_means_no_absence_fact(config_data, tmp_path):
+    ctx, _, _ = source_run(config_data, tmp_path, {ECS: [{"Events": [arn_event("UpdateService", "checkout-api")]}]})
+    assert not any("returned no write event" in s for s in fact_summaries(ctx))
+
+
+def test_failed_source_lookup_is_an_error_and_no_absence_is_claimed(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, {}, {"resource_names": "checkout-api", "event_sources": ECS},
+                    by_attribute=None)
+    assert not ctx.evidence.errors
+    failing = {"cloudtrail lookup-events": access_denied("LookupEvents")}
+    ctx, _, _ = run(config_data, tmp_path, failing, {"resource_names": "checkout-api", "event_sources": ECS})
+    assert [e["code"] for e in ctx.evidence.errors].count("AccessDeniedException") == 2
+    assert not any("returned no write event" in s for s in fact_summaries(ctx))
