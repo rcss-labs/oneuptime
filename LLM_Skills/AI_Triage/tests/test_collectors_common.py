@@ -121,8 +121,9 @@ def test_port_range():
 def test_overlong_dotted_string_is_hidden():
     value = ".".join(["a" * 500] * 4) + ".com"
     assert shown(value) == hidden(value)
-    assert shown(("a" * 64) + ".example.com").startswith("<hidden")
-    assert shown(("a" * 63) + ".example.com").startswith("a")
+    assert shown(("a-" * 32) + ".example.com").startswith("<hidden")  # a 64-character label
+    assert shown(("a-" * 31) + "a.example.com").startswith("a")  # 63 characters, dashed so not key-like
+    assert shown(("a" * 63) + ".example.com").startswith("<hidden")  # a 63-letter run is key-like (m-3)
 
 
 def test_host_without_a_letter_in_the_last_label_is_hidden():
@@ -437,7 +438,6 @@ def test_plain_ipv6_is_shown():
     [
         ("DB_HOST", "admin:1234", "admin:1234"),
         ("X", "jane.m.smith:1234", "jane.m.smith:1234"),
-        ("X", HEX40 + ".example.com", HEX40 + ".example.com"),
         ("DB_ARN", "arn:aws:secretsmanager:eu-west-1:111111111111:secret:db-main", "arn:aws:secretsmanager:eu-west-1:111111111111:secret:db-main"),
         ("SERVICE_URL", "http://admin:" + PW + "@api:8080/x", "http://api:8080"),
         ("SERVICE_URL", "https://api.example.com/x/" + TOK40, "https://api.example.com"),
@@ -636,3 +636,59 @@ def test_only_the_last_name_part_decides_the_kind(name, value, expected_shown):
 
 def test_known_residual_dictionary_word_inside_a_path_is_shown():
     assert is_shown("DB_PATH", "/run/" + PW)
+
+
+
+# Minor follow-up (re-review round 4)
+
+@pytest.mark.parametrize("value", ["eu-west-1", "us-east-2", "ap-southeast-1", "us-gov-west-1", "us-iso-east-1",
+                                   "us-isob-east-1", "il-central-1", "cn-northwest-1", "mx-central-1"])
+def test_real_region_forms_are_shown_under_any_name(value):
+    assert shown(value) == value
+
+
+@pytest.mark.parametrize("value", ["my-" + PW + "-1", "go-team-go-7", "zz-west-1", "eu-" + PW + "-2", "eu-west-12"])
+def test_region_shaped_passphrases_are_hidden(value):
+    assert not is_shown("X", value)
+    assert not is_shown("VALUE", value)
+
+
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("API_TOKEN", "https://" + TOK40 + ".example.com/x"),
+        ("X", "https://" + "a3f9c0de" * 4 + ".lambda-url.eu-west-1.on.aws/"),
+        ("X", HEX40 + ".example.com"),
+        ("API_HOST", TOK40 + ".example.com:443"),
+        ("API_URL", "https://" + TOK40 + ".example.com/x"),
+        ("KAFKA_BROKERS", "b-1.kafka.example.com:9092," + TOK40 + ".example.com:9092"),
+    ],
+)
+def test_key_like_host_label_is_hidden_on_every_address_path(name, value):
+    assert not is_shown(name, value)
+
+
+@pytest.mark.parametrize("value, expected_shown", [("1", True), ("65535", True), ("65536", False), ("99999", False), ("0", False)])
+def test_port_must_be_1_to_65535(value, expected_shown):
+    assert is_shown("SERVER_PORT", value) == expected_shown
+
+
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("REQUEST_TIMEOUT_MS", "1500"),
+        ("CONNECT_TIMEOUT_SECONDS", "30"),
+        ("CACHE_TTL_SEC", "300"),
+        ("HEAP_SIZE_MB", "512"),
+        ("POOL_MAX_CONNECTIONS", "20"),
+        ("DiskLimitPct", "80"),
+        ("CPU_LIMIT_PERCENT", "75.5"),
+    ],
+)
+def test_a_trailing_unit_keeps_the_kind_of_the_part_before_it(name, value):
+    assert shown(value, name) == value
+
+
+def test_a_unit_part_does_not_widen_what_is_shown():
+    assert not is_shown("REQUEST_TIMEOUT_MS", PW)
+    assert not is_shown("DB_PASSWORD_MS", "1500")

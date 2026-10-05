@@ -16,7 +16,10 @@ _PORT_RE = re.compile(r"[0-9]{1,5}")
 _AUTHORITY_CHARS_RE = re.compile(r"[A-Za-z0-9.:\[\]-]*")
 _BOOLEAN_RE = re.compile(r"true|false", re.IGNORECASE)
 _SWITCH_RE = re.compile(r"true|false|yes|no|on|off|0|1", re.IGNORECASE)
-_REGION_RE = re.compile(r"[a-z]{2}(?:-[a-z]+)+-[0-9]")
+_REGION_RE = re.compile(
+    r"(?:us|eu|ap|sa|ca|me|af|il|mx|cn|us-gov|us-iso|us-isob)"
+    r"-(?:north|south|east|west|central|northeast|northwest|southeast|southwest)-[0-9]"
+)
 _ENUM_RE = re.compile(r"[A-Za-z][A-Za-z0-9_./,-]{0,39}")
 _MAX_ENUM_DIGITS = 4
 _NUMBER_RES = (
@@ -72,6 +75,11 @@ _KIND_WORDS = {
     OPTS: ("opts", "options", "args", "flags"),
 }
 _KIND_OF_WORD = {word: kind for kind, words in _KIND_WORDS.items() for word in words}
+# A trailing unit (REQUEST_TIMEOUT_MS) names no kind; the part before it does.
+_UNIT_WORDS = frozenset({
+    "ms", "s", "sec", "secs", "seconds", "min", "mins", "minutes", "h", "hours", "b", "kb", "mb", "gb",
+    "percent", "pct",
+})
 _HIDDEN_PREFIX = "<hidden:"
 
 
@@ -139,9 +147,8 @@ def _valid_host(host: str, min_labels: int) -> bool:
     return (
         len(host) <= _MAX_HOST_LENGTH
         and len(labels) >= min_labels
-        and all(_LABEL_RE.fullmatch(label) for label in labels)
+        and all(_LABEL_RE.fullmatch(label) and not _key_like(label) for label in labels)
         and any(char.isalpha() for char in labels[-1])
-        and (len(labels) > 1 or not _key_like(host))
     )
 
 
@@ -252,7 +259,7 @@ def _path_value(text: str) -> str | None:
 
 _KIND_CHECKS: dict[str, Callable[[str], str | None]] = {
     ADDRESS: _address_value,
-    PORT: lambda text: text if _PORT_RE.fullmatch(text) else None,
+    PORT: lambda text: text if _PORT_RE.fullmatch(text) and 1 <= int(text) <= _MAX_PORT else None,
     ENUM: _enum_value,
     NUMBER: _number_value,
     VERSION: _version_value,
@@ -286,9 +293,12 @@ def _secret_or_personal_name(name: str) -> bool:
 
 
 def _setting_kind(name: str) -> str | None:
-    """The kind of setting a name says it is, from its last part only (trailing digits stripped)."""
+    """The kind of setting a name says it is, from its last part only (trailing digits stripped),
+    or from the part before it when the last part is a unit."""
     parts = [part.rstrip("0123456789") for part in key_components(name)]
     parts = [part for part in parts if part]
+    if len(parts) > 1 and parts[-1] in _UNIT_WORDS:
+        parts.pop()
     return _KIND_OF_WORD.get(parts[-1]) if parts else None
 
 
