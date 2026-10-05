@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from triage.case import CaseError
+from triage.collectors import all_collectors
 from triage.config import TriageConfig
 
 DOMAINS = ("changes", "compute", "data", "edge", "logs")
@@ -94,6 +95,9 @@ class _Planner:
         argv = [self.python, self.collect_script, name, "--account", self.account, "--region", self.region,
                 "--start", self.case["window"]["start"], "--end", self.case["window"]["end"],
                 "--case-dir", self.case["case_dir"]]
+        # Every collector that declares an optional incident_start gets the case's, in the form changes takes.
+        if "incident_start" in all_collectors()[name].optional:
+            targets = {**targets, "incident_start": self.case["incident_start"]}
         for key, value in targets.items():
             argv += ["--target", f"{key}={value}"]
         self._claim_file(name, "", suffix)

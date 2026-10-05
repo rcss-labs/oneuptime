@@ -68,7 +68,7 @@ def test_collect_commands_carry_the_case_options(config):
     assert option(command, "--region") == "eu-west-1"
     assert option(command, "--start") == START and option(command, "--end") == END
     assert option(command, "--case-dir") == "/cases/INC-1/run"
-    assert targets_of(command) == {"db": "checkout-prod-db"}
+    assert targets_of(command) == {"db": "checkout-prod-db", "incident_start": "2026-10-04T10:42:00Z"}
     assert command.reason
 
 
@@ -142,7 +142,7 @@ def test_cloudfront_distribution(config):
 
 
 def test_rds(config):
-    assert targets_of(one(plan({"rds": "db-1"}, config), "rds")) == {"db": "db-1"}
+    assert targets_of(one(plan({"rds": "db-1"}, config), "rds")) == {"db": "db-1", "incident_start": "2026-10-04T10:42:00Z"}
 
 
 def test_elasticache(config):
@@ -486,3 +486,27 @@ def test_long_names_are_still_accepted_by_the_guard_and_parser(config):
     for command in named(plan({"dynamodb_tables": ["A" * 400, "b" * 400]}, config), "dynamodb"):
         assert decide(command.shell(), context).kind == ALLOW
         collect._build_parser().parse_args(command.argv[2:])
+
+
+# follow-up: incident start for every collector that declares it
+
+def test_every_planned_collector_that_declares_incident_start_gets_it(config):
+    registry = all_collectors()
+    wanting = {name for name, collector in registry.items() if "incident_start" in collector.optional}
+    assert {"changes", "rds"} <= wanting
+    planned = [c for c in plan(FULL_RESOURCES, config) if c.tool == "collect.py" and c.name in wanting]
+    assert {c.name for c in planned} >= {"changes", "rds"}
+    for command in planned:
+        assert targets_of(command)["incident_start"] == "2026-10-04T10:42:00Z", command.name
+
+
+def test_collectors_that_do_not_declare_incident_start_do_not_get_it(config):
+    registry = all_collectors()
+    for command in plan(FULL_RESOURCES, config):
+        if command.tool == "collect.py" and "incident_start" not in registry[command.name].optional:
+            assert "incident_start" not in targets_of(command), command.name
+
+
+def test_rds_gets_the_incident_start_next_to_its_db(config):
+    command = one(plan({"rds": "db-1"}, config), "rds")
+    assert targets_of(command) == {"db": "db-1", "incident_start": "2026-10-04T10:42:00Z"}
