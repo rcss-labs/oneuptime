@@ -6,7 +6,7 @@ from typing import Any
 from triage.collectors import Collector
 from triage.collectors.common import env_changes, env_summary, in_window, newest_in_window
 from triage.context import CollectContext
-from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME, MAX_DATA_STRING
+from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME, MAX_DATA_STRING, SUMMARY_CUT_MARKER
 from triage.metrics import MetricSpec, add_metric_facts
 
 MAX_EVENTS = 30
@@ -16,6 +16,7 @@ MAX_CHANGES = 50
 MAX_CHANGE_LENGTH = 300
 CHANGE_CUT_MARKER = "… [change cut]"
 IMAGE = "image"
+MAX_EVENT_SUMMARY = 200
 MIN_IMAGE_PART = 100
 
 
@@ -63,12 +64,19 @@ def _add_deployments(ctx: CollectContext, resource: str, service: dict) -> None:
         )
 
 
+def _event_summary(message: str) -> str:
+    """The event message itself, cut at MAX_EVENT_SUMMARY characters with the usual cut marker."""
+    if len(message) <= MAX_EVENT_SUMMARY:
+        return message or "Service event with no message"
+    return message[: MAX_EVENT_SUMMARY - len(SUMMARY_CUT_MARKER)] + SUMMARY_CUT_MARKER
+
+
 def _add_events(ctx: CollectContext, resource: str, service: dict) -> None:
     for event in newest_in_window(ctx.window, service.get("events", []), lambda e: e.get("createdAt"), MAX_EVENTS):
         message = event.get("message", "")
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=resource, time=event.get("createdAt"), command=ctx.last_command,
-            summary="Service event", excerpt=message,
+            summary=_event_summary(message), excerpt=message,
         )
 
 

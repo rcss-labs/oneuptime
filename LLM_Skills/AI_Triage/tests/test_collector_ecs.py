@@ -486,3 +486,19 @@ def test_an_image_reference_of_577_characters_is_recoverable_whole(config_data, 
     assert "".join(line.partition(": ")[2] for line in was) == old_image
     assert "".join(line.partition(": ")[2] for line in now) == new_image
     assert "part 1 of 2" in was[0] and "part 2 of 2" in was[1]
+
+
+def test_service_event_summary_is_the_event_message(config_data, tmp_path):
+    long_message = "(service checkout-api) has started 1 tasks: (task " + "abc123 " * 40 + ")."
+    events = [
+        {"id": "e1", "createdAt": "2026-10-04T10:30:00+00:00", "message": "(service checkout-api) has reached a steady state."},
+        {"id": "e2", "createdAt": "2026-10-04T10:31:00+00:00", "message": long_message},
+    ]
+    ctx, _, _ = run(config_data, tmp_path, healthy_answers(**{"ecs describe-services": service(events=events)}))
+    steady = next(f for f in ctx.evidence.facts if "steady state" in f.excerpt)
+    assert steady.summary == "(service checkout-api) has reached a steady state."
+    started = next(f for f in ctx.evidence.facts if f.excerpt.startswith("(service checkout-api) has started"))
+    assert len(started.summary) == 200 and started.summary.endswith("… [summary cut]")
+    assert started.summary.startswith("(service checkout-api) has started 1 tasks")
+    assert started.excerpt == long_message
+    assert not any(f.summary == "Service event" for f in ctx.evidence.facts)
