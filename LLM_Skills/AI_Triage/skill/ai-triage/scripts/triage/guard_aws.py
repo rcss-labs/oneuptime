@@ -69,6 +69,15 @@ DENY_EXACT = frozenset(
         ("dynamodbstreams", "get-shard-iterator"),
     }
 )
+# Reads whose output often holds secrets; no triage step needs them, so the engineer decides.
+ASK_READS = {
+    ("ec2", "describe-launch-template-versions"): "the output can hold launch template user data, which often holds secrets",
+    ("autoscaling", "describe-launch-configurations"): "the output can hold launch configuration user data, which often holds secrets",
+    ("cloudformation", "get-template"): "the output is the whole template, which can hold secrets in defaults or parameters",
+    ("codebuild", "batch-get-projects"): "the output can hold the build environment, whose variables often hold secrets",
+}
+# Reads that return secrets outright, with what they return.
+DENY_READS = {("ec2", "describe-vpn-connections"): "returns the VPN tunnels' pre-shared keys"}
 # An operation whose name contains one of these returns a secret, whatever its service.
 DENY_NAME_PARTS = ("secret-value", "password", "credentials", "token", "login")
 # Flags that make an otherwise ordinary read return secret values.
@@ -406,6 +415,8 @@ def _check_options_and_operation(argv: tuple[str, ...], profiles: frozenset[str]
 
 def classify(service: str, operation: str, args: Sequence[str]) -> Verdict:
     """The rules that depend only on the service, the operation, and the argument words."""
+    if (service, operation) in DENY_READS:
+        return Verdict(DENY, f"aws {service} {operation} {DENY_READS[(service, operation)]}")
     if (service, operation) in DENY_EXACT or any(part in operation for part in DENY_NAME_PARTS):
         return Verdict(DENY, f"aws {service} {operation} returns secrets, credentials, or stored data")
     if (service, operation) == ("ec2", "describe-instance-attribute") and any(
@@ -419,6 +430,8 @@ def classify(service: str, operation: str, args: Sequence[str]) -> Verdict:
             return Verdict(DENY, f"{flag} reads encrypted or secret values")
     if service == "s3" and operation != "ls":
         return Verdict(DENY, f"aws s3 {operation} is not a read-only listing")
+    if (service, operation) in ASK_READS:
+        return Verdict(ASK, f"aws {service} {operation}: {ASK_READS[(service, operation)]}")
     if (service, operation) in READ_EXACT or operation.startswith(READ_PREFIXES):
         return Verdict(ALLOW, f"aws {service} {operation} is a read")
     return Verdict(DENY, f"aws {service} {operation} is not a known read operation")

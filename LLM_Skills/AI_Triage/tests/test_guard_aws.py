@@ -518,3 +518,31 @@ def test_the_service_tool_renames_like_the_cli(tmp_path):
     names = list_aws_services.service_names(tmp_path)
     assert {"s3api", "configservice", "deploy", "ecs", "s3", "configure"} <= set(names)
     assert "config" not in names and "codedeploy" not in names
+
+
+# ---- final review follow-up: more reads whose output is often secret ------------
+
+
+@pytest.mark.parametrize(
+    "command, holds",
+    [
+        ("aws ec2 describe-launch-template-versions --launch-template-id lt-1", "user data"),
+        ("aws autoscaling describe-launch-configurations", "user data"),
+        ("aws cloudformation get-template --stack-name s", "template"),
+        ("aws codebuild batch-get-projects --names p", "build environment"),
+    ],
+)
+def test_reads_whose_output_can_hold_secrets_ask(command, holds):
+    result = verdict(f"{command} {OK}")
+    assert result.kind == ASK and holds in result.reason
+
+
+def test_vpn_connections_are_denied():
+    result = verdict(f"aws ec2 describe-vpn-connections {OK}")
+    assert result.kind == DENY and "pre-shared keys" in result.reason
+
+
+def test_neighbouring_reads_stay_allowed():
+    for command in ("aws ec2 describe-launch-templates", "aws autoscaling describe-auto-scaling-groups",
+                    "aws cloudformation describe-stacks", "aws codebuild list-projects", "aws ec2 describe-vpn-gateways"):
+        assert verdict(f"{command} {OK}").kind == ALLOW, command
