@@ -314,6 +314,39 @@ from triage.collectors import all_collectors  # noqa: E402
 
 # Collectors whose own target checks refuse a sentinel value, with the reason. Listed, never skipped silently.
 CANNOT_RUN_WITH_SENTINEL: dict[str, str] = {}
+# (collector, answers variant) cases that write no fact, so the sweep can prove nothing for them, with the reason.
+# A case that writes no fact and is not listed fails; a listed case that does write facts fails too.
+_DENIED = (
+    "every call is answered AccessDenied, so the collector records only evidence errors; "
+    "its facts are covered by the end-to-end replay test"
+)
+NO_FACT_CASES: dict[tuple[str, str], str] = {
+    ("access", "errors"): _DENIED,
+    ("apigateway", "errors"): _DENIED,
+    ("autoscaling", "errors"): _DENIED,
+    ("changes", "errors"): _DENIED,
+    ("cloudfront_waf", "errors"): _DENIED,
+    ("dynamodb", "errors"): _DENIED,
+    ("ec2", "errors"): _DENIED,
+    ("ecr", "errors"): _DENIED,
+    ("ecs", "errors"): _DENIED,
+    ("edge", "errors"): _DENIED,
+    ("efs", "errors"): _DENIED,
+    ("elasticache", "errors"): _DENIED,
+    ("lambda", "errors"): _DENIED,
+    ("logs", "errors"): _DENIED,
+    ("messaging", "errors"): _DENIED,
+    ("opensearch_domain", "errors"): _DENIED,
+    ("platform", "errors"): _DENIED,
+    ("rds", "errors"): _DENIED,
+    ("vpc", "errors"): _DENIED,
+    ("eks", "empty"): "the cluster target must name a cluster in eks_clusters in the config, so the sentinel cluster is refused (UnknownCluster) before any call",
+    ("eks", "errors"): "the cluster target must name a cluster in eks_clusters in the config, so the sentinel cluster is refused (UnknownCluster) before any call",
+    ("logs", "empty"): "an empty start-query answer has no queryId, which the collector records as an evidence error",
+    ("messaging", "empty"): "topics must be ARNs (InvalidTarget), and an empty queue answer names no queue, so nothing is recorded",
+    ("platform", "empty"): "the collector writes facts only for Health events and quotas, and an empty answer has none",
+    ("rds", "empty"): "an empty describe answer is neither an instance nor a not-found error, so nothing is recorded",
+}
 EXTRA_QUOTE = 11
 
 
@@ -347,7 +380,15 @@ def test_registry_sentinel_is_refused_for_every_fact(skill_dir, case_dir, name, 
         pytest.skip(CANNOT_RUN_WITH_SENTINEL[name])
     collector = all_collectors()[name]
     targets = {key: sentinel_value(key) for key in (*collector.required, *collector.optional)}
-    assert_sentinel_refused(skill_dir, case_dir, name, targets, answers)
+    facts = assert_sentinel_refused(skill_dir, case_dir, name, targets, answers)
+    if (name, answers) in NO_FACT_CASES:
+        assert not facts, f"{name} ({answers}) now writes facts; remove it from NO_FACT_CASES"
+    else:
+        assert facts, f"{name} ({answers}) wrote no fact, so nothing was checked; list it in NO_FACT_CASES with the reason"
+
+
+def test_every_no_fact_case_names_a_registered_collector():
+    assert {name for name, _ in NO_FACT_CASES} <= set(all_collectors())
 
 
 def assert_sentinel_refused(skill_dir, case_dir, name, targets, answers):
@@ -357,7 +398,7 @@ def assert_sentinel_refused(skill_dir, case_dir, name, targets, answers):
     findings = [probe(n, fact_id, quote) for n, (fact_id, quote) in enumerate(
         ((fact_id, quote) for fact_id, fact in facts.items() for quote in sentinel_quotes(fact.get("summary") or "")),
         start=1)]
-    if not findings:
-        return
-    result = write_probe(case_dir, findings)
-    assert result["valid"] == [], [(item["fact_ids"], item["excerpt"]) for item in result["valid"]]
+    if findings:
+        result = write_probe(case_dir, findings)
+        assert result["valid"] == [], [(item["fact_ids"], item["excerpt"]) for item in result["valid"]]
+    return facts
