@@ -522,3 +522,76 @@ def test_an_answer_ending_in_a_replacement_character_keeps_the_last_line_as_text
                     logs={("payments-api-abc", "app", True): "2026-10-04T10:30:00Z first\n" + last})
     fact = next(f for f in ctx.evidence.facts if "lines" in f.data)
     assert fact.data["lines"][-1] == last
+
+
+def log_fact(config_data, tmp_path, lines):
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): "\n".join(lines) + "\n"})
+    return ctx, next(f for f in ctx.evidence.facts if "lines" in f.data)
+
+
+def stamp(n):
+    return f"2026-10-04T10:{n // 60:02d}:{n % 60:02d}.000000000Z"
+
+
+def test_repeated_warnings_count_once_and_never_crowd_out_a_fatal_line(config_data, tmp_path):
+    lines = [f"{stamp(n)} info {n}" for n in range(20)]
+    lines += [f"{stamp(20 + n)} WARN retrying attempt {n}" for n in range(45)]
+    lines.append(f"{stamp(70)} FATAL out of memory")
+    _, fact = log_fact(config_data, tmp_path, lines)
+    kept = fact.data["lines"]
+    assert any("FATAL out of memory" in line for line in kept)
+    warns = [line for line in kept if "WARN retrying" in line]
+    assert len(warns) == 1 and "repeated 45 times" in warns[0]
+    assert "not kept" not in fact.summary
+    assert "FATAL out of memory" in fact.excerpt
+
+
+def test_strong_lines_come_before_soft_ones_and_the_summary_counts_what_was_left_out(config_data, tmp_path):
+    words = [chr(ord("a") + n % 26) * (1 + n // 26) for n in range(40)]
+    lines = [f"{stamp(n)} WARN slow call to {word}" for n, word in enumerate(words)]
+    lines.append(f"{stamp(50)} panic: nil map")
+    lines.append(f"{stamp(51)} Traceback (most recent call last)")
+    _, fact = log_fact(config_data, tmp_path, lines)
+    kept = fact.data["lines"]
+    assert any("panic: nil map" in line for line in kept) and any("Traceback" in line for line in kept)
+    assert "first 30 of 42 error-looking lines; 12 not kept" in fact.summary
+    times = [line.split()[0] for line in kept]
+    assert times == sorted(times)
+    # 2 strong groups and the first 28 soft ones fill the 30 places.
+    assert f"slow call to {words[27]}" in kept[27] and not any(line.endswith(f"slow call to {words[28]}") for line in kept)
+    assert len(kept) == 30
+
+
+def test_replacement_characters_under_the_limit_are_not_reported_as_cut(config_data, tmp_path):
+    # A Latin-1 log decoded with errors=replace: each invalid byte became one U+FFFD (3 bytes when re-encoded).
+    line = "2026-10-04T10:30:00.000000000Z caf� " + "�" * 60
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    text = "\n".join([line] * 1500) + "\n"
+    assert len(text.encode("utf-8")) > 200000 > len(text)
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): text})
+    assert not any("200000 bytes" in f.summary for f in ctx.evidence.facts)
+
+
+def test_a_cut_answer_with_crlf_line_ends_is_reported_as_cut(config_data, tmp_path):
+    # The runner turned each CRLF into LF, so a 200000-byte cut answer arrives with one character per line fewer.
+    body = "2026-10-04T10:30:00.000000000Z " + "y" * 66
+    lines = 200000 // (len(body) + 2)
+    text = "\r\n".join([body] * (lines + 1))[:200000].replace("\r\n", "\n")
+    assert len(text) < 200000 and not text.endswith("\n")
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): text})
+    assert len([f for f in ctx.evidence.facts if "200000 bytes" in f.summary]) == 1
+
+
+def test_a_whole_answer_just_under_the_limit_is_not_reported_as_cut(config_data, tmp_path):
+    body = "2026-10-04T10:30:00.000000000Z " + "z" * 67
+    text = "\n".join([body] * 1990) + "\n"
+    assert 195000 < len(text) < 200000
+    kube = kube_answers(**{"get pods": {"items": [crashing_pod()]}})
+    ctx, _, _ = run(config_data, tmp_path, kube=kube, targets={"namespace": "web"},
+                    logs={("payments-api-abc", "app", True): text})
+    assert not any("200000 bytes" in f.summary for f in ctx.evidence.facts)

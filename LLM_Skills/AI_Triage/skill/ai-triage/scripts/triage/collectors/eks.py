@@ -18,10 +18,10 @@ MAX_CONTAINERS_PER_POD = 2
 LOG_HEAD_LINES = 20
 LOG_ERROR_LINES = 30
 LOG_LINE_CHARS = 300
-_ERROR_LOOKING = re.compile(
-    r"\b(error|fatal|critical|panic|warn|warning)\b|exception|traceback|panic|killed|refused|timeout|denied|failed",
-    re.IGNORECASE,
-)
+_STRONG_LINE = re.compile(r"\b(error|fatal|critical|oom)\b|panic|exception|traceback|killed|out of memory", re.IGNORECASE)
+_SOFT_LINE = re.compile(r"\b(warn|warning)\b|timeout|refused|denied|failed", re.IGNORECASE)
+_DIGITS = re.compile(r"\d+")
+REPLACEMENT = "\ufffd"
 LOG_BYTES = 200000
 MAX_PODS = 30
 MAX_EVENTS = 40
@@ -288,7 +288,7 @@ def _fetch_logs(ctx: CollectContext, cluster: str, namespace: str, pod_name: str
         moment = _line_time(line)
         if moment is not None and ctx.window.contains(moment):
             inside.append((moment, line))
-    cut = len(output.encode("utf-8")) >= LOG_BYTES
+    cut = _reached_byte_limit(output)
     if cut:
         ctx.evidence.add(
             kind=DERIVED, resource=resource, command=ctx.last_command,
@@ -304,24 +304,64 @@ def _fetch_logs(ctx: CollectContext, cluster: str, namespace: str, pod_name: str
                 summary=f"No log line of {which} {container} in pod {pod_name} falls inside the incident window",
             )
         return
-    errors = [index for index, (_, line) in enumerate(inside) if _ERROR_LOOKING.search(line)]
-    wanted = sorted(set(range(min(LOG_HEAD_LINES, len(inside)))) | set(errors[:LOG_ERROR_LINES]))
+    error_count = sum(1 for _, line in inside if _is_error_looking(line))
+    chosen, not_kept = _error_lines_to_keep(inside)
+    wanted = sorted(set(range(min(LOG_HEAD_LINES, len(inside)))) | set(chosen))
     # Redact each line before it is cut or quoted, so no secret survives at a cut boundary.
-    kept = [(inside[i][0], _shorten(ctx.evidence.redactor.text(inside[i][1]))) for i in wanted]
-    first_error = _shorten(ctx.evidence.redactor.text(inside[errors[0]][1])) if errors else None
+    kept = [(inside[i][0], _shorten(ctx.evidence.redactor.text(inside[i][1])) + _repeat_note(chosen.get(i, 1))) for i in wanted]
+    strong = [i for i in chosen if _STRONG_LINE.search(inside[i][1])]
+    first_index = min(strong or chosen, default=None)
+    first_error = _shorten(ctx.evidence.redactor.text(inside[first_index][1])) if first_index is not None else None
     shown = first_error or kept[0][1]
-    error_text = f"; first error-looking line: {first_error}" if first_error else ""
+    label = "first strong error-looking line" if strong else "first error-looking line"
+    error_text = f"; {label}: {first_error}" if first_error else ""
+    left_out = f"; first {LOG_ERROR_LINES} of {error_count} error-looking lines; {not_kept} not kept" if not_kept else ""
     ctx.evidence.add(
         kind=INCIDENT_TIME, resource=resource, time=kept[0][0], command=ctx.last_command,
         summary=(
             f"Log lines of {which} {container} in pod {pod_name} from {format_time(kept[0][0])} "
             f"to {format_time(kept[-1][0])}: {len(output.splitlines())} lines read, {len(inside)} inside the window, "
-            f"{len(errors)} error-looking, {len(kept)} kept (the first {LOG_HEAD_LINES} and the error-looking lines)"
-            f"{error_text}"
+            f"{error_count} error-looking, {len(kept)} kept (the first {LOG_HEAD_LINES} lines and the error-looking "
+            f"lines, strong before soft, repeats kept once){left_out}{error_text}"
         ),
         data={"lines": [line for _, line in kept]},
         excerpt=shown,
     )
+
+
+def _reached_byte_limit(output: str) -> bool:
+    """Whether kubectl cut the answer at LOG_BYTES, judged on the bytes it sent rather than on the decoded text.
+
+    The runner decodes with errors="replace" (one U+FFFD per invalid byte, and one for a character cut at the end,
+    which was up to 3 bytes) and turns CRLF into LF. A cut answer almost always ends inside a line, so the CRLF
+    allowance is only made for an answer without a final newline.
+    """
+    sent = len(output.encode("utf-8")) - 2 * output.count(REPLACEMENT)
+    if output.endswith(REPLACEMENT):
+        sent += 2
+    if sent >= LOG_BYTES:
+        return True
+    return not output.endswith("\n") and sent + output.count("\n") >= LOG_BYTES
+
+
+def _is_error_looking(line: str) -> bool:
+    return bool(_STRONG_LINE.search(line) or _SOFT_LINE.search(line))
+
+
+def _error_lines_to_keep(inside: list[tuple]) -> tuple[dict[int, int], int]:
+    """Index of the first line of each kept group of error-looking lines (same text once digits are ignored) with its
+    count, strong groups before soft ones, at most LOG_ERROR_LINES groups; and how many error-looking lines were left out."""
+    groups: dict[str, list[int]] = {}
+    for index, (_, line) in enumerate(inside):
+        if _is_error_looking(line):
+            groups.setdefault(_DIGITS.sub("#", line), []).append(index)
+    ranked = sorted(groups.values(), key=lambda members: (not _STRONG_LINE.search(inside[members[0]][1]), members[0]))
+    kept = ranked[:LOG_ERROR_LINES]
+    return {members[0]: len(members) for members in kept}, sum(len(members) for members in ranked[LOG_ERROR_LINES:])
+
+
+def _repeat_note(count: int) -> str:
+    return f" (repeated {count} times)" if count > 1 else ""
 
 
 def _shorten(line: str) -> str:
