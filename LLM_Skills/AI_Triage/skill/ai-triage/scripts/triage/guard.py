@@ -44,8 +44,6 @@ JQ_FLAGS = frozenset({"-r", "-c", "-S", "-e", "-M", "--raw-output", "--compact-o
 # jq programs that could read the environment or other files, shell-quote output, or never end.
 JQ_FORBIDDEN = ("env", "$ENV", "input", "$__loc__", "@sh", "import", "include", "modulemeta", "get_search_list",
                 "repeat", "while", "until", "recurse", "range", "limit")
-GREP_FLAGS = frozenset({"-i", "-v", "-c", "-E", "-F", "-o", "-n", "-w"})
-GREP_VALUE_FLAGS = frozenset({"-m", "-A", "-B", "-C"})
 WC_FLAGS = frozenset({"-l", "-c", "-w", "-m"})
 SORT_FLAGS = frozenset({"-r", "-n", "-u", "-h"})
 SORT_VALUE_FLAGS = frozenset({"-k", "-t"})
@@ -147,20 +145,6 @@ def _head_tail_ok(args: list[str]) -> bool:
     return len(args) == 2 and args[0] in ("-n", "-c") and bool(DIGITS_RE.match(args[1]))
 
 
-def _grep_ok(args: list[str]) -> bool:
-    used = _consume_flags(args, GREP_FLAGS)
-    index = used
-    while index < len(args) and args[index] in GREP_VALUE_FLAGS:
-        if index + 1 >= len(args) or not DIGITS_RE.match(args[index + 1]):
-            return False
-        index += 2
-        index += _consume_flags(args[index:], GREP_FLAGS)
-    rest = args[index:]
-    if rest and rest[0] == "-e":
-        return len(rest) == 2
-    return len(rest) == 1 and not rest[0].startswith("-")
-
-
 def _cut_ok(args: list[str]) -> bool:
     if not args:
         return False
@@ -181,11 +165,11 @@ def _column_ok(args: list[str]) -> bool:
     return _only_flags(args, frozenset({"-t"}), frozenset({"-s"}))
 
 
+# grep is not here: Claude Code's shell snapshot defines grep as a function, so the guard cannot know what runs.
 FILTER_RULES = {
     "jq": _jq_ok,
     "head": _head_tail_ok,
     "tail": _head_tail_ok,
-    "grep": _grep_ok,
     "wc": lambda args: _only_flags(args, WC_FLAGS),
     "sort": lambda args: _only_flags(args, SORT_FLAGS, SORT_VALUE_FLAGS),
     "uniq": lambda args: _only_flags(args, UNIQ_FLAGS),

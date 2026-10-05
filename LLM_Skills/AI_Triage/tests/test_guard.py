@@ -28,7 +28,7 @@ def kind(command, context=CONTEXT):
         f"aws ecs describe-services --cluster a {AWS_OK} | jq '.services[0].events[:5]'",
         f"aws ecs list-tasks --cluster a {AWS_OK} 2>/dev/null | head -20",
         f"aws ecs list-clusters {AWS_OK} && aws rds describe-db-instances {AWS_OK}",
-        f"kubectl {KUBE_OK} get pods -o wide | grep -v Running",
+        f"kubectl {KUBE_OK} get pods -o wide | tail -20",
         f"{PY} {SKILL}/scripts/preflight.py --json",
         f"{PY} {SKILL}/scripts/opensearch_query.py --cluster logs-prod health",
         f'"{PY}" "{SKILL}/scripts/validate_map.py"',
@@ -208,11 +208,6 @@ def test_quote_obfuscated_and_indirect_names_are_sensitive_without_config():
         "tail -n 20",
         "tail -3",
         "tail -c 100",
-        "grep ERROR",
-        "grep -i -v -c -E -F -o -n -w timeout",
-        "grep -e -dash",
-        "grep -m 5 -A 2 -B 2 -C 1 -i 'x y'",
-        "grep -i aws",
         "wc",
         "wc -l -c -w -m",
         "sort",
@@ -622,3 +617,24 @@ def test_a_configured_case_root_is_protected_too():
 def test_context_carries_the_case_root(config_data, tmp_path):
     config_data["cases_dir"] = "/data/cases"
     assert context_from_config(parse_config(config_data), tmp_path).cases_dir == "/data/cases"
+
+
+
+# ---- fix round 5, ruling 2: grep is no longer an allowed filter ----------------
+
+
+@pytest.mark.parametrize(
+    "filter_command",
+    ["grep ERROR", "grep -i -v -c -E -F -o -n -w timeout", "grep -e -dash", "grep -m 5 -A 2 -B 2 -C 1 -i 'x y'",
+     "grep -i aws", "grep -v Running"],
+)
+def test_a_pipe_into_grep_is_never_allowed(filter_command):
+    # Claude Code's shell snapshot defines grep as a function, so the guard cannot know what runs
+    assert kind(f"aws ecs list-clusters {AWS_OK} | {filter_command}") in (PASS, ASK)
+    assert kind(f"kubectl {KUBE_OK} get pods -o wide | {filter_command}") in (PASS, ASK)
+
+
+def test_grep_is_not_on_the_filter_list():
+    from triage.guard import FILTER_RULES
+
+    assert "grep" not in FILTER_RULES
