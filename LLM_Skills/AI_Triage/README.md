@@ -1,81 +1,103 @@
 # AI Triage
 
-A Claude Code skill that triages a OneUptime incident. You point Claude at an
-incident, and it investigates on its own using read-only access to AWS, EKS, and
-OpenSearch. It finds the likely root cause and writes a detailed remediation work
-order. It never changes anything.
+AI Triage is a skill for Claude Code. You point Claude at a OneUptime incident, and it looks for the cause in read-only evidence from AWS, Kubernetes (EKS) and OpenSearch. It maps the incident to a service, collects evidence with scripts, and has analyst subagents read it. Claude then tests hypotheses, and every claim in the report must cite a checked fact. TypeSafe, an independent scoring service, decides how strongly each cause may be labelled (confirmed, probable or candidate), so the confidence comes from judgments and not from Claude's own estimate. The result is a report and a work order that another engineer or agent can act on.
 
-## Status
+It changes nothing in AWS, Kubernetes, OpenSearch or OneUptime. It describes fixes and does not apply them. Its only outputs are files on your machine, a Confluence page and, if you say yes, a Slack message.
 
-This is the **foundation build**. It installs the safety layer and the setup
-checks:
+## What you get from a run
 
-- the config file and service map, with validation
-- the guard that keeps every AWS and Kubernetes command read-only
-- the AWS permission policy and the script that verifies your access
-- the preflight check and the installer
+Each run writes a case folder, `<cases_dir>/<incident number>/<timestamp>/`. By default `cases_dir` is `~/.ai-triage/cases`, outside the skill folder, so an upgrade never touches it.
 
-The triage method, the evidence collectors, the confidence checks, and publishing
-to Confluence and Slack arrive in later builds. See
-[the design](docs/specs/2026-10-04-ai-triage-design.md).
+| In the case folder | What it is |
+|---|---|
+| `report.md` | The report, with nine sections: summary, incident and window, timeline, findings, ranked causes, remediation work order, coverage notes, proposed service map changes, run details. |
+| `work-order.json` | The same fixes as data. Each action names the exact resource, its current state, the required state, the change, how to verify it and how to roll it back. |
+| `evidence/` | What the collectors read, as numbered facts, with secrets already removed. |
+| `findings/` | The analysts' findings, each citing facts, and `checked.json`, the result of checking those citations. |
+| `judgments/` | What TypeSafe was asked and answered, and `summary.json`, which holds the labels. |
+| `case.md`, `case.json`, `incident.json`, `render.json`, `audit.json`, `slack-message.md` | Files that scripts write: the case, the render marker, the publish audit and the proposed Slack text. |
 
-## Prerequisites
+Besides the folder you get:
 
-- Claude Code
-- AWS CLI version 2
-- Python 3.10 or newer
-- `kubectl`, only if you configure EKS clusters
-- The `ai-triage-read-only` permission set assigned to you in each account. See
-  [docs/aws-permissions.md](docs/aws-permissions.md).
+- **A Confluence page**, one per incident under the parent page in your config. The page body is exactly the audited `report.md`.
+- **A Slack question.** Claude shows the proposed message and asks whether and where to post it. It posts only when you say yes.
+- **A proposed service-map entry**, when the incident matched no service and the target came from discovery. Claude shows the entry and writes it only when you say yes.
 
-## Install
+## Requirements
+
+### Prerequisites on your machine
+
+- Claude Code.
+- Python 3.10 or newer.
+- AWS CLI version 2.
+- `kubectl`, only if you configure EKS clusters.
+- `jq`. The skill's AWS commands pipe their output through it.
+- `zsh`. The guard's command scanner is written and tested against zsh. Preflight checks neither `jq` nor `zsh`.
+
+### Accounts and connectors
+
+- **AWS.** An IAM Identity Center permission set named `ai-triage-read-only`, assigned to you in each account. [docs/aws-permissions.md](docs/aws-permissions.md) gives the policy, the profile settings and the Kubernetes access for EKS. An administrator creates the permission set once.
+- **OneUptime MCP server, read-only scope.** Connect it with:
+
+  ```bash
+  claude mcp add --transport http oneuptime <your OneUptime URL>/mcp
+  ```
+
+  Authorise the connection as read only. Claude reads the incident, its monitors, alerts, timeline, labels and notes through it.
+- **Confluence and Slack connectors** in Claude Code, for the page and the message.
+- **A TypeSafe API key** in the environment variable `TYPESAFE_API_KEY`, set in your shell profile. Without it the skill still runs, but no cause can be labelled above probable, and the report says so. Preflight prints a warning.
+
+## Install, configure, verify
+
+### Install
 
 ```bash
 cd LLM_Skills/AI_Triage
-./install.sh --dry-run   # shows every step, changes nothing
+./install.sh --dry-run   # prints every step, changes nothing
 ./install.sh
 ```
 
-The skill is copied to `~/.claude/skills/ai-triage/`. The installer does not edit
-your AWS config or your Claude Code settings.
+The installer checks for the AWS CLI version 2 and Python 3.10, copies the skill to `~/.claude/skills/ai-triage/`, creates a Python environment there, and creates `config/triage-config.yaml` and `config/service-map.yaml` from the examples if they are missing. It does not edit your AWS config or your Claude Code settings. It prints the remaining steps.
 
-## Configure
+Known limitation: installing through a path that passes through a symbolic link is being fixed and its test is not yet verified.
 
-All of your settings live in `~/.claude/skills/ai-triage/config/`. This folder is
-on your machine only. Never copy these files into this repository, which is public.
+### Upgrade
 
-1. **`triage-config.yaml`.** Your OneUptime address, AWS accounts, OpenSearch
-   clusters, EKS clusters, Confluence target, and Slack channel. It holds no
-   secrets.
-2. **`service-map.yaml`.** Which OneUptime monitors, labels, and hostnames belong
-   to which service, and where each environment of that service runs.
-3. **AWS profiles.** One profile per account in `~/.aws/config`, named
-   `triage-<account-alias>`. See [docs/aws-permissions.md](docs/aws-permissions.md).
-4. **Kubeconfig.** One context per EKS cluster in the skill's own kubeconfig. The
-   command is in [docs/aws-permissions.md](docs/aws-permissions.md).
-5. **Connectors.** Connect OneUptime as read only, then Confluence and Slack:
+Pull the repository and run `./install.sh` again. It replaces the skill's code and keeps your config, service map and kubeconfig. It copies them to `~/.ai-triage/backups/<timestamp>/` first.
 
-   ```bash
-   claude mcp add --transport http oneuptime <your OneUptime URL>/mcp
-   ```
+### Uninstall
 
-6. **TypeSafe.** Install the plugin and set `TYPESAFE_API_KEY` in your shell
-   profile. Without the key the skill still runs, but it cannot label a cause
-   higher than "probable".
+Remove `~/.claude/skills/ai-triage/` and the `triage-*` profiles in `~/.aws/config`. Case files and backups stay under `~/.ai-triage/`.
+
+### Configure
+
+Your settings live in `~/.claude/skills/ai-triage/config/`, on your machine only.
+
+1. **`triage-config.yaml`.** Your OneUptime address, AWS accounts (alias, account id, profile, regions), OpenSearch clusters, EKS clusters, Confluence space and parent page, Slack channel, `cases_dir` and limits. It holds no secrets. [`triage-config.example.yaml`](skill/ai-triage/config/triage-config.example.yaml) shows every key.
+2. **`service-map.yaml`.** Which OneUptime monitors, labels and host names belong to which service, and where each environment of that service runs. See [`service-map.example.yaml`](skill/ai-triage/config/service-map.example.yaml).
+3. **AWS profiles.** One profile per account in `~/.aws/config`, named as in `triage-config.yaml` (for example `triage-prod-main`), with `sso_role_name = ai-triage-read-only`.
+4. **Kubeconfig for EKS.** One context per cluster in the skill's own file, `config/kubeconfig`:
 
    ```bash
-   claude plugin marketplace add typesafe-ai/skills
-   claude plugin install typesafe@typesafe-ai
+   aws eks update-kubeconfig --name <cluster> --alias triage-<cluster> \
+     --kubeconfig ~/.claude/skills/ai-triage/config/kubeconfig \
+     --profile triage-<account-alias> --region <region>
    ```
 
-## Verify
+5. **Connectors and TypeSafe.** As under Requirements. The installer also prints the plugin commands for TypeSafe (`claude plugin marketplace add typesafe-ai/skills`, then `claude plugin install typesafe@typesafe-ai`).
+
+Never commit any of these files, or a case folder, to a repository. The config and the service map contain your account ids, host names and internal structure, and the kubeconfig contains cluster addresses. This repository is public, and its examples use only placeholder values.
+
+### Verify
 
 ```bash
 cd ~/.claude/skills/ai-triage
 .venv/bin/python scripts/validate_map.py    # config and service map are well formed
-.venv/bin/python scripts/preflight.py       # sign-in, tools, folders
+.venv/bin/python scripts/preflight.py       # config, sign-in, tools, shell, folders, TypeSafe key
 .venv/bin/python scripts/verify_access.py   # reads work, writes are denied
 ```
+
+Preflight checks that the config and map load, that the AWS CLI is present, that each account is signed in, that `kubectl` and the kubeconfig exist when EKS clusters are configured, that the cases folder is writable, and whether `TYPESAFE_API_KEY` is set. It also reads Claude Code's newest shell snapshot and fails when a function, alias or shell option would change what an approved command runs. `verify_access.py` signs in with each profile, makes one harmless read per permission area, and asks the IAM policy simulator about sample writes. Nothing is attempted against your resources.
 
 | Script | Exit 0 | Exit 1 | Exit 2 | Exit 3 |
 |---|---|---|---|---|
@@ -83,61 +105,141 @@ cd ~/.claude/skills/ai-triage
 | `preflight.py` | ready | a check failed | usage error | only a sign-in is needed |
 | `verify_access.py` | all passed | a check failed | usage or config error | a sign-in expired |
 
-When a sign-in has expired, run the `aws sso login --profile <name>` command that
-the script prints.
+## Permissions in Claude Code
+
+The skill's guard approves the skill's own commands and read-only AWS and kubectl commands without a prompt. File writes are different. The agent writes the intake file (`~/.ai-triage/intake/<number>.json`), `findings/<name>.json` and `report.json` with Claude Code's Write and Edit tools, and those go through Claude Code's normal permission prompts. For an unattended run, add allow rules to your Claude Code settings:
+
+```json
+{ "permissions": { "allow": ["Write(~/.ai-triage/**)", "Edit(~/.ai-triage/**)"] } }
+```
+
+The guard still refuses writes to the files that the scripts own: the installed skill folder, and in a case folder `evidence/`, `judgments/`, `findings/checked.json`, `case.json`, `case.md`, `incident.json`, `report.md`, `work-order.json`, `render.json`, `audit.json`, `slack-message.md`, `timeline.md` and any `.stale` file. An allow rule does not override that. The analyst subagents are told to read the case folder and write one findings file there, and nothing else.
 
 ## Use
 
-In Claude Code:
+Start a triage in Claude Code by asking, for example, "triage incident 1234" or "find the cause of this incident: https://oneuptime.example.com/...". Or use the slash command with an incident number or URL:
 
 ```
-/ai-triage
+/ai-triage 1234
 ```
 
-In this build the skill runs the preflight check and turns on the guard.
+The skill then does the following, in order:
+
+1. Runs preflight. An expired sign-in stops the run with the `aws sso login` line to use.
+2. Reads the incident from OneUptime, saves it as an intake file and creates the case folder.
+3. Matches the incident to a service in the map and chooses the target. With several matches, a TypeSafe question chooses or tells Claude to ask you. With none, discovery looks for the resources behind the host name.
+4. Runs the collection plan, then the further collectors that each service playbook names.
+5. Dispatches analyst subagents on Sonnet in parallel (changes and logs always; compute, data and edge when there is evidence in their domain). They write findings.
+6. Checks every finding against the evidence it cites, and builds the timeline.
+7. Forms hypotheses: changes first, then the request path hop by hop, then a comparison with something that works. Each one is tested with a read that could disprove it.
+8. Writes `report.json`: symptoms, causes, every hypothesis and the actions.
+9. Runs judging. TypeSafe scores the claims, and the labels come from its summary.
+10. Validates and renders `report.md` and `work-order.json`.
+11. Audits the report for secrets, has a subagent read it, publishes it to Confluence, then shows you the Slack message and asks.
+12. Proposes a service-map entry when the target came from discovery.
+13. Hands over: status, top cause and label, actions, what was not checked and where the case folder is.
+
+Claude stops and asks you when several services match and the judging step cannot choose, when a sign-in has expired, when a denied permission blocks the main line of investigation, after three rejected hypotheses, when the audit finds something it cannot remove at its source, before posting to Slack, and before changing the service map.
+
+Loading the skill turns on the guard for the rest of that Claude Code session. It stays on. To use your everyday AWS profiles again, start a new session.
 
 ## The guard
 
-Invoking the skill turns on a guard for the rest of that Claude Code session.
+The guard is a Claude Code hook that evaluates every shell command, and every Write and Edit call, in the session. It allows only what it fully understands.
 
-- **Approved without a prompt:** read-only AWS commands that use a triage profile
-  and set a region, read-only `kubectl` commands that use the skill's kubeconfig
-  with a triage context and a namespace, and the skill's own scripts.
-- **Blocked:** every other AWS or `kubectl` command, including reads with your
-  everyday profiles, and any direct call to a configured OpenSearch cluster.
-- **Asked about:** commands the guard cannot check, such as `bash -c "aws ..."`.
-- **Left alone:** everything unrelated. Your normal permission settings apply.
+- **Allows without a prompt:** AWS commands that use a triage profile, set a region and name a known read operation; kubectl reads (`get`, `describe`, `logs`, `top`, `events` and similar) with the skill's kubeconfig, a triage context and a namespace; the skill's own scripts; and the output filters `jq`, `head`, `tail`, `sort`, `uniq`, `wc`, `cut`, `tr` and `column`.
+- **Denies:** AWS commands with another profile or no profile, with a write operation, or with an operation that returns secrets or writes a local file; kubectl write verbs, secret reads and other kubeconfigs; any direct request to a configured OpenSearch cluster (use `opensearch_query.py`); and writes by the file tools into the script-owned files listed above.
+- **Asks you** when it cannot check a command (see below), for `map_suggest.py apply` and `publish.py --accept-hits`, and for path-like option values outside the CloudWatch Logs name options.
+- **Leaves alone** everything unrelated. Your normal permission settings apply.
+- **If the guard breaks** (missing Python environment, crash), it denies any command that mentions `aws` or `kubectl`.
 
-To work with your everyday AWS profiles again, start a new session.
+Refused by design, with the reason:
 
-## Upgrade
+- **A pipe into `grep`.** Claude Code's shell snapshot can define `grep` as a shell function, so the guard cannot know what would run. Use `--query` and `jq`.
+- **`~`.** zsh expands it, and the guard cannot see the result. Write `"$HOME/..."` in double quotes.
+- **Shell variables and command substitution.** The guard sees the text, not the value that the shell would put in.
+- **Input redirects (`<`).** zsh reads forms such as numeric globs as redirects, so what the guard checks would differ from what runs. The only redirect that is accepted is `2>/dev/null`.
 
-Pull the repository and run `./install.sh` again. Your config, service map, and
-kubeconfig are kept, and a copy is saved under `~/.ai-triage/backups/` first.
+These stop and wait for you (or are denied) rather than being approved. Two options are yours alone. `map_suggest.py apply` writes into your service map. `publish.py --accept-hits=<digest>` publishes although the audit found something. The skill's instructions forbid the agent to use the second one, and the guard always asks you for a command that carries it.
 
-## Uninstall
+## What is published, and the residual risk
 
-Remove `~/.claude/skills/ai-triage/` and the `triage-*` profiles in
-`~/.aws/config`. Case files and backups live under `~/.ai-triage/`.
+Before anything is published, two automated checks and a reading pass run. The first check applies the redaction rules to the files. The second is an independent detector, written separately and not sharing those rules. Then a subagent reads `report.md`. Evidence is also cleaned when it is collected, so secrets rarely reach Claude at all. Both checks must be clean. Any 12-digit number that is not one of your configured account ids is a hit, and the Slack message and the page title may contain no account id.
+
+Measured on three test sets, the two checks together missed between 1 and 7 percent of planted secrets. The misses were passwords in unusual command forms, phone numbers in some formats, passphrase-like values and short random strings. A false alarm leaks nothing but stops publishing until you approve the exact files with `--accept-hits`. In the build measurements, between 4 and 12 percent of harmless test lines raised a false alarm.
+
+This was judged acceptable for an internal, access-controlled Confluence space. It is not acceptable for an external or broad audience. Do not point `confluence.space_key` at such a space.
+
+Stated limits, from the build records:
+
+- Redaction cannot match a key and its value on separate lines, short passwords with no name, IPv6 addresses, or key names written with look-alike letters.
+- A secret stored under a misleading setting name is shown: a word under an address name, a short value under an identifier name, a word inside a path, 40 hex characters under a version name. Placeholders for the same value can differ between files.
+- IP addresses are not masked, because triage needs them. Phone numbers that start with `+` are.
+- RDS log text that an application raises inside the database is shown apart from numbers, and an identifier-shaped value after a keyword is kept. The slow-query log is not read.
+- A long host name label (an EKS endpoint, for example) is hidden in environment values.
+- The citation check cannot judge meaning: collector wording of 12 or more characters around an asked name counts as found text. The judging step has to catch a quote that does not support its claim.
+- Random lower-case tokens shorter than about 40 characters are partly missed by the second detector (in a measurement taken during the build it caught 71 percent at 20 characters and 98 percent at 40).
+- CloudTrail lookups read from the window start to five minutes after the incident start, so changes made during the incident are not visible. Global-service events are read in `us-east-1`, except STS and route53domains.
+- EKS pod logs start at the window start and are cut by size, so the end of a long window on a busy pod can be missing. The evidence says so.
+- A hard link made beforehand to a protected file is not detected. Writes through `env`, `command`, `sudo`, `xargs`, `find -delete`, `git` or `python -c` get Claude Code's normal prompt and are never approved by the guard.
+- The report strips only one spelling of the case folder path (`/private/tmp` against `/tmp`).
+- An old `slack-message.md` and `audit.json` stay in the folder after outputs go stale. Nothing is posted from them.
+- More than 10 cited facts for one finding is refused. TypeSafe thresholds are uncalibrated starting values.
+- OpenSearch is read-only by convention only: the cluster has no login, so the query tool and the guard are the barrier.
+
+## Service playbooks
+
+One file per service in `skill/ai-triage/playbooks/`. The agent opens the one that matches the target.
+
+| File | For |
+|---|---|
+| `access.md` | IAM roles, KMS keys, secrets, and `AccessDenied` errors |
+| `apigateway.md` | API Gateway APIs and stages, 429 and 5xx from an API URL |
+| `autoscaling.md` | Auto Scaling groups, instance refreshes, scaling that keeps replacing instances |
+| `cloudfront-waf.md` | CloudFront distributions and WAF web ACLs, edge 403 and 5xx |
+| `cloudtrail.md` | Who changed what, in the window |
+| `cloudwatch.md` | Alarms, log groups and metric comparisons |
+| `deployments.md` | What changed before the incident: stacks, pipelines, AWS Config |
+| `dynamodb.md` | Throttling, slow reads and writes, capacity |
+| `ec2.md` | Instances, status checks and scheduled events |
+| `ecr.md` | Image pulls, tags and digests |
+| `ecs.md` | ECS clusters, services, tasks and task definition revisions |
+| `edge.md` | Load balancers, target groups, listeners and certificates |
+| `efs.md` | File systems and mounts |
+| `eks.md` | Clusters, nodes, namespaces, pods and workloads |
+| `elasticache.md` | Redis or Valkey replication groups: timeouts, evictions, failover |
+| `lambda.md` | Functions, invocation errors, timeouts and throttling |
+| `messaging.md` | SQS queues and SNS topics: backlog, dead letters |
+| `opensearch.md` | OpenSearch domains and clusters: status, rejections, disk |
+| `platform.md` | AWS Health events and quotas, when several services fail together |
+| `rds.md` | Database instances and clusters: connections, failover, disk |
+| `vpc.md` | Security groups, subnets and network reachability |
 
 ## Troubleshooting
 
-| Symptom | Cause and fix |
+| Symptom | What to do |
 |---|---|
+| Preflight exits 3 or says the sign-in session has expired | Run the `aws sso login --profile <name>` line it prints, then run preflight again. The skill stops and gives you that line. |
+| A command stops with a permission prompt | Read the reason on the prompt. Most often the command uses `~`, a variable, a redirect or `grep`. Write it in the forms in `skill/ai-triage/reference/reading.md`, or approve it yourself if you understand it. |
+| The audit reports a hit | Do not edit `report.md`. If the hit is in words Claude wrote in `report.json`, Claude rewrites them there, then judges and renders again. Otherwise read the positions the audit printed. If it is a false alarm, you may publish with `--accept-hits=<digest>`, using the digest the refusal printed. It is valid only for the files exactly as audited, so publish to Confluence before writing the Slack message, or audit again. |
+| "the report must be validated and rendered again before anything is published" | `report.json`, the judging summary or `checked.json` changed after the last render. Run `report.py validate`, then `report.py render`. If you changed a cause or action after judging, run `judge.py run` again first. |
+| A judging run failed ("failed: ...; judging must be run again") | The TypeSafe call failed or answered in a form the client refused. Every label is candidate. Check `TYPESAFE_API_KEY` and run `judge.py run` again. If the service is only unavailable, the report is capped at probable and says so. |
+| "<file> already exists; pass another --suffix to keep both" | A collector never overwrites evidence. Run it again with a different `--suffix`, or leave the existing file. |
 | "the triage guard has no valid config" | `triage-config.yaml` is missing or invalid. Run `validate_map.py` and fix what it lists. |
-| "profile 'x' is not a triage profile" | The command used a profile that is not in `triage-config.yaml`. Triage commands must use a `triage-` profile. |
 | "the skill is not installed correctly" | The Python environment is missing. Run `./install.sh` again. |
-| `verify_access.py` reports "does not use the ai-triage-read-only permission set" | The profile's `sso_role_name` points at another permission set. |
-| A read check fails with `AccessDeniedException` | The inline policy is missing or out of date in that account. |
+| `verify_access.py` says the profile does not use the `ai-triage-read-only` permission set | The profile's `sso_role_name` points at another permission set. |
 
 ## Develop
 
 ```bash
 cd LLM_Skills/AI_Triage
-./run-tests.sh                 # whole suite
-./run-tests.sh tests/test_guard.py -k kubectl
-python3 tools/check_policy_actions.py   # needs network; run after editing the policy
+./run-tests.sh tests/test_guard.py -k kubectl   # chosen test files
+./run-tests.sh                                  # this project's whole suite
+python3 tools/check_policy_actions.py           # needs network; run after editing the policy
 ```
 
-The tests never call AWS. `verify_access.py` is the only thing that does, and you
-run it yourself.
+Run `./run-tests.sh` with the test files you changed. Do not run the lint of the surrounding OneUptime repository over this folder. The tests never call AWS. `verify_access.py` is the only script that does, and you run it yourself.
+
+- **Replay scenarios.** `tests/replay/` holds two recorded incidents (`ecs-bad-deploy`, `cert-expired`) with canned AWS and OpenSearch answers. `tests/test_replay_pipeline.py` runs the whole pipeline on them with no credentials. See [tests/replay/README.md](tests/replay/README.md).
+- **The instruction files are tested.** `tests/test_skill_text.py`, `tests/test_playbooks.py` and `tests/test_reference_formats.py` check `SKILL.md`, the playbooks, the prompts and `reference/formats.md` against the code: collector names and target keys, that every aws and kubectl command in the text is approved by the real guard, and that the examples in `reference/formats.md` run through the real commands. `tests/test_docs.py` checks the permission document and this README against the code.
+- **Design and decisions.** [docs/specs/2026-10-04-ai-triage-design.md](docs/specs/2026-10-04-ai-triage-design.md) is the design before the build, with section 18 on what changed. [docs/decisions.md](docs/decisions.md) records the decisions taken during the build, why, and what each costs if wrong. [docs/aws-permissions.md](docs/aws-permissions.md) explains the permission set.

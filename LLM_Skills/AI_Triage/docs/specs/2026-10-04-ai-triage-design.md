@@ -822,3 +822,40 @@ Still open, with the stage that settles each:
   choices, test planning, red-phase checks, debugging, and done checks.
 - Subagents are spawned with an explicit model.
 - Conventional commits that explain why. No secrets in commits.
+
+## 18. What changed during the build
+
+Sections 1 to 17 are the design as it stood before the build. The build changed the points below. The reasons are in [../decisions.md](../decisions.md), under the entry numbers given. Where this section and sections 1 to 17 disagree, this section describes the built system.
+
+### Guard (section 6)
+
+The guard allows only what it fully understands. It tokenizes the command in a quote-aware way and approves nothing that contains an expansion, `~`, an input redirect or a redirect outside a fixed list. It is tested against real zsh with a generated differential test, including the way Claude Code sources its shell snapshot (decisions G9, G15, G17, G19, G22). `grep` is no longer an allowed pipe filter, and preflight checks the shell environment for functions, aliases and options that would change what runs (G22). AWS operations that write a local file are denied, and no AWS argument may be a local path (G21). The file tools (Write, Edit) are guarded too: the hook also matches them, and they are denied on the installed skill folder and on script-owned case files (G20, G25). The section 6 statement that an approved read which writes a local file passes through to the normal permission flow no longer holds: such operations are denied. `map_suggest.py apply` and `publish.py --accept-hits` always ask the engineer.
+
+### Evidence and collectors (sections 5, 7)
+
+Every evidence file records what was asked (`asked`), and the file name is the identity of each fact, so facts are cited as `<file stem>:<fact id>` (E1, E2, F1). Collectors that need one of several optional targets are rejected up front (E5). Several collectors changed what they read to keep data values out of evidence: RDS reads error logs only and masks quoted text and digits, EKS logs start at the window start, and CloudTrail lookups stop five minutes after the incident start (E6 to E10, E13 to E17). A dated fact read from a resource's own data carries its time (E18). Quota usage, Health events limited to the region, and global-service CloudTrail events from `us-east-1` were added after the playbook writers found gaps.
+
+### Redaction (section 9)
+
+Redaction is a module that never raises, normalises text before matching, and masks key-like tokens in free text with stable placeholders (R7, R11). Secret keys are decided by name components, not by substring (R1). Environment values are shown by value type for each kind of setting name, and under a secret-like name only a URL origin is shown (R2, R3, R5, R9, R10). IP addresses are not masked, which differs from section 9, which replaced client IP addresses; phone numbers with a leading `+` are masked (R8). Free text that an application raises inside a database log is a stated limit (E13).
+
+### Findings (sections 7, 8)
+
+Findings cite qualified fact ids and cannot quote what was asked: strings that describe the request are never quotable, and at least 12 characters of found text must remain (F1, F4 to F8). A finding may quote any string in a fact's `data` (F10). The judge sees what was asked for each cited fact (F8).
+
+### Judging (section 8)
+
+Labels are bound to a digest of the judged draft. `summary.json` stores digests of each cause and action and of the draft, and any edit after judging caps what it touched at candidate (J1, J3, J11). No label above candidate exists without a summary written by the judging code (J2). The client validates every answer and fails closed (J4). A failed run is distinct from an unavailable service (J8, J10). The second ranking request reverses the whole option list, including the fallback (J5).
+
+### Report (section 10)
+
+Report ids have a fixed pattern, messages never repeat report values, and the report and work order print no absolute local path (RP1, RP4). `report.py render` writes a render marker, `render.json`, that records the hashes of its inputs. Every publishing command refuses unless the marker is current (RP2). The report has nine sections as in section 10; the built files are `report.md` and `work-order.json`, with `findings/`, `judgments/`, `timeline`, `audit.json` and `render.json` in the case folder, which section 3 does not list.
+
+### Publishing (section 11)
+
+The publish audit has a second, independent detector besides the redaction rules, and both must be clean (P1, P5). It audits the exact bytes it names, refuses symbolic links and records sha256 values (P2). A false alarm can be overridden only by the engineer, with `--accept-hits=<digest of the audited set>` (P5, P7). The configured account ids are allowed in the report and work order and nowhere else (P6). The Slack text is built only from a report that the render marker vouches for. Section 9 describes a scrub-and-audit loop of at most three rounds; the built skill instead fixes a hit at its source in `report.json`, or stops and asks.
+
+### Skill text (section 7)
+
+The method in section 7 became `SKILL.md`, a 13-step recipe, with exact file formats in `reference/formats.md` and 21 playbooks, tested against the code (S1 to S3).
+

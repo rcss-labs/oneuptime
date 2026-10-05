@@ -10,6 +10,8 @@
 
 **Spec:** `LLM_Skills/AI_Triage/docs/specs/2026-10-04-ai-triage-design.md`. This plan implements build stage 1 of section 14. It is the first of five plans, one per build stage. Each later plan is written after the one before it is done.
 
+> **Superseded:** the code blocks in this plan were superseded by later fix commits. The repository, not this plan, is the reference.
+
 ## Global Constraints
 
 - All files live under `LLM_Skills/AI_Triage/`. Every path in this plan is relative to that folder, and every command runs from it.
