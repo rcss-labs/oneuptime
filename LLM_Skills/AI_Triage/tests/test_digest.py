@@ -174,3 +174,64 @@ def test_changing_the_asked_text_of_a_cited_finding_changes_the_cause_digest():
     changed["compute-1"]["asked"]["ecs:ecs-0001"].append("filter=service=checkout")
     assert cause_digest(CAUSE, asked) != cause_digest(CAUSE, FINDINGS)
     assert cause_digest(CAUSE, changed) != cause_digest(CAUSE, asked)
+
+
+# the draft digest covers the report text that is printed
+
+FULL_REPORT = {
+    "status": "cause_found", "summary": {"what_broke": "Containers died", "impact": "Checkout returned 502", "scope": "Only checkout",
+                                         "top_cause": "C1"},
+    "symptoms": ["502 on checkout"],
+    "causes": [CAUSE], "actions": [ACTION],
+    "hypotheses": [{"id": "H1", "statement": "Memory", "prediction": "137", "test": "events", "result": "confirmed",
+                    "finding_ids": ["compute-1"], "cause": "C1"}],
+    "open_questions": ["Who changed it?"],
+    "coverage": {"typesafe": "available", "not_checked": [{"what": "RDS", "why": "no access"}]},
+    "map_changes": [{"note": "add the queue"}], "run": {"engineer": "pat", "duration_minutes": 30},
+}
+
+
+@pytest.mark.parametrize("change", [
+    lambda r: r["summary"].__setitem__("what_broke", "Something else"),
+    lambda r: r["summary"].__setitem__("impact", "No impact"),
+    lambda r: r["open_questions"].append("Another?"),
+    lambda r: r["open_questions"].__setitem__(0, "Changed?"),
+    lambda r: r["hypotheses"][0].__setitem__("statement", "Other"),
+    lambda r: r["hypotheses"][0].__setitem__("prediction", "Other"),
+    lambda r: r["hypotheses"][0].__setitem__("test", "Other"),
+    lambda r: r["hypotheses"][0].__setitem__("result", "rejected"),
+    lambda r: r["hypotheses"][0].__setitem__("cause", None),
+    lambda r: r["hypotheses"][0].__setitem__("finding_ids", []),
+    lambda r: r["hypotheses"].append({"id": "H2"}),
+    lambda r: r["actions"][0].__setitem__("rationale", "Because"),
+    lambda r: r["coverage"]["not_checked"][0].__setitem__("why", "all fine"),
+    lambda r: r["coverage"]["not_checked"].clear(),
+    lambda r: r["map_changes"].append({"note": "x"}),
+])
+def test_an_edit_to_printed_report_text_changes_the_draft_digest(change):
+    edited = copy.deepcopy(FULL_REPORT)
+    change(edited)
+    assert draft_digest(edited, FINDINGS, IDENTITY) != draft_digest(FULL_REPORT, FINDINGS, IDENTITY)
+
+
+@pytest.mark.parametrize("change", [
+    lambda r: r.__setitem__("status", "unresolved"),
+    lambda r: r["summary"].__setitem__("top_cause", None),
+    lambda r: r["coverage"].__setitem__("typesafe", "unavailable: down"),
+    lambda r: r["run"].__setitem__("engineer", "sam"),
+    lambda r: r["run"].__setitem__("duration_minutes", 90),
+    lambda r: r["causes"][0].__setitem__("label", "candidate"),
+    lambda r: r["actions"][0].__setitem__("label", "candidate"),
+])
+def test_the_fields_the_judging_step_decides_stay_outside_the_draft_digest(change):
+    edited = copy.deepcopy(FULL_REPORT)
+    change(edited)
+    assert draft_digest(edited, FINDINGS, IDENTITY) == draft_digest(FULL_REPORT, FINDINGS, IDENTITY)
+
+
+def test_the_hypothesis_order_does_not_matter():
+    reordered = copy.deepcopy(FULL_REPORT)
+    reordered["hypotheses"].append({"id": "H2", "statement": "x"})
+    first = draft_digest(reordered, FINDINGS, IDENTITY)
+    reordered["hypotheses"].reverse()
+    assert draft_digest(reordered, FINDINGS, IDENTITY) == first

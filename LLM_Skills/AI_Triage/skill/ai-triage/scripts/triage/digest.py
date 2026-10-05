@@ -73,11 +73,29 @@ def _digests(entries: Any, digest) -> list[str]:
     return sorted(digest(entry) for entry in entries) if isinstance(entries, list) else []
 
 
+def hypothesis_digest(hypothesis: dict) -> str:
+    """A hypothesis is written before judging and has no field that judging fills, so all of it is covered."""
+    return _canonical_hash(hypothesis)
+
+
 def draft_digest(report: dict, findings_by_id: dict, case_identity: str) -> str:
-    """Covers the symptoms, the scope, every cause and action digest, and the case."""
+    """Covers everything the report prints that judging does not decide: the summary text, symptoms, every cause,
+    action, and hypothesis, the open questions, what was not checked, the map changes, and the case.
+
+    Left out are the fields that are decided after judging: status, summary.top_cause, coverage.typesafe, the run
+    details, and the labels, confidences, and reasons of causes and actions.
+    """
+    summary = _field(report, "summary")
+    coverage = _field(report, "coverage")
     return _canonical_hash({
         "symptoms": _field(report, "symptoms"),
-        "scope": _field(_field(report, "summary"), "scope"),
+        "scope": _field(summary, "scope"),
+        "what_broke": _field(summary, "what_broke"),
+        "impact": _field(summary, "impact"),
+        "open_questions": _field(report, "open_questions"),
+        "not_checked": _field(coverage, "not_checked"),
+        "map_changes": _field(report, "map_changes"),
+        "hypotheses": _digests(_field(report, "hypotheses"), hypothesis_digest),
         "causes": _digests(_field(report, "causes"), lambda cause: cause_digest(cause, findings_by_id)),
         "actions": _digests(_field(report, "actions"), action_digest),
         "case": case_identity if isinstance(case_identity, str) else "",

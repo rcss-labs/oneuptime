@@ -1327,3 +1327,110 @@ def test_a_rerun_over_a_judged_summary_starts_with_no_adhoc_entries(tmp_path, co
     run(case_dir, config, FakeJudge(make_responder()))
     run_adhoc(case_dir, session_for(case_dir, config, FakeJudge(ADHOC_ANSWER)), config, ADHOC_DOCUMENT)
     assert run(case_dir, config, FakeJudge(make_responder()))["adhoc"] == []
+
+
+# the sentinel test: no printed string of the report can change after judging
+
+POST_JUDGING = {("status",), ("summary", "top_cause"), ("coverage", "typesafe"), ("run", "engineer")}
+POST_JUDGING_KEYS = {"label", "confidence", "reasons"}
+
+
+def string_leaves(value, path=()):
+    if isinstance(value, str):
+        yield path
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from string_leaves(item, (*path, key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from string_leaves(item, (*path, index))
+
+
+def set_leaf(report, path, text):
+    node = report
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = text
+
+
+def test_no_printed_string_of_a_judged_report_can_change_without_validation_refusing_it(tmp_path, config):
+    import copy as copy_module
+    from triage.findings import valid_findings
+    from triage.report import validate_report
+    case_dir = build_case(tmp_path, config, labels=("probable", "candidate"))
+
+    def fill(report):
+        for action in report["actions"]:
+            action["label"] = "candidate"
+        report["open_questions"] = ["Who changed the memory limit?"]
+        report["coverage"]["not_checked"] = [{"what": "The database", "why": "No access"}]
+        report["map_changes"] = []
+
+    edit_report(case_dir, fill)
+    run(case_dir, config, FakeJudge(make_responder()))
+    original = json.loads((case_dir / "report.json").read_text())
+    case = json.loads((case_dir / "case.json").read_text())
+    findings = valid_findings(case_dir)
+    assert validate_report(original, case, findings, config) == []
+    leaves = list(string_leaves(original))
+    assert len(leaves) > 40
+    accepted = []
+    for path in leaves:
+        outside = path in POST_JUDGING or (len(path) > 1 and path[-1] in POST_JUDGING_KEYS)
+        edited = copy_module.deepcopy(original)
+        old = edited
+        for key in path:
+            old = old[key]
+        set_leaf(edited, path, old + " changed")
+        problems = validate_report(edited, case, findings, config)
+        if not problems and not outside:
+            accepted.append(path)
+    assert accepted == [], f"these strings changed without any refusal: {accepted}"
+
+
+# replay and locate
+
+def test_a_replay_case_is_judged_as_before_and_its_summary_says_so(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    case = json.loads((case_dir / "case.json").read_text())
+    case["replay"] = True
+    (case_dir / "case.json").write_text(json.dumps(case))
+    summary = run(case_dir, config, FakeJudge(make_responder()))
+    assert summary["replay"] is True and summary["causes"]["C1"]["label"] == "confirmed"
+    assert json.loads((case_dir / "judgments" / "summary.json").read_text())["replay"] is True
+
+
+def test_a_live_case_summary_has_no_replay_key(tmp_path, config):
+    assert "replay" not in run(build_case(tmp_path, config), config, FakeJudge(make_responder()))
+
+
+def test_candidates_are_described_with_their_match_reasons(config, map_data):
+    from triage.judge import describe_candidates
+    from triage.service_map import parse_map
+    case = {"match": {"candidates": [
+        {"service": "checkout-api", "environment": "prod", "reasons": ["monitor:checkout api", "hostname:checkout.example.com"]},
+        {"service": "checkout-api", "environment": "staging", "reasons": ["label:checkout"]}]}}
+    described = describe_candidates(case, parse_map(map_data, config))
+    assert described["checkout-api/prod"].endswith("matched by: monitor:checkout api, hostname:checkout.example.com")
+    assert described["checkout-api/staging"].endswith("matched by: label:checkout")
+
+
+def test_without_the_service_the_one_candidate_matched_by_name_is_picked(tmp_path, config):
+    from triage.judge import single_name_match
+    case = {"match": {"candidates": [
+        {"service": "a", "environment": "prod", "reasons": ["monitor:x", "label:y"]},
+        {"service": "a", "environment": "staging", "reasons": ["label:y"]}]}}
+    assert single_name_match(case) == "a/prod"
+    both = {"match": {"candidates": [{"service": "a", "environment": "prod", "reasons": ["hostname:h"]},
+                                     {"service": "a", "environment": "staging", "reasons": ["monitor:m"]}]}}
+    assert single_name_match(both) is None
+    assert single_name_match({"match": {"candidates": [{"service": "a", "environment": "prod", "reasons": ["label:l"]}]}}) is None
+    result = match_resource(session_for(tmp_path, config, FakeJudge(fail_with="down")), QUESTIONS, INCIDENT, CANDIDATES,
+                            random.Random(3), config.typesafe_thresholds, fallback="checkout-api/prod")
+    assert result["decision"] == "checkout-api/prod" and result["confidence"] is None and "name" in result["reason"]
+
+
+def test_the_fallback_is_not_used_when_the_service_answered_none_match(tmp_path, config):
+    result = match_resource(session_for(tmp_path, config, FakeJudge(locate_answer("none_match", 0.9))), QUESTIONS, INCIDENT,
+                            CANDIDATES, random.Random(3), config.typesafe_thresholds, fallback="checkout-api/prod")
+    assert result["decision"] == "ask"

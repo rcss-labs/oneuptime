@@ -31,6 +31,7 @@ def command():
 
 @pytest.fixture
 def skill_dir(tmp_path, config_data, map_data):
+    config_data["cases_dir"] = str(tmp_path / "cases")
     root = tmp_path / "skill"
     (root / "config").mkdir(parents=True)
     (root / "judgments").mkdir()
@@ -42,8 +43,10 @@ def skill_dir(tmp_path, config_data, map_data):
 
 @pytest.fixture
 def case_dir(tmp_path, config_data):
-    (tmp_path / "case-folder").mkdir()
-    return build_case(tmp_path / "case-folder", parse_config(config_data))
+    folder = tmp_path / "cases" / "INC-123" / "20261004-110000"
+    folder.mkdir(parents=True)
+    config_data["cases_dir"] = str(tmp_path / "cases")
+    return build_case(folder, parse_config(config_data))
 
 
 def invoke(command, skill_dir, *args, judge=None):
@@ -431,3 +434,58 @@ def test_a_draft_with_a_wrong_field_exits_2_with_the_reports_wording_and_no_call
     assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 2
     assert "actions[0].preconditions: must be a list of text" in capsys.readouterr().err
     assert judge.calls == [] and list((case_dir / "judgments").glob("*.json")) == []
+
+
+# a case folder is only a run folder under the cases root
+
+@pytest.fixture
+def copied_case(case_dir, tmp_path):
+    elsewhere = tmp_path / "intake" / "INC-123" / "20261004-111000"
+    shutil.copytree(case_dir, elsewhere)
+    return elsewhere
+
+
+@pytest.mark.parametrize("subcommand", ["run", "locate", "adhoc"])
+def test_every_subcommand_refuses_a_folder_outside_the_cases_root_and_writes_nothing(
+        command, skill_dir, copied_case, tmp_path, capsys, subcommand):
+    extra = ["--question-file", adhoc_file(tmp_path)] if subcommand == "adhoc" else []
+    (copied_case / "judgments").mkdir(exist_ok=True)
+    (copied_case / "judgments" / "summary.json").write_text("{}")
+    before = sorted(str(path.relative_to(copied_case)) for path in copied_case.rglob("*"))
+    judge = FakeJudge(make_responder())
+    assert invoke(command, skill_dir, subcommand, "--case-dir", str(copied_case), *extra, judge=judge) == 2
+    assert "not a case folder under" in capsys.readouterr().err and judge.calls == []
+    assert sorted(str(path.relative_to(copied_case)) for path in copied_case.rglob("*")) == before
+
+
+def test_a_folder_that_is_not_two_levels_under_the_root_is_refused(command, skill_dir, case_dir, capsys):
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir.parent), judge=FakeJudge()) == 2
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir / "findings"), judge=FakeJudge()) == 2
+
+
+def test_a_symbolic_link_to_a_copy_elsewhere_is_refused(command, skill_dir, copied_case, tmp_path):
+    link = tmp_path / "cases" / "INC-9" / "20261004-120000"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(copied_case)
+    assert invoke(command, skill_dir, "run", "--case-dir", str(link), judge=FakeJudge()) == 2
+
+
+def test_a_case_whose_replay_state_differs_from_the_environment_is_refused(command, skill_dir, case_dir, monkeypatch, capsys):
+    case = json.loads((case_dir / "case.json").read_text())
+    case["replay"] = True
+    (case_dir / "case.json").write_text(json.dumps(case))
+    monkeypatch.delenv("AI_TRIAGE_FIXTURES", raising=False)
+    judge = FakeJudge(make_responder())
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 2
+    assert "replay" in capsys.readouterr().err and judge.calls == []
+
+
+def test_locate_without_the_service_picks_the_one_candidate_matched_by_name(command, skill_dir, located_case, capsys):
+    case = json.loads((located_case / "case.json").read_text())
+    case["match"]["candidates"][0]["reasons"] = ["monitor:checkout api", "hostname:checkout.example.com"]
+    case["match"]["candidates"][1]["reasons"] = ["label:checkout"]
+    (located_case / "case.json").write_text(json.dumps(case))
+    judge = FakeJudge(fail_with="down")
+    assert invoke(command, skill_dir, "locate", "--case-dir", str(located_case), judge=judge) == 0
+    assert json.loads(capsys.readouterr().out)["decision"] == "checkout-api/prod"
+    assert "matched by: monitor:checkout api" in judge.calls[0][0]["candidates"]["checkout-api/prod"]

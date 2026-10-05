@@ -14,7 +14,7 @@ import random
 import sys
 from pathlib import Path
 
-from triage.case import CaseError, load_case
+from triage.case import CaseError, check_replay, load_case, resolve_case_dir
 from triage.config import ConfigError, default_config_path, load_config
 from triage.judge import (
     DraftRuleError,
@@ -27,6 +27,7 @@ from triage.judge import (
     retire_summary,
     run_adhoc,
     run_judgments,
+    single_name_match,
 )
 from triage.judge_client import Judge, TypeSafeJudge
 from triage.questions import QuestionError, default_questions_path, load_questions
@@ -89,7 +90,8 @@ def _locate(args: argparse.Namespace, config, judge: Judge | None) -> int:
     if not candidates:
         raise JudgmentError(["case.json lists no candidates to choose between"])
     result = match_resource(_session(args, config, judge), questions, incident_state(args.case_dir), candidates,
-                            _rng(args.case_dir), config.typesafe_thresholds)
+                            _rng(args.case_dir), config.typesafe_thresholds,
+                            fallback=single_name_match(case))
     print(json.dumps(result, indent=2, allow_nan=False))
     return 0
 
@@ -110,9 +112,16 @@ def main(argv: list[str] | None = None, judge: Judge | None = None) -> int:
     args = _build_parser().parse_args(argv)
     handler = {"run": _run, "locate": _locate, "adhoc": _adhoc}[args.subcommand]
     try:
+        try:
+            config = load_config(default_config_path(args.skill_dir))
+        except ConfigError:
+            if args.subcommand == "run":
+                retire_summary(args.case_dir)  # a broken config must not leave an old summary looking current
+            raise
+        args.case_dir = resolve_case_dir(args.case_dir, config)  # refuses, writing nothing, outside the cases root
         if args.subcommand == "run":
             retire_summary(args.case_dir)  # first, so that no later failure leaves an old summary looking current
-        config = load_config(default_config_path(args.skill_dir))
+        check_replay(load_case(args.case_dir))
         return handler(args, config, judge)
     except (ConfigError, MapError, CaseError) as error:
         return _fail("\n".join(error.errors), 2)

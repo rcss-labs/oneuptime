@@ -302,15 +302,21 @@ def judge_actions(
 
 def match_resource(
     session: JudgeSession, questions: dict[str, dict], incident: dict, candidates: dict[str, str],
-    rng: random.Random, thresholds: dict[str, float],
+    rng: random.Random, thresholds: dict[str, float], fallback: str | None = None,
 ) -> dict:
-    """Pick the service an incident is about among map candidates, or decide to ask the engineer."""
+    """Pick the service an incident is about among map candidates, or decide to ask the engineer.
+
+    `fallback` is the one candidate matched by monitor or host name; it is used only when the service is unavailable.
+    """
     order = list(candidates)
     rng.shuffle(order)
     asked = {"resource_match": session.prepare_options(build_choice(questions["resource_match"], candidates, order))}
     try:
         answer = session.ask("locate", "locate", {"incident": incident, "candidates": candidates}, asked).answers["resource_match"]
     except JudgeUnavailable as unavailable:
+        if fallback in candidates:
+            return {"decision": fallback, "confidence": None, "probabilities": {},
+                    "reason": f"TypeSafe is unavailable ({unavailable.reason}); this is the only candidate matched by monitor or host name"}
         return {"decision": "ask", "confidence": None, "probabilities": {},
                 "reason": f"TypeSafe is unavailable: {unavailable.reason}"}
     decision, confidence = answer["choice"], compose.probability(answer["confidence"])
@@ -323,18 +329,27 @@ def match_resource(
     return result
 
 
+def single_name_match(case: dict) -> str | None:
+    """"<service>/<environment>" of the one candidate matched by a monitor or host name, else None."""
+    named = [f"{entry['service']}/{entry['environment']}" for entry in case.get("match", {}).get("candidates", [])
+             if any(str(reason).startswith(("monitor:", "hostname:")) for reason in entry.get("reasons", []))]
+    return named[0] if len(named) == 1 else None
+
+
 def describe_candidates(case: dict, service_map: ServiceMap) -> dict[str, str]:
-    """"<service>/<environment>" to "<account>, <region>, resources: <keys and string values>"."""
+    """"<service>/<environment>" to "<account>, <region>, resources: <keys and string values>; matched by: <reasons>"."""
     candidates = {}
     for entry in case.get("match", {}).get("candidates", []):
         name = f"{entry['service']}/{entry['environment']}"
         service = service_map.services.get(entry["service"])
         environment = service.environments.get(entry["environment"]) if service else None
+        matched = ", ".join(str(reason) for reason in entry.get("reasons", []))
         if environment is None:
-            candidates[name] = "not in the service map"
-            continue
-        resources = ", ".join(f"{key}={value}" if isinstance(value, str) else key for key, value in environment.resources.items())
-        candidates[name] = f"{environment.account}, {environment.region}, resources: {resources}"
+            text = "not in the service map"
+        else:
+            resources = ", ".join(f"{key}={value}" if isinstance(value, str) else key for key, value in environment.resources.items())
+            text = f"{environment.account}, {environment.region}, resources: {resources}"
+        candidates[name] = f"{text}; matched by: {matched}" if matched else text
     return candidates
 
 
@@ -774,6 +789,8 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
         summary = _compose_summary(config, report, findings, incident_start, session.model,
                                    verdicts, cause_answers, rank, action_answers)
     summary["draft_digest"] = draft_digest(report, findings, case_identity(case))
+    if case.get("replay") is True:
+        summary["replay"] = True
     summary["adhoc"] = adhoc
     write_summary(case_dir, summary)
     if summary["status"] != "failed":  # a failed run keeps the retired summary for inspection
