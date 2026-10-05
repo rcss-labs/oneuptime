@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Callable, Mapping, Sequence
 
 from triage.awscli import Runner, subprocess_runner
 from triage.config import ConfigError, TriageConfig, default_config_path, load_config
-from triage.guard import KUBECONFIG_NAME
+from triage.guard import FILTER_RULES, KUBECONFIG_NAME
 from triage.service_map import MapError, default_map_path, load_map
 from triage.verify import EXPIRED, PASSED, check_identity
 
@@ -18,6 +19,18 @@ WARN = "warn"
 FAIL = "fail"
 SIGN_IN = "sign-in"
 SKIPPED = "skipped"
+
+
+# zsh options that change how an argv the guard accepted is split or expanded (names without _ and in lower case).
+UNSAFE_OPTIONS = ("magicequalsubst", "rcquotes", "cshjunkiequotes", "shwordsplit", "globsubst", "ksharrays",
+                  "ignorebraces")
+FUNCTION_HEADER_RES = (re.compile(r"^([^\s(){}=#]+)\s*\(\s*\)\s*\{?\s*$"),
+                       re.compile(r"^function\s+([^\s(){}]+)\s*(?:\(\s*\))?\s*\{?\s*$"))
+ALIAS_RE = re.compile(r"^alias\s+((?:-[A-Za-z]+\s+)*)(?:--\s+)?([^=\s]+)=")
+SETOPT_RE = re.compile(r"^(?:setopt|set\s+-o)\s+(.*)$")
+IFS_RE = re.compile(r"^(?:export\s+|typeset\s+(?:-\w+\s+)*|local\s+)?IFS=")
+SHELL_FIX = ("Remove it from your shell startup files, then start a new Claude Code session: the guard checks the "
+             "command as written, and this would make zsh run something else.")
 
 
 @dataclass(frozen=True)
@@ -42,6 +55,66 @@ def _load(skill_dir: Path) -> tuple[TriageConfig | None, list[Check]]:
     return config, checks
 
 
+def guarded_command_words(skill_dir: Path) -> set[str]:
+    """Every command word the guard can allow."""
+    venv = skill_dir / ".venv" / "bin"
+    return {"aws", "kubectl", str(venv / "python"), str(venv / "python3")} | set(FILTER_RULES)
+
+
+def _option_names(text: str) -> list[str]:
+    return [word.lower().replace("_", "").replace("-", "") for word in text.split() if not word.startswith("#")]
+
+
+def shell_snapshot_problems(text: str, guarded_words: set[str]) -> list[str]:
+    """What in a Claude Code shell snapshot would make zsh run something other than the guarded command.
+
+    Reads top-level lines only; option and IFS changes inside a function body are local to that function.
+    """
+    problems: list[str] = []
+    in_function = False
+    for line in text.splitlines():
+        if in_function:
+            in_function = line != "}"
+            continue
+        header = next((match for regex in FUNCTION_HEADER_RES if (match := regex.match(line))), None)
+        if header:
+            if header.group(1) in guarded_words:
+                problems.append(f"function {header.group(1)}")
+            in_function = not line.rstrip().endswith("}")
+            continue
+        alias = ALIAS_RE.match(line)
+        if alias:
+            flags, name = alias.group(1), alias.group(2)
+            if "g" in flags.replace("-", ""):
+                problems.append(f"global alias {name}")  # rewrites the word anywhere on a command line
+            elif name in guarded_words:
+                problems.append(f"alias {name}")
+            continue
+        setopt = SETOPT_RE.match(line)
+        if setopt:
+            problems.extend(f"option {name}" for name in _option_names(setopt.group(1)) if name in UNSAFE_OPTIONS)
+            continue
+        if IFS_RE.match(line):
+            problems.append("an IFS assignment")
+    return problems
+
+
+def _shell_environment(skill_dir: Path, snapshots_dir: Path) -> Check:
+    name = "Shell environment"
+    try:
+        snapshots = [entry for entry in snapshots_dir.iterdir() if entry.is_file()] if snapshots_dir.is_dir() else []
+        if not snapshots:
+            return Check(name, SKIPPED, f"not checked: no shell snapshot in {snapshots_dir}")
+        newest = max(snapshots, key=lambda entry: entry.stat().st_mtime)
+        text = newest.read_text(errors="replace")
+    except OSError as error:
+        return Check(name, SKIPPED, f"not checked: {snapshots_dir} could not be read ({error.strerror or error})")
+    problems = shell_snapshot_problems(text, guarded_command_words(skill_dir))
+    if problems:
+        return Check(name, FAIL, f"{newest.name}: {', '.join(problems)}", SHELL_FIX)
+    return Check(name, OK, newest.name)
+
+
 def run_preflight(
     skill_dir: Path,
     accounts: Sequence[str] = (),
@@ -50,6 +123,7 @@ def run_preflight(
     env: Mapping[str, str] = os.environ,
     which: Callable[[str], str | None] = shutil.which,
     replay: bool = False,
+    snapshots_dir: Path | None = None,
 ) -> list[Check]:
     config, checks = _load(skill_dir)
     if config is None:
@@ -85,6 +159,12 @@ def run_preflight(
             checks.append(Check("kubectl", FAIL, "the triage kubeconfig does not exist", "Create it with the commands in the README."))
         else:
             checks.append(Check("kubectl", OK))
+
+    if replay:
+        checks.append(Check("Shell environment", SKIPPED, "replay mode: the shell is not checked"))
+    else:
+        home = env.get("HOME") or os.path.expanduser("~")
+        checks.append(_shell_environment(skill_dir, snapshots_dir or Path(home) / ".claude" / "shell-snapshots"))
 
     try:
         config.cases_dir.mkdir(parents=True, exist_ok=True)
