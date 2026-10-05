@@ -88,7 +88,9 @@ Do the steps in order. Work without stopping to ask, except where a step says to
    id, taken from the evidence), its current state, the required state, the change,
    how to verify it, and how to roll it back. An
    unresolved report still lists each cause you tested, with the findings that
-   contradict it; the judging step needs at least one cause.
+   contradict it; the judging step needs at least one cause. What you could not
+   establish (why a limit was set, who made a change, what a host should have
+   been) goes in `open_questions`, not into the cause.
 9. **Judge.** `run judge run --case-dir <case>`. Read `judgments/summary.json`. In
    `report.json` set each label to the label the summary gives, copy its `typesafe`
    value into `coverage.typesafe`, and make `status`, `summary.top_cause`, and the
@@ -110,8 +112,10 @@ Do the steps in order. Work without stopping to ask, except where a step says to
     ask the engineer whether to post it and where. Post only on a yes, then
     `run publish record-slack ...`. When Confluence is not connected, say so and
     leave the report in the case folder.
-12. **Service map.** When the target came from discovery, `run map_suggest propose ...`,
-    show the entry, and apply it only on a yes.
+12. **Service map.** When the target came from discovery, run
+    `run map_suggest propose --case-dir <case> --service-name <name>` with the name
+    the team uses for the service (the workload or ECS service name when you have
+    no better one), show the entry, and apply it only on a yes.
 13. **Hand over.** Tell the engineer: the status, the top cause with its label, the
     actions with their labels, what was not checked, and where the case folder is.
     When the cause is only probable, hand over its mitigation as a candidate, say
