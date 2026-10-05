@@ -22,7 +22,10 @@ the account, region, window, and case folder from the plan's own lines.
 
 | Fact | Usually means | Read next |
 |---|---|---|
+| "Instance X is running: system status ok, instance status ok, type T, launched <time>" | the one line every instance gets: state, both checks, launch time (`current`) | any check other than ok; the launch time against the incident start |
 | "Instance X is stopped" or `terminated`, with a state reason | someone or something stopped it; the reason code names who | the state reason text, then `changes` for the actor |
+| "Instance X was launched at <time>, inside the incident window" | the instance is new: a replacement or a scale-out | `autoscaling` for why it was launched |
+| "Instance X changed state to <state> at <time>, inside the incident window" | a stop, start, or termination during the incident (time read from the transition reason) | `changes` for the actor |
 | "Instance X was not found in <region>" | wrong region, or the instance is long gone | the Auto Scaling group for its replacement |
 | "status checks: system status impaired" | the host or hardware under the instance failed | the scheduled-event fact; the usual fix is stop and start, which moves the host |
 | "status checks: instance status impaired" | the operating system does not answer: crash, full disk, failed network setup | the console output fact, last lines first |
@@ -32,9 +35,10 @@ the account, region, window, and case folder from the plan's own lines.
 | `StatusCheckFailed` peak 1 | at least one check failed in that 5-minute period | its time, against the status check fact |
 | "no data was returned for the window" | the instance was stopped, or reports no data | the instance state fact |
 
-The instance line and the status-check line are `current` facts: the state now. A
-healthy instance writes no status-check fact at all. Scheduled events are `current`
-and carry their own times; the metric facts carry the peak time.
+The instance line and the status-check line are `current` facts: the state now. An
+unhealthy instance also gets a separate status-check line. The launch and state-change
+facts and the metric facts carry times. Scheduled events are `current` and state
+their own times.
 
 ## Common causes
 

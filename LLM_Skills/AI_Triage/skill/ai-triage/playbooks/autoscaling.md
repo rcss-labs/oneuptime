@@ -33,12 +33,14 @@ not. Take the account, region, window, and case folder from the plan's own lines
 | activity cause "... in response to an ELB system health check failure" | the load balancer reported it unhealthy | `edge` target health reasons |
 | "Instance refresh R InProgress (status now), P% complete" | a rolling replacement is running now | its status reason; the new instances' health |
 | "Instance refresh R Failed ... " with a status reason | the rollout stopped, usually on new instances that never became healthy | the new instances' health and the grace period |
-| "Scalable target ...: min A, max B; scale-in suspended" | someone suspended scaling | `changes` for who |
+| group fact ends "no process is suspended" | no scaling process is switched off | nothing; rule suspension out |
+| group fact ends "suspended processes: Launch (User suspended at <time>)" | a process (Launch, Terminate, HealthCheck, ReplaceUnhealthy, AZRebalance) is off; "inside the incident window" means it was suspended during the incident | `changes` for who; the activity facts for what stopped happening |
+| "Scalable target ...: min A, max B; scale-in suspended" | someone suspended ECS service scaling | `changes` for who |
 | "Scaling policy P (TargetTrackingScaling); target T on <metric>" | the metric and level that move capacity (`current`) | the metric fact of the same metric for the window |
 
 Activity and refresh facts carry times and only cover the window. Group, scalable
 target, and policy facts are `current`; they show the state now, not at the incident
-start. The group fact does not list suspended processes; the lead command does.
+start.
 
 ## Common causes
 
@@ -72,7 +74,7 @@ which show what a normal week of scaling looks like.
 ## Follow a lead
 
 ```bash
-aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names <group> --profile <triage profile> --region <region> --query 'AutoScalingGroups[].{suspended:SuspendedProcesses[].ProcessName,template:LaunchTemplate,subnets:VPCZoneIdentifier,protected:Instances[?ProtectedFromScaleIn].InstanceId}' 2>/dev/null
+aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names <group> --profile <triage profile> --region <region> --query 'AutoScalingGroups[].{template:LaunchTemplate,subnets:VPCZoneIdentifier,protected:Instances[?ProtectedFromScaleIn].InstanceId}' 2>/dev/null
 aws autoscaling describe-policies --auto-scaling-group-name <group> --profile <triage profile> --region <region> --query 'ScalingPolicies[].{name:PolicyName,type:PolicyType,adjust:ScalingAdjustment,cooldown:Cooldown}' 2>/dev/null
 aws autoscaling describe-scheduled-actions --auto-scaling-group-name <group> --profile <triage profile> --region <region> --query 'ScheduledUpdateGroupActions[].{name:ScheduledActionName,at:StartTime,recurrence:Recurrence,desired:DesiredCapacity}' 2>/dev/null
 aws application-autoscaling describe-scaling-activities --service-namespace ecs --resource-id service/<cluster>/<service> --max-results 20 --profile <triage profile> --region <region> --query 'ScalingActivities[].{start:StartTime,status:StatusCode,cause:Cause}' 2>/dev/null

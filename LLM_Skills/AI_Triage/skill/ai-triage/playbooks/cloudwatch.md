@@ -29,7 +29,9 @@ in the config and says which groups it skipped.
 | "Alarm A is ALARM: metric M, threshold GreaterThanThreshold T" | the alarm is firing now (`current`); the excerpt is the state reason | the state history of the same alarm |
 | "Alarm A is INSUFFICIENT_DATA" | the metric stopped reporting: the source is down, or nothing is sent | the source's own state |
 | "Alarm A changed from OK to ALARM" with a time | the evaluation that crossed the threshold | that time minus the alarm's period times evaluation periods is the onset |
-| "The first alarm to go into ALARM in the window was A at T" | the earliest metric alarm; a composite is named apart | what A watches; not necessarily the cause |
+| "The first alarm to go into ALARM in the window was A at T" | the earliest metric alarm, named only when every alarm's history was read to its end; a composite is named apart | what A watches; not necessarily the cause |
+| "Which alarm went into ALARM first cannot be named: the history was cut or not read for ..." | earlier changes may exist for the alarms listed | say so; do not name a first alarm |
+| "Alarm A: read P pages of state changes, N in the window; showing the newest 20 and the earliest change into ALARM" | a busy alarm; newest changes first, up to 5 pages, then the earliest change into ALARM is kept | the "cut after 5 pages and older changes exist" part means the onset may be older |
 | "The composite alarm C changed to ALARM at the same time or earlier" | C summarizes others and fires from them | its rule, to find its children |
 | "State change history was read for 20 of N alarms" | alarms were left out, metric alarms first | rerun with the names that matter |
 | "N matching log lines in the 5 minutes starting T" | the count per 5-minute bucket | the first and the peak bucket |
@@ -63,8 +65,9 @@ Here the cause is usually a misreading of the facts. Most frequent first.
    unknown and ask for a wider window.
 4. **A noisy pattern.** A steady count equal to last week's is background noise.
    Rerun with a narrower `pattern` before using it; the work order names the pattern.
-5. **A flapping alarm.** History is read oldest first and cut at 20 items, so a busy
-   alarm can hide its latest changes. Work order: say the list may be cut.
+5. **A cut alarm history.** Evidence: the derived fact says the history was cut after
+   5 pages. The earliest change in the window is then unknown. Work order: say that,
+   and that no first alarm can be named.
 
 ## Compare with
 

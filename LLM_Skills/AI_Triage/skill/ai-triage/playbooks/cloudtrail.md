@@ -27,6 +27,7 @@ incident is not written and the lookup covers the whole window.
 |---|---|---|
 | "UpdateService (ecs.amazonaws.com) by <user> on <resource>, 4 minutes before the incident started" | a write call by that identity at that time | what the call changed; the target service's playbook |
 | the same with "after the incident started" | a response to the incident, not a cause | whether it made things better |
+| "... on <resource>, recorded in us-east-1, 3 minutes before the incident started" | a global-service change (IAM, CloudFront, Route 53, WAF, Organizations) found in the global region | what the change affected; `access.md` or `cloudfront-waf.md` |
 | "at the same time as the incident started" | within seconds of the start | the strongest candidate; confirm with the service's facts |
 | a user such as an assumed role of a pipeline | automation made the change | `deployments.md` for the run |
 | "by unknown user" | the event has no user name (a service acting on its own) | the event source and the service's facts |
@@ -47,8 +48,10 @@ is a cause only when the service's facts changed at that time.
   the whole window. An incident that began earlier needs a wider window.
 - CloudTrail's event history holds management events only, and a recent event can
   appear minutes late. A change in the last few minutes may be missing.
-- Events are read per region. A change to IAM or CloudFront is recorded in
-  `us-east-1`; run the collector there for them.
+- Events are read in the collector's region. Outside `us-east-1` it also looks up
+  IAM, CloudFront, Route 53, WAF, and Organizations events in `us-east-1`; those
+  facts say "recorded in us-east-1". Other global-service events (STS, Route 53
+  Domains) are not looked up.
 - A lookup by resource name finds only events that name that resource. A call
   without the name in its resources is found by the account-wide form, which fills the
   50 events with unrelated changes.
