@@ -39,11 +39,12 @@ def _add_distribution(ctx: CollectContext, distribution_id: str) -> str | None:
     ) or "none"
     modified = parse_iso(found.get("LastModifiedTime"))
     when = f", last modified {format_time(modified)}" if modified else ""
-    inside = " and was modified inside the window" if in_window(ctx.window, found.get("LastModifiedTime")) else ""
+    inside = in_window(ctx.window, found.get("LastModifiedTime"))
+    inside_text = " and was modified inside the window" if inside else ""
     ctx.evidence.add(
-        kind=CURRENT, resource=resource, command=ctx.last_command,
+        kind=INCIDENT_TIME if inside else CURRENT, resource=resource, time=modified, command=ctx.last_command,
         summary=(
-            f"Distribution {distribution_id} is {found.get('Status')}{when}{inside}; "
+            f"Distribution {distribution_id} is {found.get('Status')}{when}{inside_text}; "
             f"domain names {', '.join(d for d in domains if d)}; origins {origins}; "
             f"default cache behavior sends requests to origin {config.get('DefaultCacheBehavior', {}).get('TargetOriginId')}"
         ),

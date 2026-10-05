@@ -418,3 +418,13 @@ def test_samples_under_the_acls_own_metric_are_not_blamed_on_the_default_action(
     assert "sampled under the web ACL's own metric" in blocked[0].summary
     assert "default action" not in blocked[0].summary and "GroupRule" in blocked[0].summary
     assert "by the default action" in blocked[1].summary and "sampled under the web ACL's own metric" in blocked[1].summary
+
+
+def test_distribution_modification_time_is_carried_as_the_facts_time(config_data, tmp_path):
+    answers = answers_for(**{"cloudfront get-distribution": distribution(modified=IN_WINDOW)})
+    ctx, _, _ = run(config_data, tmp_path, answers, {"distribution_id": "E1EXAMPLE"})
+    fact = by_summary(ctx, "Distribution E1EXAMPLE")[0]
+    assert fact.kind == "incident_time" and fact.time == "2026-10-04T10:42:10Z"
+    ctx, _, _ = run(config_data, tmp_path, answers_for(), {"distribution_id": "E1EXAMPLE"})
+    fact = by_summary(ctx, "Distribution E1EXAMPLE")[0]
+    assert fact.kind == "current" and fact.time == "2026-10-01T07:00:00Z"
