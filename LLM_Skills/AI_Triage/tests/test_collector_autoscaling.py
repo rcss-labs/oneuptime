@@ -241,3 +241,45 @@ def test_suspension_without_a_time_in_its_reason(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, answers(**{
         "autoscaling describe-auto-scaling-groups": group(SuspendedProcesses=suspended)}))
     assert "AZRebalance (Suspended by the service)" in ctx.evidence.facts[0].summary
+
+
+GROUP_ARN = "arn:aws:autoscaling:eu-west-1:111111111111:autoScalingGroup:uuid-1:autoScalingGroupName/web-asg"
+TG_ARN = "arn:aws:elasticloadbalancing:eu-west-1:111111111111:targetgroup/web/abc{}"
+
+
+def test_group_fact_holds_the_arns_the_answer_returns(config_data, tmp_path):
+    body = group(AutoScalingGroupARN=GROUP_ARN, LaunchTemplate={"LaunchTemplateId": "lt-0abc", "LaunchTemplateName": "web", "Version": "7"},
+                 TargetGroupARNs=[TG_ARN.format(n) for n in range(25)])
+    ctx, _, _ = run(config_data, tmp_path, answers(**{"autoscaling describe-auto-scaling-groups": body}))
+    data = ctx.evidence.facts[0].data
+    assert data["arn"] == GROUP_ARN
+    assert data["launch_template"] == {"id": "lt-0abc", "name": "web", "version": "7"}
+    assert data["target_group_arns"] == [TG_ARN.format(n) for n in range(20)]
+    assert data["target_group_arns_omitted"] == 5
+
+
+def test_launch_template_of_a_mixed_instances_policy(config_data, tmp_path):
+    spec = {"LaunchTemplateId": "lt-0mix", "Version": "$Latest"}
+    body = group(MixedInstancesPolicy={"LaunchTemplate": {"LaunchTemplateSpecification": spec}})
+    ctx, _, _ = run(config_data, tmp_path, answers(**{"autoscaling describe-auto-scaling-groups": body}))
+    assert ctx.evidence.facts[0].data["launch_template"] == {"id": "lt-0mix", "version": "$Latest"}
+
+
+def test_group_without_arn_fields_writes_no_arn_keys(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, answers())
+    data = ctx.evidence.facts[0].data
+    assert "arn" not in data and "launch_template" not in data and "target_group_arns" not in data
+
+
+def test_ecs_scaling_facts_hold_resource_id_and_arns(config_data, tmp_path):
+    target_arn = "arn:aws:application-autoscaling:eu-west-1:111111111111:scalable-target/0abc"
+    policy_arn = "arn:aws:autoscaling:eu-west-1:111111111111:scalingPolicy:u:resource/ecs/service/checkout/api:policyName/cpu"
+    ctx, _, _ = run(config_data, tmp_path, answers(**{
+        "application-autoscaling describe-scalable-targets": {"ScalableTargets": [
+            {"ResourceId": "service/checkout/api", "MinCapacity": 2, "MaxCapacity": 8, "ScalableTargetARN": target_arn}]},
+        "application-autoscaling describe-scaling-policies": {"ScalingPolicies": [
+            {"PolicyName": "cpu", "PolicyType": "TargetTrackingScaling", "PolicyARN": policy_arn}]},
+    }), ecs_cluster="checkout", ecs_service="api")
+    target = with_text(ctx, "Scalable target")[0].data
+    assert target["resource_id"] == "service/checkout/api" and target["arn"] == target_arn
+    assert with_text(ctx, "Scaling policy cpu")[0].data["arn"] == policy_arn

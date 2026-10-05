@@ -614,3 +614,37 @@ def test_lines_differing_only_in_hex_ids_or_uuids_are_one_group_and_groups_are_c
     # 2 strong groups and 35 soft groups: 30 groups kept, 7 groups not kept.
     assert "first 30 of 37 distinct error-looking lines; 7 not kept" in fact.summary
     assert "55 error-looking" in fact.summary
+
+
+CLUSTER_ARN = "arn:aws:eks:eu-west-1:111111111111:cluster/platform-prod"
+NODEGROUP_ARN = "arn:aws:eks:eu-west-1:111111111111:nodegroup/platform-prod/workers/uuid-1"
+ADDON_ARN = "arn:aws:eks:eu-west-1:111111111111:addon/platform-prod/vpc-cni/uuid-2"
+
+
+def test_aws_facts_hold_the_arns_the_answers_return(config_data, tmp_path):
+    cluster = cluster_reply()
+    cluster["cluster"]["arn"] = CLUSTER_ARN
+    group = nodegroup_reply()
+    group["nodegroup"]["nodegroupArn"] = NODEGROUP_ARN
+    addon = addon_reply(status="DEGRADED")
+    addon["addon"]["addonArn"] = ADDON_ARN
+    ctx, _, _ = run(config_data, tmp_path, aws_answers(**{
+        "eks describe-cluster": cluster, "eks describe-nodegroup": group, "eks describe-addon": addon}))
+    assert ctx.evidence.facts[0].data["arn"] == CLUSTER_ARN
+    assert with_text(ctx, "Nodegroup workers")[0].data["arn"] == NODEGROUP_ARN
+    assert with_text(ctx, "Add-on vpc-cni")[0].data["arn"] == ADDON_ARN
+
+
+def test_answers_without_arns_write_no_arn_key(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path)
+    assert all("arn" not in f.data for f in ctx.evidence.facts)
+
+
+def test_workload_fact_names_the_owning_kubernetes_object(config_data, tmp_path):
+    body = deployment()
+    body["kind"] = "Deployment"
+    ctx, _, _ = run(config_data, tmp_path, kube=kube_answers(**{"get deployment/payments-api": body}),
+                    targets={"namespace": "web", "workloads": "deployment/payments-api"})
+    fact = with_text(ctx, "Workload deployment/payments-api")[0]
+    assert fact.data["workload"] == {"kind": "Deployment", "name": "payments-api", "namespace": "web"}
+    assert fact.data["desired"] == 3

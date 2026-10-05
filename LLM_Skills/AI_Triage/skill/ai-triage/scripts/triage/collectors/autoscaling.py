@@ -35,6 +35,33 @@ def _suspended_processes_text(ctx: CollectContext, group: dict) -> str:
     return "; suspended processes: " + "; ".join(parts)
 
 
+MAX_ARNS = 20
+
+
+def _launch_template(group: dict) -> dict[str, str]:
+    spec = group.get("LaunchTemplate") or (
+        ((group.get("MixedInstancesPolicy") or {}).get("LaunchTemplate") or {}).get("LaunchTemplateSpecification")
+    ) or {}
+    found = {"id": spec.get("LaunchTemplateId"), "name": spec.get("LaunchTemplateName"), "version": spec.get("Version")}
+    return {key: value for key, value in found.items() if value}
+
+
+def _identifier_data(group: dict) -> dict:
+    """The ARN and related identifiers exactly as the answer returns them; nothing is constructed."""
+    data: dict = {}
+    if group.get("AutoScalingGroupARN"):
+        data["arn"] = group["AutoScalingGroupARN"]
+    template = _launch_template(group)
+    if template:
+        data["launch_template"] = template
+    target_groups = group.get("TargetGroupARNs") or []
+    if target_groups:
+        data["target_group_arns"] = target_groups[:MAX_ARNS]
+        if len(target_groups) > MAX_ARNS:
+            data["target_group_arns_omitted"] = len(target_groups) - MAX_ARNS
+    return data
+
+
 def _add_group_state(ctx: CollectContext, resource: str, group: dict) -> None:
     instances = group.get("Instances", [])
     not_ok = [
@@ -53,6 +80,7 @@ def _add_group_state(ctx: CollectContext, resource: str, group: dict) -> None:
         data={
             **{key: group.get(key) for key in ("MinSize", "MaxSize", "DesiredCapacity")},
             "suspended_processes": [p.get("ProcessName") for p in group.get("SuspendedProcesses") or []],
+            **_identifier_data(group),
         },
     )
 
@@ -127,6 +155,10 @@ def _add_ecs_scaling(ctx: CollectContext, cluster: str, service: str) -> None:
                 f"Scalable target {target.get('ResourceId')}: min {target.get('MinCapacity')}, "
                 f"max {target.get('MaxCapacity')}{_suspended_text(target.get('SuspendedState') or {})}"
             ),
+            data={
+                **({"resource_id": target["ResourceId"]} if target.get("ResourceId") else {}),
+                **({"arn": target["ScalableTargetARN"]} if target.get("ScalableTargetARN") else {}),
+            },
         )
     policies = ctx.aws(
         "application-autoscaling", "describe-scaling-policies",
@@ -136,6 +168,7 @@ def _add_ecs_scaling(ctx: CollectContext, cluster: str, service: str) -> None:
         ctx.evidence.add(
             kind=CURRENT, resource=resource_id, command=ctx.last_command,
             summary=f"Scaling policy {policy.get('PolicyName')} ({policy.get('PolicyType')}){_policy_text(policy)}",
+            data={"arn": policy["PolicyARN"]} if policy.get("PolicyARN") else {},
         )
 
 

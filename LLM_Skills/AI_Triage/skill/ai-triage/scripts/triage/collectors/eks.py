@@ -59,6 +59,7 @@ def _add_cluster(ctx: CollectContext, name: str, cluster: dict) -> None:
             f"public access {str(bool(vpc.get('endpointPublicAccess'))).lower()}, "
             f"private access {str(bool(vpc.get('endpointPrivateAccess'))).lower()}, {_issues_text(cluster.get('health'))}"
         ),
+        data={"arn": cluster["arn"]} if cluster.get("arn") else {},
     )
 
 
@@ -82,6 +83,7 @@ def _add_nodegroups(ctx: CollectContext, name: str, region: str) -> None:
                 f"Nodegroup {group_name} is {group.get('status')}: min {scaling.get('minSize')}, "
                 f"max {scaling.get('maxSize')}, desired {scaling.get('desiredSize')}, {_issues_text(group.get('health'))}"
             ),
+            data={"arn": group["nodegroupArn"]} if group.get("nodegroupArn") else {},
         )
 
 
@@ -95,6 +97,7 @@ def _add_addons(ctx: CollectContext, name: str, region: str) -> None:
         ctx.evidence.add(
             kind=CURRENT, resource=f"addon/{name}/{addon_name}", command=ctx.last_command,
             summary=f"Add-on {addon_name} is {addon.get('status')}: {_issues_text(addon.get('health'))}",
+            data={"arn": addon["addonArn"]} if addon.get("addonArn") else {},
         )
 
 
@@ -241,7 +244,14 @@ def _add_workload(ctx: CollectContext, cluster: str, namespace: str, workload: s
                 f"Workload {workload}: desired {desired}, ready {ready}, updated {updated}; "
                 f"conditions {_conditions_text(status.get('conditions') or [])}"
             ),
-            data={"desired": desired, "ready": ready, "updated": updated},
+            # Kubernetes objects have no ARN; kind, name and namespace identify the owner to act on.
+            data={
+                "desired": desired, "ready": ready, "updated": updated,
+                "workload": {
+                    "kind": reply.get("kind") or workload.split("/", 1)[0].capitalize(),
+                    "name": workload.split("/", 1)[1], "namespace": namespace,
+                },
+            },
         )
     history = ctx.kubectl(cluster, ["rollout", "history", workload], namespace=namespace)
     if history:
