@@ -17,6 +17,8 @@ from triage.discover import discover_hostname
 from triage.service_map import MapError, parse_map
 from triage.fixtures import FixtureError, fixture_dir, replay_banner, kube_runner_from_env, runner_from_env
 
+INTAKE_DIR_NAME = "intake"
+OUTPUT_KEYS = {"discovery", "service_name", "proposed_entry", "validation"}
 PLACEHOLDER_SERVICE_NAME = "discovered-service"
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
@@ -27,6 +29,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--account", action="append", default=[], metavar="ALIAS", help="search only this account; repeatable")
     parser.add_argument("--service-name", help="service name to validate the proposed entry under")
     parser.add_argument("--monitor", action="append", default=[], metavar="NAME", help="monitor name to match; repeatable")
+    parser.add_argument("--save", type=Path, metavar="PATH",
+                        help="also write the JSON output here; the path must be under the intake folder next to cases_dir")
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
     return parser
 
@@ -37,6 +41,24 @@ def _validation_problems(entry: dict, service_name: str, config: TriageConfig) -
     except MapError as error:
         return error.errors
     return []
+
+
+def _save_problem(path: Path, config: TriageConfig) -> str | None:
+    """Why `path` may not be written, or None. Only the intake folder, and only over an earlier discovery output."""
+    intake = (config.cases_dir.parent / INTAKE_DIR_NAME).resolve()
+    target = path.expanduser().resolve()
+    if intake not in target.parents:
+        return f"--save must name a file under the intake folder {intake}"
+    if target.is_dir():
+        return f"--save {target} is a folder"
+    if target.exists():
+        try:
+            earlier = json.loads(target.read_text())
+        except (OSError, ValueError):
+            earlier = None
+        if not isinstance(earlier, dict) or set(earlier) != OUTPUT_KEYS:
+            return f"--save {target} exists and is not an earlier discovery output; it was not overwritten"
+    return None
 
 
 def _fail(message: str, code: int) -> int:
@@ -60,6 +82,10 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     unknown = [alias for alias in args.account if alias not in config.accounts]
     if unknown:
         return _fail(f"unknown account {', '.join(unknown)}; configured: {', '.join(config.accounts)}", 2)
+    if args.save:
+        problem = _save_problem(args.save, config)
+        if problem:
+            return _fail(problem, 2)
     try:
         discovery = discover_hostname(
             args.hostname, config, runner or subprocess_runner, args.account,
@@ -69,12 +95,17 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     found = bool(discovery.resources)
     entry = discovery.proposed_entry(args.monitor) if found else None
     problems = _validation_problems(entry, args.service_name or PLACEHOLDER_SERVICE_NAME, config) if entry else []
-    print(json.dumps({
+    text = json.dumps({
         "discovery": discovery.to_dict(),
         "service_name": args.service_name,
         "proposed_entry": entry,
         "validation": problems,
-    }, indent=2))
+    }, indent=2)
+    if args.save:
+        target = args.save.expanduser().resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text + "\n")
+    print(text)
     return 0 if found else 1
 
 

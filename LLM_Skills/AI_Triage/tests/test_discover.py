@@ -284,7 +284,7 @@ def test_proposed_entry_without_account_raises():
 def test_to_dict_shape(config):
     found = discover_hostname(HOSTNAME, config, runner=FakeAws({**dns_answers(), **lb_answers()}))
     data = found.to_dict()
-    assert set(data) == {"hostname", "steps", "account", "region", "resources", "notes"}
+    assert set(data) == {"hostname", "steps", "account", "region", "resources", "notes", "tried"}
     assert set(data["steps"][0]) == {"account", "region", "command", "found"}
     assert isinstance(found.steps[0], Step)
 

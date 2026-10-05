@@ -44,6 +44,7 @@ class Discovery:
     region: str | None
     resources: dict[str, Any]
     notes: list[str]
+    tried: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +54,7 @@ class Discovery:
             "region": self.region,
             "resources": self.resources,
             "notes": self.notes,
+            "tried": self.tried,
         }
 
     def proposed_entry(self, monitors: Sequence[str] = (), today: date | None = None) -> dict[str, Any]:
@@ -127,6 +129,7 @@ class _Walk:
         zone_seen = False
         for account in accounts:
             region = account.regions[0]
+            self.discovery.tried.append(f"Route 53 hosted zones in account {account.alias}")
             zones, command = self.call(account, region, "route53", "list-hosted-zones", ["--max-items", "100"])
             self.note_if_more(zones, "hosted zones", 100)
             zone_list = (zones or {}).get("HostedZones", [])
@@ -177,6 +180,7 @@ class _Walk:
         wanted = normalise_dns(dns_name)
         for account in accounts:
             for region in account.regions:
+                self.discovery.tried.append(f"load balancers in account {account.alias} region {region} named {wanted}")
                 data, command = self.call(account, region, "elbv2", "describe-load-balancers", ["--max-items", "100"])
                 self.note_if_more(data, "load balancers", 100)
                 for balancer in (data or {}).get("LoadBalancers", []):
@@ -221,6 +225,7 @@ class _Walk:
             return
         self.note_cut("EKS clusters", MAX_EKS_CLUSTERS, len(clusters))
         for cluster in clusters[:MAX_EKS_CLUSTERS]:
+            self.discovery.tried.append(f"pods in EKS cluster {cluster.name}")
             result = run_kubectl(
                 ["get", "pods", "-o", "json", "--field-selector", RUNNING_PODS],
                 kubeconfig=self.skill_dir / "config" / KUBECONFIG_NAME, context=cluster.context,

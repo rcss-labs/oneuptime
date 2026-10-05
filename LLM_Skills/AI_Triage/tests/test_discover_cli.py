@@ -11,6 +11,7 @@ from test_discover import HOSTNAME, dns_answers, full_walk, lb_answers
 @pytest.fixture
 def skill_dir(tmp_path, config_data):
     (tmp_path / "config").mkdir()
+    config_data["cases_dir"] = str(tmp_path / "data" / "cases")
     (tmp_path / "config" / "triage-config.yaml").write_text(yaml.safe_dump(config_data))
     return tmp_path
 
@@ -146,3 +147,56 @@ def test_cli_follows_ip_targets_to_the_workload(skill_dir, capsys):
     assert code == 0 and kubectl.calls
     assert data["proposed_entry"]["environments"]["discovered"]["resources"]["eks"]["namespace"] == "payments"
     assert data["validation"] == []
+
+
+# --save
+
+def intake(skill_dir):
+    return skill_dir / "data" / "intake"
+
+
+def test_save_writes_the_output_under_the_intake_folder(skill_dir, capsys):
+    target = intake(skill_dir) / "1234-discovery.json"
+    code, out, _ = run(skill_dir, capsys, FakeAws(full_walk()), "--save", str(target))
+    assert code == 0
+    assert json.loads(target.read_text()) == json.loads(out)
+
+
+def test_save_outside_the_intake_folder_exits_2_and_writes_nothing(skill_dir, capsys):
+    for bad in (skill_dir / "elsewhere.json", intake(skill_dir) / ".." / "escape.json",
+                skill_dir / "data" / "cases" / "x.json"):
+        code, out, err = run(skill_dir, capsys, FakeAws(full_walk()), "--save", str(bad))
+        assert code == 2 and out == "" and "intake" in err
+    assert not (skill_dir / "elsewhere.json").exists() and not (skill_dir / "data" / "escape.json").exists()
+
+
+def test_save_through_a_symbolic_link_out_of_intake_exits_2(skill_dir, capsys):
+    intake(skill_dir).mkdir(parents=True)
+    outside = skill_dir / "outside"
+    outside.mkdir()
+    (intake(skill_dir) / "link").symlink_to(outside)
+    code, _, err = run(skill_dir, capsys, FakeAws(full_walk()), "--save", str(intake(skill_dir) / "link" / "d.json"))
+    assert code == 2 and not (outside / "d.json").exists()
+
+
+def test_save_overwrites_only_an_earlier_discovery_output(skill_dir, capsys):
+    target = intake(skill_dir) / "1234-discovery.json"
+    run(skill_dir, capsys, FakeAws(full_walk()), "--save", str(target))
+    code, _, _ = run(skill_dir, capsys, FakeAws(full_walk()), "--save", str(target))
+    assert code == 0
+    other = intake(skill_dir) / "1234.json"
+    other.write_text('{"title": "an incident"}')
+    code, _, err = run(skill_dir, capsys, FakeAws(full_walk()), "--save", str(other))
+    assert code == 2 and "discovery" in err
+    assert json.loads(other.read_text()) == {"title": "an incident"}
+
+
+def test_nothing_found_still_saves_with_a_null_account_and_what_was_tried(skill_dir, capsys):
+    target = intake(skill_dir) / "9-discovery.json"
+    code, out, _ = run(skill_dir, capsys, FakeAws({}), "--save", str(target))
+    saved = json.loads(target.read_text())
+    assert code == 1 and saved == json.loads(out)
+    assert saved["discovery"]["account"] is None
+    tried = saved["discovery"]["tried"]
+    assert any("Route 53" in line and "prod-main" in line for line in tried)
+    assert any("load balancers" in line and "eu-west-1" in line for line in tried)
