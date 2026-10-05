@@ -68,6 +68,7 @@ Do the steps in order. Work without stopping to ask, except where a step says to
    their domain. Analysts read evidence files and write `findings/<analyst>.json`.
    They run no AWS command. Without subagents, do the domains yourself, one by one.
 6. **Check.** `run findings check --case-dir <case>`, then `run timeline --case-dir <case>`.
+   The check exits 0 even when it refuses findings, so read `rejected` in its output.
    A refused finding is not evidence: have it corrected from the message, or drop it.
 7. **Hypotheses.** Recent changes first, then the request path hop by hop to the
    first failing hop, then a comparison with something that works (the previous
@@ -81,10 +82,14 @@ Do the steps in order. Work without stopping to ask, except where a step says to
    `reference/formats.md` and `templates/report.example.json`): symptoms, causes with
    their supporting and contradicting findings, every hypothesis including rejected
    ones, and actions. An action names the exact resource, its current state, the
-   required state, the change, how to verify it, and how to roll it back.
-9. **Judge.** `run judge run --case-dir <case>`. Read `judgments/summary.json`. Set each
-   label in `report.json` to the label the summary gives, and change nothing else.
-   Any other edit means judging again.
+   required state, the change, how to verify it, and how to roll it back. An
+   unresolved report still lists each cause you tested, with the findings that
+   contradict it; the judging step needs at least one cause.
+9. **Judge.** `run judge run --case-dir <case>`. Read `judgments/summary.json`. In
+   `report.json` set each label to the label the summary gives, copy its `typesafe`
+   value into `coverage.typesafe`, and make `status`, `summary.top_cause`, and the
+   hypothesis results agree with those labels. Change nothing else: any other edit
+   means judging again.
 10. **Render.** `run report validate --case-dir <case>`, fix what it lists, then
     `run report render --case-dir <case>`. It writes `report.md` and `work-order.json`.
 11. **Publish.** `run publish confluence --case-dir <case>` audits the report and
