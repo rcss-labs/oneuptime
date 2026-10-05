@@ -663,3 +663,14 @@ def test_the_new_resource_keys_are_checked_in_a_discovery(cases_config, skill_di
     for bad in ({"alarms": "a"}, {"ecr_repository": ["r"]}, {"opensearch_domain": 3}):
         with pytest.raises(CaseError):
             set_target_from_discovery(case_dir, cases_config, {**ok, "resources": bad})
+
+
+# discovery that found nothing
+
+def test_a_discovery_with_no_account_says_what_to_do(cases_config, skill_dir):
+    case_dir = make_case(FULL_INCIDENT, cases_config, ServiceMap({}), skill_dir)
+    with pytest.raises(CaseError) as caught:
+        set_target_from_discovery(case_dir, cases_config, {"account": None, "region": None, "resources": {}})
+    assert str(caught.value) == ("discovery found no account; ask the engineer which service or account this is, "
+                                 "or write a manual target")
+    assert caught.value.errors == [str(caught.value)]

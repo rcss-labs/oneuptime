@@ -442,7 +442,9 @@ def _discovery_errors(config: TriageConfig, discovery: Any) -> list[str]:
         return ["discovery: must be a JSON object"]
     account, region, resources = discovery.get("account"), discovery.get("region"), discovery.get("resources", {})
     errors = []
-    if not isinstance(account, str) or not isinstance(region, str) or not account or not region:
+    if account is None:
+        errors.append("discovery found no account; ask the engineer which service or account this is, or write a manual target")
+    elif not isinstance(account, str) or not isinstance(region, str) or not account or not region:
         errors.append("discovery: account and region must both be set as text")
     elif account not in config.accounts:
         errors.append(f"discovery: unknown account '{account}'")

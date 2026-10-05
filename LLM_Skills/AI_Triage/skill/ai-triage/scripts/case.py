@@ -31,6 +31,20 @@ from triage.window import WindowError, parse_time
 SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
+MANUAL_TARGET_HELP = """\
+manual target: when discovery finds nothing (it prints "account": null), or the incident names no host, ask the
+engineer which account and resources are involved, write them to a file in this form, and pass it with --discovery:
+
+  {"account": "<account alias from the config>", "region": "<region>",
+   "resources": {"rds": "<db identifier>", "log_groups": ["/ecs/<service>"]}}
+
+The resource keys are those of the service map (ecs_service, ec2_instances, auto_scaling_group, lambda_functions,
+eks, load_balancer, api_gateway, cloudfront_distribution, rds, elasticache, dynamodb_tables, efs, sqs_queues,
+sns_topics, log_groups, opensearch, alarms, ecr_repository, opensearch_domain) and are checked the same way.
+Add what discovery could not find to a discovery file the same way.
+"""
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="case", description=__doc__.split("\n\n")[0])
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
@@ -45,6 +59,8 @@ def _build_parser() -> argparse.ArgumentParser:
     init.add_argument("--incident", type=Path, required=True, help="incident JSON file")
     init.add_argument("--now", help="the current time, ISO 8601 with a timezone; defaults to the clock")
     target = add("target", "choose the target from the service map or from a discovery result")
+    target.epilog = MANUAL_TARGET_HELP
+    target.formatter_class = argparse.RawDescriptionHelpFormatter
     target.add_argument("--case-dir", type=Path, required=True)
     target.add_argument("--service", help="service name in the service map")
     target.add_argument("--environment", help="environment name in the service map")

@@ -387,3 +387,25 @@ def test_init_in_replay_marks_the_case_and_later_commands_refuse_without_it(skil
 def test_a_live_case_refuses_a_session_in_replay(skill_dir, case_dir, tmp_path):
     result = run_with_env(skill_dir, {"AI_TRIAGE_FIXTURES": str(tmp_path)}, "show", "--case-dir", case_dir)
     assert_clean_exit_2(result)
+
+
+def test_a_discovery_that_found_no_account_gets_the_guidance_message(skill_dir, case_dir, tmp_path):
+    discovery = {"hostname": "x.example.com", "account": None, "region": None, "resources": {}, "steps": [], "notes": []}
+    result = run(skill_dir, "target", "--case-dir", case_dir, "--discovery", write(tmp_path, "d.json", discovery))
+    assert_clean_exit_2(result)
+    assert result.stderr.strip() == ("discovery found no account; ask the engineer which service or account this is, "
+                                     "or write a manual target")
+
+
+def test_target_help_documents_the_manual_target_form(skill_dir):
+    text = run(skill_dir, "target", "--help").stdout
+    assert '"account"' in text and '"region"' in text and '"resources"' in text and "--discovery" in text
+    assert "manual" in text.lower()
+    assert '"account": "' in text and "alias" in text
+
+
+def test_a_manual_target_file_in_the_documented_form_is_accepted(skill_dir, case_dir, tmp_path):
+    manual = {"account": "prod-main", "region": "eu-west-1", "resources": {"rds": "checkout-prod-db", "log_groups": ["/ecs/x"]}}
+    result = run(skill_dir, "target", "--case-dir", case_dir, "--discovery", write(tmp_path, "m.json", manual))
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["resources"]["rds"] == "checkout-prod-db"
