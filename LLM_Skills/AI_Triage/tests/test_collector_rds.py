@@ -327,7 +327,7 @@ def test_kept_lines_are_the_five_before_the_onset_the_first_fifteen_from_it_and_
     minutes = [line[11:16] for line in lines]
     expected = [f"10:{m:02d}" for m in range(25, 45)] + [f"{10 + m // 60:02d}:{m % 60:02d}" for m in range(80, 100)]
     assert minutes == expected and len(lines) == 40
-    for part in ("100 error lines inside the window", "40 kept", "60 not kept"):
+    for part in ("100 error lines found in the lines read", "40 kept", "60 not kept"):
         assert part in fact.summary
     assert fact.time == "2026-10-04T10:30:00Z"
     assert by_summary(ctx, "Database log line") == []
@@ -338,7 +338,7 @@ def test_overlapping_choices_are_kept_once_in_time_order(config_data, tmp_path):
     ctx, _ = run(config_data, tmp_path, log_answers(files, minute_lines(0, 60)), incident_start="2026-10-04T10:30:00Z")
     lines, fact = log_lines(ctx)
     assert [line[11:16] for line in lines] == [f"10:{m:02d}" for m in range(25, 60)]
-    assert "60 error lines inside the window" in fact.summary and "35 kept" in fact.summary and "25 not kept" in fact.summary
+    assert "60 error lines found in the lines read" in fact.summary and "35 kept" in fact.summary and "25 not kept" in fact.summary
 
 
 def test_without_an_incident_start_the_onset_is_taken_as_sixty_minutes_after_the_window_start(config_data, tmp_path):
@@ -384,7 +384,7 @@ def test_a_detail_line_stays_with_its_error_line_in_one_kept_entry(config_data, 
     ctx, _ = run(config_data, tmp_path, log_answers([error_file("error/e.log", 60 * 60_000)], data))
     lines, fact = log_lines(ctx)
     assert len(lines) == 3 and "DETAIL:  Key (id)=(<value>)" in lines[2] and lines[2].startswith("2026-10-04 10:02:00")
-    assert "3 error lines inside the window" in fact.summary
+    assert "3 error lines found in the lines read" in fact.summary
 
 
 def test_a_daily_or_undated_file_says_only_its_last_thousand_lines_were_read(config_data, tmp_path):
@@ -426,6 +426,41 @@ def test_any_quote_that_does_not_open_a_kept_identifier_masks_the_rest_of_the_li
     assert _mask_values("ERROR: near \u2018secret value\u2019 x") == "ERROR: near " + REST
 
 
+def test_every_family_of_non_ascii_quotes_masks_the_rest_of_the_line():
+    for opener, closer in UNICODE_QUOTE_PAIRS:
+        masked = _mask_values(f"FATAL:  authentication for user {opener}{PERSON}{closer} failed")
+        assert masked == "FATAL:  authentication for user " + REST, (opener, masked)
+    role = "ada" + "_l"
+    german = f"{POSTGRES_PREFIX}{role}@shop:[1]:FATAL:  Passwort-Authentifizierung f\u00fcr Benutzer \u00bb{role}\u00ab fehlgeschlagen"
+    assert role not in _mask_values(german).split("@shop")[1]
+    assert _mask_values(f"{POSTGRES_PREFIX}x@shop:[1]:ERROR:  user=\u00ab{PERSON}\u00bb,db=x") .endswith("user=<value>,db=x")
+    assert _mask_values("ERROR: x user=") == "ERROR: x user=<value>"
+
+
+def test_engine_codes_in_the_masked_rest_are_appended_after_the_marker():
+    line = "2026-10-04T10:05:00.123456Z 14 [ERROR] [MY-010584] [Repl] Replica SQL for channel '': Error 'Duplicate entry '" \
+        + EMAIL + "' for key 'users.email'' on query. Error_code: MY-001062"
+    assert _mask_values(line) == "2026-10-04T10:05:00.123456Z <n> [ERROR] [MY-010584] [Repl] Replica SQL for channel " + REST + " [MY-001062]"
+    tail = "ERROR: near '" + PERSON + "' SQLSTATE 23505, ORA-00942 and Error: 1105, Severity: 17, State: 2. MY-" + "4111" * 4
+    assert _mask_values(tail) == "ERROR: near " + REST + " [SQLSTATE 23505] [ORA-00942] [Error: 1105, Severity: 17, State: 2]"
+    assert _mask_values("ERROR: relation 'x' and 'y' MY-001062") == "ERROR: relation " + REST + " [MY-001062]"
+
+
+def test_numbers_are_kept_only_in_fixed_contexts():
+    cases = [
+        ("ERROR: Operating system error number 28 in a file operation.", "ERROR: Operating system error number 28 in a file operation."),
+        ("ERROR: failed errno 28 and errno: 13", "ERROR: failed errno 28 and errno: 13"),
+        ("ERROR: errno " + "41114111", "ERROR: errno <n>"),
+        ('ERROR:  relation "t" does not exist at character 15', 'ERROR:  relation "t" does not exist at character 15'),
+        ("ERROR: syntax error at line 12", "ERROR: syntax error at line 12"),
+        ("ERROR:  value too long for type character varying(20)", "ERROR:  value too long for type character varying(20)"),
+        ("ERROR:  numeric field overflow numeric(10,2) and varchar(255)", "ERROR:  numeric field overflow numeric(10,2) and varchar(255)"),
+        ("ERROR: customer 28 and (20) and number 28", "ERROR: customer <n> and (<n>) and number <n>"),
+    ]
+    for line, expected in cases:
+        assert _mask_values(line) == expected, line
+
+
 def test_backslashes_and_escape_strings_mask_the_rest_of_the_line():
     mysql = "ERROR: Duplicate entry 'O" + BACKSLASH + "'Brien-" + "5550" + "199' for key 'users.name'"
     assert _mask_values(mysql) == "ERROR: Duplicate entry " + REST
@@ -449,7 +484,7 @@ def test_the_mysql_statement_form_replica_error_shows_nothing_after_the_first_un
         + first + "', '" + last + "')', Error_code: MY-001062"
     )
     masked = _mask_values(line)
-    assert masked == "2026-10-04T10:05:00.123456Z <n> [ERROR] [MY-010584] [Repl] Replica SQL for channel " + REST
+    assert masked == "2026-10-04T10:05:00.123456Z <n> [ERROR] [MY-010584] [Repl] Replica SQL for channel " + REST + " [MY-001062]"
     nested = "ERROR: Error 'Duplicate entry '" + value + "' for key 'k'' on query"
     assert _mask_values(nested) == "ERROR: Error " + REST
 
@@ -605,7 +640,7 @@ def test_three_realistic_mysql_lines():
     stamp = "2026-10-04T10:05:00.123456Z"
     cases = [
         (f"{stamp} 0 [ERROR] [MY-012592] [InnoDB] Operating system error number 28 in a file operation.",
-         f"{stamp} 0 [ERROR] [MY-012592] [InnoDB] Operating system error number <n> in a file operation."),
+         f"{stamp} 0 [ERROR] [MY-012592] [InnoDB] Operating system error number 28 in a file operation."),
         (f"{stamp} 14 [ERROR] [MY-010584] [Repl] Replica SQL for channel '': Worker 1 failed executing transaction 'ANONYMOUS'"
          f" at source log mysql-bin-changelog.004512, end_log_pos 98213; Could not execute Write_rows event on table shop.users;"
          f" Duplicate entry '{EMAIL}' for key 'users.email', Error_code: 1062",
@@ -645,6 +680,14 @@ def test_the_sql_server_message_line_after_an_error_line_is_kept_and_masked(conf
 
 
 QUOTE_OPENERS = ("'", '"', "`", "$$", "$tag$", "N'", "E'", "X'", "_binary'", "U&'", "''", "\\'")
+# One pair per family of non-ASCII quotes: Unicode initial and final quotes, low quotes, CJK corner brackets,
+# full-width quotation mark and apostrophe, acute and grave accents.
+UNICODE_QUOTE_PAIRS = (
+    ("\u00ab", "\u00bb"), ("\u00bb", "\u00ab"), ("\u2039", "\u203a"), ("\u2018", "\u2019"), ("\u201c", "\u201d"),
+    ("\u201b", "\u2019"), ("\u201f", "\u201d"), ("\u201e", "\u201c"), ("\u201a", "\u2018"), ("\u2e42", "\u201d"),
+    ("\u300c", "\u300d"), ("\u300e", "\u300f"), ("\uff02", "\uff02"), ("\uff07", "\uff07"), ("\u00b4", "\u00b4"),
+    ("\u02ca", "\u02ca"), ("\u02cb", "\u02cb"), ("\uff40", "\uff40"),
+)
 CONTEXT_WORDS = (
     "key", "relation", "table", "column", "api_key", "Can't", "doesn't", "for", "VALUES (", "=", ",", "(", "Error",
     "database", "constraint", "x", "", "''", "'a'", "\"b\"", "`c`", "\\", "key 'users.email'", "O'",
@@ -655,8 +698,11 @@ CONTENT_PIECES = ("", "it''s ", "a\\'b ", "\"", "'", "`", ") ", "$$", "t ", "s "
 def planted_line(rng, marker):
     """A line with the marker inside a quote of a random kind, at a random place, among other quotes and words."""
     before = " ".join(rng.choice(CONTEXT_WORDS) for _ in range(rng.randint(0, 4)))
-    opener = rng.choice(QUOTE_OPENERS)
-    closer = opener[-1] if not opener.startswith("$") else opener
+    if rng.random() < 0.4:
+        opener, closer = rng.choice(UNICODE_QUOTE_PAIRS)
+    else:
+        opener = rng.choice(QUOTE_OPENERS)
+        closer = opener[-1] if not opener.startswith("$") else opener
     inside = rng.choice(CONTENT_PIECES) + marker + rng.choice(CONTENT_PIECES)
     after = " ".join(rng.choice(CONTEXT_WORDS) for _ in range(rng.randint(0, 4)))
     keyword = rng.choice(("", "key ", "relation ", "column ", "table "))

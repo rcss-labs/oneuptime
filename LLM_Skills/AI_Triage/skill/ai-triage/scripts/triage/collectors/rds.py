@@ -3,9 +3,12 @@
 Log lines are masked before they enter a fact, without trying to match quotes. The prefix keeps its timestamp, pid
 and db/app/client values, and never shows a user (user=, role=, usename=, the role in user@database, MySQL
 'user'@'host'). In the message, an apostrophe in an English contraction is part of the word, and an identifier-shaped
-name quoted directly after a word such as relation, constraint or key is kept; from any other quote character, or
-dollar-quote tag, to the end of the line everything is replaced by <rest masked>. Row values on DETAIL lines are
-masked, and every run of two or more digits outside the timestamp, kept names and engine error codes becomes <n>.
+name quoted directly after a word such as relation, constraint or key is kept; from any other quote character
+(ASCII, any Unicode initial or final quote, low quotes, CJK corner brackets, full-width quotes, acute and grave
+accents) or dollar-quote tag, to the end of the line everything is replaced by <rest masked>, followed only by the
+strict engine codes found in that tail. Row values on DETAIL lines are masked, and every run of two or more digits
+becomes <n> apart from the timestamp, kept names, engine codes, and a few fixed contexts (error number, errno, at
+character, line, a type length such as varchar(20)).
 Known limit: unquoted free text that an application raised inside the database (a custom error message with a name
 in it) is shown as written apart from numbers.
 """
@@ -13,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 from triage.collectors import Collector
@@ -46,7 +50,10 @@ FILE_HOUR = re.compile(r"(\d{4}-\d{2}-\d{2})[-.](\d{2})(?!\d)")
 FILE_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 EARLIEST = datetime.min.replace(tzinfo=timezone.utc)
 REST_MASK = "<rest masked>"
-QUOTES = "'\"`\u2018\u2019\u201c\u201d"
+ASCII_QUOTES = "'\"`"
+# Quote characters beyond the Unicode initial and final quotes (Pi, Pf): low quotes, CJK corner brackets, full-width
+# quotation mark and apostrophe, and the acute and grave accents people type as quotes.
+OTHER_QUOTES = frozenset("\u201a\u201e\u2e42\u300c\u300d\u300e\u300f\uff02\uff07\u00b4\u02ca\u02cb\uff40")
 DOLLAR_TAG = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
 CONTRACTION_END = re.compile(r"(t|s|re|ve|ll|d|m)(?![A-Za-z0-9_'\"`$\\])")
 NOT_STEMS = frozenset((
@@ -75,6 +82,15 @@ SQL_SERVER_PREFIX = re.compile(r"\s+(?:spid\d+s?|[A-Z][a-z]+)\s{2,}")
 MESSAGE_MARKER = re.compile(
     r"\b(?:LOG|ERROR|FATAL|PANIC|WARNING|NOTICE|INFO|DEBUG\d?|DETAIL|HINT|CONTEXT|STATEMENT|QUERY|LOCATION):"
     r"|\[(?:ERROR|Warning|Note|System|Information)\]|\bError:|\bERROR \d"
+)
+TAIL_ENGINE_CODE = re.compile(
+    r"(?<![A-Za-z0-9])(?:MY-\d{6}(?!\d)|SQLSTATE[ :=\[]*[0-9A-Z]{5}(?![0-9A-Za-z])|ORA-\d{5}(?!\d))"
+    r"|Error: \d{1,6}, Severity: \d{1,6}, State: \d{1,6}(?!\d)"
+)
+TYPE_WORDS = r"character varying|bit varying|varchar|nvarchar|varbinary|nchar|char|character|numeric|decimal|binary|bit|float|timestamp|time"
+KEPT_NUMBER = re.compile(
+    r"(?i:\berror number \d{1,4}(?!\d)|\berrno:? \d{1,4}(?!\d)|\bat character \d{1,6}(?!\d)|\bline \d{1,6}(?!\d)"
+    rf"|\b(?:{TYPE_WORDS})\(\d{{1,4}}(?:,\s*\d{{1,4}})?\))"
 )
 ENGINE_CODE = re.compile(
     r"MY-\d{6}(?!\d)|SQLSTATE[ :=\[]*[0-9A-Z]{5}(?![0-9A-Za-z])|ERROR \d{4} \([0-9A-Z]{5}\)"
@@ -132,6 +148,12 @@ def _add_events(ctx: CollectContext, name: str, source_type: str, noun: str) -> 
         )
 
 
+def _is_quote(char: str) -> bool:
+    return bool(char) and (
+        char in ASCII_QUOTES or char in OTHER_QUOTES or unicodedata.category(char) in ("Pi", "Pf")
+    )
+
+
 def _is_contraction(text: str, index: int) -> bool:
     """An apostrophe inside an English contraction (Can't, doesn't, it's, we're). Only known stems count, so a literal
     glued to a word (N'...', E'...', _binary'...', select'...') is never taken for one."""
@@ -151,13 +173,13 @@ def _kept_identifier_end(text: str, index: int) -> int | None:
     before any other quote character, its content is identifier-shaped, and whitespace, punctuation or the end follows.
     """
     quote = text[index]
-    if quote not in QUOTES or WORD_BEFORE.search(text[:index]).group(1).lower() not in IDENTIFIER_WORDS:
+    if not _is_quote(quote) or WORD_BEFORE.search(text[:index]).group(1).lower() not in IDENTIFIER_WORDS:
         return None
-    close = next((i for i in range(index + 1, len(text)) if text[i] in QUOTES), None)
+    close = next((i for i in range(index + 1, len(text)) if _is_quote(text[i])), None)
     if close is None or text[close] != quote or not IDENTIFIER.fullmatch(text[index + 1:close]):
         return None
     after = text[close + 1:close + 2]
-    if after and (after.isalnum() or after in "_\\$" or after in QUOTES):
+    if after and (after.isalnum() or after in "_\\$" or _is_quote(after)):
         return None
     return close + 1
 
@@ -172,17 +194,22 @@ def _mask_quotes(text: str) -> tuple[str, list[tuple[int, int]]]:
     index = 0
     while index < len(text):
         char = text[index]
-        is_quote = char in QUOTES or (char == "$" and DOLLAR_TAG.match(text, index))
+        is_quote = _is_quote(char) or (char == "$" and DOLLAR_TAG.match(text, index))
         if not is_quote or (char == "'" and _is_contraction(text, index)):
             out.append(char)
             index += 1
             continue
         end = _kept_identifier_end(text, index)
         if end is None:
-            if kept:
-                return text[:kept[0][0]] + REST_MASK, []
-            out.append(REST_MASK)
-            break
+            start = kept[0][0] if kept else index
+            head = text[:start] + REST_MASK
+            codes = list(dict.fromkeys(m.group(0).rstrip(".") for m in TAIL_ENGINE_CODE.finditer(text, start)))
+            code_spans = []
+            for code in codes:
+                head += " ["
+                code_spans.append((len(head), len(head) + len(code)))
+                head += code + "]"
+            return head, code_spans
         position = len("".join(out))
         out.append(text[index:end])
         kept.append((position, position + end - index))
@@ -225,9 +252,9 @@ def _mask_accounts(text: str) -> str:
         if key.start() < position:
             continue
         start = key.end()
-        if text[start:start + 1] in QUOTES:
-            close = text.find(text[start], start + 1)
-            start = len(text) if close < 0 else close + 1
+        if _is_quote(text[start:start + 1]):
+            close = next((i for i in range(start + 1, len(text)) if _is_quote(text[i])), None)
+            start = len(text) if close is None else close + 1
         stop = ACCOUNT_VALUE_END.search(text, start)
         end = stop.start() if stop else len(text)
         out.append(text[position:key.end()] + MASK)
@@ -237,7 +264,7 @@ def _mask_accounts(text: str) -> str:
 
 def _mask_digits(text: str, kept: list[tuple[int, int]]) -> str:
     """Replace every run of two or more digits, keeping the given spans and engine error codes as written."""
-    spans = sorted(kept + [(m.start(), m.end()) for m in ENGINE_CODE.finditer(text)])
+    spans = sorted(kept + [(m.start(), m.end()) for pattern in (ENGINE_CODE, KEPT_NUMBER) for m in pattern.finditer(text)])
     out, position = [], 0
     for start, end in spans:
         if start < position:
@@ -257,7 +284,7 @@ def _split_prefix(rest: str) -> tuple[str, str]:
     if server:
         return server.group(0), rest[server.end():]
     marker = MESSAGE_MARKER.search(rest)
-    if not marker or any(char in QUOTES for char in rest[:marker.start()]):
+    if not marker or any(_is_quote(char) for char in rest[:marker.start()]):
         return "", rest
     prefix = PREFIX_USER_AT.sub(MASK + "@", _mask_accounts(rest[:marker.start()]))
     return _mask_digits(prefix, [(m.start(), m.end()) for m in KEPT_PREFIX_VALUE.finditer(prefix)]), rest[marker.start():]
@@ -448,7 +475,8 @@ def _add_log_lines(ctx: CollectContext, name: str, onset: datetime) -> None:
     ctx.evidence.add(
         kind=INCIDENT_TIME, resource=f"db/{name}", time=from_onset, command=command,
         summary=(
-            f"{len(entries)} error lines inside the window, {len(kept)} kept, {len(entries) - len(kept)} not kept "
+            f"{len(entries)} error {'line' if len(entries) == 1 else 'lines'} found in the lines read, {len(kept)} kept, "
+            f"{len(entries) - len(kept)} not kept "
             f"(up to {LINES_BEFORE_ONSET} just before the incident start at {format_time(onset)}, the first "
             f"{LINES_FROM_ONSET} from it, and the newest {NEWEST_LINES}); the last {lines_read} lines of each file "
             f"were read, so earlier lines were not seen; files read: {', '.join(read_names)}"
