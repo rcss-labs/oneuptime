@@ -310,12 +310,15 @@ def test_the_listing_tool_reads_a_model_folder(tmp_path):
      "FILE://x.json", "/users/someone/x"],
 )
 def test_no_aws_argument_may_be_a_local_path(path, monkeypatch):
+    # follow-up N3: under an option, a path that could be an AWS name asks; home, ~, relative and file:// still deny
     monkeypatch.setenv("HOME", "/home/eng")
-    for command in (f"aws ecs describe-services --cluster {path} {OK}", f"aws ecs describe-services --cluster={path} {OK}",
-                    f"aws logs filter-log-events --log-group-name g {OK} {path}"):
+    always_deny = path.casefold().startswith(("/home/eng", "~", "./", "../", "file://", "fileb://"))
+    for command in (f"aws ecs describe-services --cluster {path} {OK}", f"aws ecs describe-services --cluster={path} {OK}"):
         result = check_aws(tuple(shlex.split(command)), (), PROFILES)
-        assert result.kind == DENY, command
+        assert result.kind == (DENY if always_deny else ASK), command
         assert "local path" in result.reason
+    positional = f"aws logs filter-log-events --log-group-name g {OK} {path}"
+    assert check_aws(tuple(shlex.split(positional)), (), PROFILES).kind == DENY
 
 
 def test_the_home_directory_counts_as_a_local_path_wherever_it_is(monkeypatch):
@@ -336,11 +339,11 @@ def test_aws_values_that_look_like_paths_stay_allowed(value, monkeypatch):
     # a --log-group-name value may look like a path (adjusted ruling 1b), so even /tmpl... is allowed here
     assert check_aws(command, (), PROFILES).kind == ALLOW
     assert check_aws(("aws", "ecs", "describe-services", "--cluster", value) + command[5:], (), PROFILES).kind == (
-        DENY if value.startswith("/tmp") else ALLOW)
+        ASK if value.startswith("/tmp") else ALLOW)
 
 
-def test_a_tls_bundle_given_as_a_local_path_is_denied():
-    assert verdict(f"aws ecs list-clusters {OK} --ca-bundle /tmp/ca.pem").kind == DENY
+def test_a_tls_bundle_given_as_a_local_path_is_not_allowed():
+    assert verdict(f"aws ecs list-clusters {OK} --ca-bundle /tmp/ca.pem").kind == ASK
 
 
 # ---- fix round 5, ruling 1b adjustment: log groups named after file paths -------
@@ -370,8 +373,6 @@ def test_log_group_and_stream_options_may_hold_file_like_names(command, monkeypa
     [
         f"aws logs filter-log-events --log-group-name g {OK} /var/log/messages",
         f"aws logs filter-log-events /var/log/messages --log-group-name g {OK}",
-        f"aws ssm get-parameter --name /var/log/messages {OK}",
-        f"aws ssm get-parameter --name=/opt/app/logs/out.log {OK}",
         f"aws logs filter-log-events --log-group-name /home/eng/x {OK}",
         f"aws logs filter-log-events --log-group-name=/home/eng/x {OK}",
         f"aws logs filter-log-events --log-group-name ~/x {OK}",
@@ -409,3 +410,52 @@ def test_cli_auto_prompt_is_denied(flag):
 
 def test_turning_auto_prompt_off_is_still_allowed():
     assert verdict(f"aws ecs list-clusters {OK} --no-cli-auto-prompt").kind == ALLOW
+
+
+
+# ---- round 5 minor follow-up, N3: AWS names that look like paths ask ------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"aws ssm get-parameter --name /opt/app/feature-flag {OK}",
+        f"aws ssm get-parameters-by-path --path /var/app {OK}",
+        f"aws iam list-roles --path-prefix /etc/ {OK}",
+        f"aws iam list-users --path-prefix /home/ {OK}",
+        f"aws s3api list-objects-v2 --bucket b --prefix /tmp/x {OK}",
+        f"aws ssm get-parameter --name /var/log/messages {OK}",
+        f"aws ssm get-parameter --name=/opt/app/logs/out.log {OK}",
+    ],
+)
+def test_a_path_like_value_under_another_option_asks(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/eng")
+    result = verdict(command)
+    assert result.kind == ASK
+    assert "looks like a local path" in result.reason and "SSM parameter" in result.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"aws ssm get-parameter {OK} /opt/app/feature-flag",
+        f"aws ssm get-parameter --name /Users/eng/x {OK}",
+        f"aws ssm get-parameter --name=/Users/eng {OK}",
+        f"aws ssm get-parameter --name ~/x {OK}",
+        f"aws ssm get-parameter --name ./x {OK}",
+        f"aws ssm get-parameter --name ../x {OK}",
+        f"aws ssm get-parameter --name file:///opt/x {OK}",
+        f"aws ssm get-parameter --cli-input-json fileb://x {OK}",
+        f"aws ssm get-parameter --name /opt/a /opt/b {OK}",
+    ],
+)
+def test_positionals_home_relative_and_file_forms_still_deny(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/eng")
+    result = verdict(command)
+    assert result.kind == DENY and "local path" in result.reason
+
+
+def test_names_that_do_not_look_like_paths_stay_allowed(monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/eng")
+    for value in ("/app/db-host", "/service-role/", "tmp/2026"):
+        assert verdict(f"aws ssm get-parameter --name {value} {OK}").kind == ALLOW

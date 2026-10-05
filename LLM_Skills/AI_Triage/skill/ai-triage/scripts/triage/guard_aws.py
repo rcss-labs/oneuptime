@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from typing import Sequence
 
-from triage.verdict import ALLOW, ASK, DENY, Verdict
+from triage.verdict import ALLOW, ASK, DENY, Verdict, strictest
 
 VALUE_OPTIONS = frozenset(
     {
@@ -215,37 +215,49 @@ def _is_local_path(value: str) -> bool:
     return lowered.startswith(LOCAL_PATH_PREFIXES)
 
 
-def _exempt_log_name(value: str) -> bool:
+def _always_local(value: str) -> bool:
+    """A value that can only be a local file: under home, relative, ~, or file://."""
     lowered = value.casefold()
     home = os.environ.get("HOME", "").rstrip("/").casefold()
     if home and (lowered == home or lowered.startswith(home + "/")):
-        return False
-    return not lowered.startswith(NEVER_EXEMPT_PREFIXES)
+        return True
+    return lowered.startswith(NEVER_EXEMPT_PREFIXES)
 
 
-def local_path_argument(args: Sequence[str]) -> str | None:
-    """The first argument, or value after =, that names a local path (log group and stream names excepted)."""
-    exempt_next, exempt_list = False, False
+def local_path_argument(args: Sequence[str]) -> tuple[str, str] | None:
+    """The argument that names a local path, with deny or ask (any deny wins over the first ask).
+
+    Deny: a positional, or a value that can only be local (home, ~, ./, ../, file://).
+    Ask: another path-like option value, which may be an AWS name such as an SSM parameter.
+    Allowed: path-like values of the log group and stream options.
+    """
+    option_value_next = log_value_next = log_list = False
+    first_ask: tuple[str, str] | None = None
     for word in args:
-        is_option = word.startswith("-")
-        is_log_value = not is_option and (exempt_next or exempt_list)
-        exempt_next = False
-        if is_option:
+        if word.startswith("-"):
             name, has_value, value = word.partition("=")
-            exempt_list = name in LOG_NAME_LIST_OPTIONS and not has_value
-            exempt_next = name in LOG_NAME_OPTIONS and not has_value
-            if has_value and name in LOG_NAME_OPTIONS | LOG_NAME_LIST_OPTIONS:
-                if _is_local_path(value) and not _exempt_log_name(value):
-                    return word
-                continue
-        if is_log_value:
-            if _is_local_path(word) and not _exempt_log_name(word):
-                return word
+            log_list = name in LOG_NAME_LIST_OPTIONS and not has_value
+            log_value_next = name in LOG_NAME_OPTIONS and not has_value
+            option_value_next = not has_value
+            if has_value and _is_local_path(value):
+                if _always_local(value):
+                    return word, DENY
+                if name not in LOG_NAME_OPTIONS | LOG_NAME_LIST_OPTIONS:
+                    first_ask = first_ask or (word, ASK)
             continue
-        values = [word] + ([word.split("=", 1)[1]] if "=" in word else [])
-        if any(_is_local_path(value) for value in values):
-            return word
-    return None
+        is_option_value, is_log_value = option_value_next or log_list, log_value_next or log_list
+        option_value_next = log_value_next = False
+        for value in [word] + ([word.split("=", 1)[1]] if "=" in word else []):
+            if not _is_local_path(value):
+                continue
+            if _always_local(value):
+                return word, DENY
+            if is_log_value and value == word:
+                continue
+            if not is_option_value:
+                return word, DENY
+            first_ask = first_ask or (word, ASK)
+    return first_ask
 
 
 def _is_auto_prompt(word: str) -> bool:
@@ -264,8 +276,17 @@ def check_aws(argv: tuple[str, ...], env: tuple[str, ...], profiles: frozenset[s
     if "--debug" in argv:
         return Verdict(DENY, "--debug prints request signing details")
     local_path = local_path_argument(argv[1:])
+    if local_path and local_path[1] == DENY:
+        return Verdict(DENY, f"aws arguments may not name a local path ({local_path[0]})")
+    verdict = _check_options_and_operation(argv, profiles)
     if local_path:
-        return Verdict(DENY, f"aws arguments may not name a local path ({local_path})")
+        ask = Verdict(ASK, f"{local_path[0]} looks like a local path; approve it only if it is an AWS name "
+                           "(an SSM parameter name, an IAM path, an S3 prefix)")
+        return strictest([verdict, ask])
+    return verdict
+
+
+def _check_options_and_operation(argv: tuple[str, ...], profiles: frozenset[str]) -> Verdict:
     for option, effect in ASK_OPTIONS.items():
         if any(word == option or word.startswith(option + "=") for word in argv):
             return Verdict(ASK, f"{option} {effect}")
