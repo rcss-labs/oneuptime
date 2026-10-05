@@ -6,9 +6,12 @@ Exit codes: 0 built, 2 usage error or missing case folder.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
+from triage.case import REPLAY_NOTICE, CaseError, check_replay, resolve_case_dir
+from triage.config import ConfigError, default_config_path, load_config
 from triage.timeline import build_timeline, render_rows
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -23,14 +26,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if not args.case_dir.is_dir():
-        print(f"case folder not found: {args.case_dir}", file=sys.stderr)
+    try:
+        case_dir = resolve_case_dir(args.case_dir, load_config(default_config_path(args.skill_dir)))
+        case = json.loads((case_dir / "case.json").read_text())
+        check_replay(case if isinstance(case, dict) else {})
+    except (ConfigError, CaseError) as error:
+        print("; ".join(error.errors), file=sys.stderr)
+        return 2
+    except (OSError, ValueError) as error:
+        print(f"cannot read case.json in {args.case_dir}: {error}", file=sys.stderr)
         return 2
     try:
-        rows = build_timeline(args.case_dir)
+        rows = build_timeline(case_dir)
     except (OSError, ValueError, KeyError) as error:
         print(f"cannot build the timeline from {args.case_dir}: {error!r}", file=sys.stderr)
         return 2
+    if isinstance(case, dict) and case.get("replay"):
+        print(REPLAY_NOTICE)
     print(render_rows(rows))
     return 0
 
