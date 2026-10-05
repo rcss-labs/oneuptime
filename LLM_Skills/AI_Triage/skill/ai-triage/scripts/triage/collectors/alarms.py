@@ -14,6 +14,7 @@ INVALID_TARGET = "InvalidTarget"
 MAX_ALARMS = 50
 MAX_HISTORY_ALARMS = 20
 MAX_HISTORY_ITEMS = "20"
+MAX_HISTORY_PAGES = 5
 # Without --alarm-types the CLI returns metric alarms only.
 ALARM_TYPES = ["--alarm-types", "CompositeAlarm", "MetricAlarm"]
 
@@ -61,31 +62,58 @@ def _states(item: dict) -> tuple[str, str]:
         return "unknown", "unknown"
 
 
-def _add_history(ctx: CollectContext, alarm: dict) -> list[tuple[datetime, str, bool]]:
-    """Add one fact per state change in the window; return when the alarm went into ALARM."""
-    name, is_composite = alarm.get("AlarmName", ""), "AlarmRule" in alarm
+def _read_history(ctx: CollectContext, name: str) -> tuple[list[tuple[datetime, dict]], int, bool]:
+    """State changes in the window, newest first, following the page token up to MAX_HISTORY_PAGES.
+
+    Returns the changes, the pages read, and whether the history was read to its end."""
     start, end = format_time(ctx.window.start), format_time(ctx.window.end)
-    reply = ctx.aws(
-        "cloudwatch", "describe-alarm-history",
-        ["--alarm-name", name, "--history-item-type", "StateUpdate", "--start-date", start, "--end-date", end,
-         "--scan-by", "TimestampAscending", "--max-items", MAX_HISTORY_ITEMS, *ALARM_TYPES],
-    )
-    changes = []
-    for item in (reply or {}).get("AlarmHistoryItems", []):
-        moment = parse_iso(item.get("Timestamp"))
-        if moment is not None and ctx.window.contains(moment):
-            changes.append((moment, item))
-    fired = []
-    for moment, item in sorted(changes, key=lambda pair: pair[0]):
+    changes: list[tuple[datetime, dict]] = []
+    token = None
+    for page in range(1, MAX_HISTORY_PAGES + 1):
+        args = ["--alarm-name", name, "--history-item-type", "StateUpdate", "--start-date", start, "--end-date", end,
+                "--scan-by", "TimestampDescending", "--max-items", MAX_HISTORY_ITEMS, *ALARM_TYPES]
+        if token:
+            args += ["--starting-token", token]
+        reply = ctx.aws("cloudwatch", "describe-alarm-history", args)
+        if reply is None:
+            return changes, page - 1, False
+        for item in reply.get("AlarmHistoryItems", []):
+            moment = parse_iso(item.get("Timestamp"))
+            if moment is not None and ctx.window.contains(moment):
+                changes.append((moment, item))
+        token = reply.get("NextToken")
+        if not token:
+            return changes, page, True
+    return changes, MAX_HISTORY_PAGES, False
+
+
+def _add_history(ctx: CollectContext, alarm: dict) -> tuple[list[tuple[datetime, str, bool]], bool]:
+    """Add facts for the newest state changes and the earliest change into ALARM.
+
+    Returns the earliest time the alarm went into ALARM (empty when none was seen) and whether
+    the history was read to its end, so that "no earlier change" is known to be true."""
+    name, is_composite = alarm.get("AlarmName", ""), "AlarmRule" in alarm
+    changes, pages, complete = _read_history(ctx, name)
+    command = ctx.last_command
+    changes.sort(key=lambda pair: pair[0])
+    alarm_changes = [pair for pair in changes if _states(pair[1])[1] == "ALARM"]
+    shown = changes[-int(MAX_HISTORY_ITEMS):]
+    if alarm_changes and alarm_changes[0] not in shown:
+        shown = [alarm_changes[0], *shown]
+    for moment, item in shown:
         old, new = _states(item)
         ctx.evidence.add(
-            kind=INCIDENT_TIME, resource=f"alarm/{name}", time=moment, command=ctx.last_command,
+            kind=INCIDENT_TIME, resource=f"alarm/{name}", time=moment, command=command,
             summary=f"Alarm {name} changed from {old} to {new}",
             excerpt=item.get("HistorySummary") or "",
         )
-        if new == "ALARM":
-            fired.append((moment, name, is_composite))
-    return fired
+    if not complete or len(shown) < len(changes):
+        said = f"Alarm {name}: read {pages} {'page' if pages == 1 else 'pages'} of state changes, {len(changes)} in the window; "
+        said += f"showing the newest {int(MAX_HISTORY_ITEMS)}" + (" and the earliest change into ALARM" if len(shown) > int(MAX_HISTORY_ITEMS) else "")
+        said += "" if complete else f"; the history was cut after {pages} pages and older changes exist"
+        ctx.evidence.add(kind=DERIVED, resource=f"alarm/{name}", summary=said, command=command)
+    fired = [(alarm_changes[0][0], name, is_composite)] if alarm_changes else []
+    return fired, complete
 
 
 def _first_alarm_text(fired: list[tuple[datetime, str, bool]]) -> str | None:
@@ -122,8 +150,12 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     # Metric alarms first: they are the ones the "first alarm" fact is about.
     ordered = sorted((alarm for alarm, _ in alarms), key=lambda alarm: "AlarmRule" in alarm)
     fired: list[tuple[datetime, str, bool]] = []
+    unsure = [alarm.get("AlarmName", "") for alarm in ordered[MAX_HISTORY_ALARMS:]]
     for alarm in ordered[:MAX_HISTORY_ALARMS]:
-        fired += _add_history(ctx, alarm)
+        found, complete = _add_history(ctx, alarm)
+        fired += found
+        if not complete:
+            unsure.append(alarm.get("AlarmName", ""))
     if len(ordered) > MAX_HISTORY_ALARMS:
         ctx.evidence.add(
             kind=DERIVED, resource="alarms",
@@ -132,7 +164,13 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
                 f"{len(ordered) - MAX_HISTORY_ALARMS} were left out"
             ),
         )
-    text = _first_alarm_text(fired)
+    if unsure:
+        text = (
+            "Which alarm went into ALARM first cannot be named: the history was cut or not read for "
+            f"{', '.join(unsure)}, so earlier changes may exist"
+        )
+    else:
+        text = _first_alarm_text(fired)
     if text:
         ctx.evidence.add(kind=DERIVED, resource="alarms", summary=text)
 

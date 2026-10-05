@@ -164,19 +164,19 @@ def test_composite_alarm_by_prefix(config_data, tmp_path):
     assert len([f for f in ctx.evidence.facts if f.kind == "current"]) == 2
 
 
-def test_history_is_requested_oldest_first(config_data, tmp_path):
+def test_history_is_requested_newest_first(config_data, tmp_path):
     answers = {"cloudwatch describe-alarms": {"MetricAlarms": [alarm("cpu-high")]},
                "cloudwatch describe-alarm-history": {"AlarmHistoryItems": [history(IN_WINDOW, "OK", "ALARM")]}}
     ctx, aws = run(config_data, tmp_path, answers, {"alarm_names": "cpu-high"})
     call = aws.called("cloudwatch", "describe-alarm-history")[0]
-    assert call[call.index("--scan-by") + 1] == "TimestampAscending"
+    assert call[call.index("--scan-by") + 1] == "TimestampDescending"
     assert "CompositeAlarm" in call
     first = [f for f in ctx.evidence.facts if f.kind == "derived"]
     assert "cpu-high" in first[0].summary and "2026-10-04T10:42:10Z" in first[0].summary
     assert_read_only(ctx, aws)
 
 
-def test_oldest_first_history_gives_earliest_alarm_time(config_data, tmp_path):
+def test_history_in_any_order_gives_earliest_alarm_time(config_data, tmp_path):
     items = [history("2026-10-04T10:30:00+00:00", "OK", "ALARM"), history("2026-10-04T10:31:00+00:00", "ALARM", "OK"),
              history("2026-10-04T10:50:00+00:00", "OK", "ALARM")]
     answers = {"cloudwatch describe-alarms": {"MetricAlarms": [alarm("cpu-high")]},
@@ -257,3 +257,88 @@ def test_names_with_only_commas_make_no_query(config_data, tmp_path):
     ctx, aws = run(config_data, tmp_path, {}, {"alarm_names": " , ,"})
     assert not aws.calls
     assert ctx.evidence.errors and ctx.evidence.errors[0]["code"] == "InvalidTarget"
+
+
+def stamp(step):
+    """Step n is 50 seconds after 10:00:00 UTC, so 130 steps still fit inside the two hour window."""
+    seconds = step * 50
+    return f"2026-10-04T{10 + seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}+00:00"
+
+
+def zulu(step):
+    return stamp(step).replace("+00:00", "Z")
+
+
+def paged_history(config_data, tmp_path, alarms_reply, changes_by_name, targets):
+    """changes_by_name: alarm -> list of (minute, old, new). The fake pages newest first by --max-items
+    and --starting-token, like the CLI."""
+    ctx, aws, _ = make_context(config_data, tmp_path, {"cloudwatch describe-alarms": alarms_reply}, collector="alarms")
+    original = aws.__call__
+
+    def pager(argv, timeout):
+        if argv[1:3] != ["cloudwatch", "describe-alarm-history"]:
+            return original(argv, timeout)
+        aws.calls.append(argv)
+        name = argv[argv.index("--alarm-name") + 1]
+        size = int(argv[argv.index("--max-items") + 1])
+        begin = int(argv[argv.index("--starting-token") + 1]) if "--starting-token" in argv else 0
+        ordered = sorted(changes_by_name.get(name, []), reverse=True)
+        page = [history(stamp(m), old, new) for m, old, new in ordered[begin:begin + size]]
+        reply = {"AlarmHistoryItems": page}
+        if begin + size < len(ordered):
+            reply["NextToken"] = str(begin + size)
+        return 0, json.dumps(reply), ""
+
+    ctx.runner = pager
+    COLLECTOR.run(ctx, targets)
+    return ctx, aws
+
+
+def flapping(count, first_minute=1):
+    """count changes, one per minute, alternating OK->ALARM and ALARM->OK, starting with ALARM."""
+    return [(first_minute + i, "OK", "ALARM") if i % 2 == 0 else (first_minute + i, "ALARM", "OK") for i in range(count)]
+
+
+def derived_texts(ctx):
+    return [f.summary for f in ctx.evidence.facts if f.kind == "derived"]
+
+
+def test_busy_alarm_shows_newest_changes_finds_the_earliest_alarm_and_says_what_was_cut(config_data, tmp_path):
+    changes = flapping(60)
+    ctx, aws = paged_history(config_data, tmp_path, {"MetricAlarms": [alarm("busy")]}, {"busy": changes}, {"alarm_names": "busy"})
+    calls = aws.called("cloudwatch", "describe-alarm-history")
+    assert len(calls) == 3
+    assert [c[c.index("--starting-token") + 1] for c in calls[1:]] == ["20", "40"]
+    shown = [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+    times = [f.time for f in shown]
+    assert zulu(60) in times  # the newest change
+    assert zulu(1) in times  # the earliest change into ALARM is kept
+    assert zulu(5) not in times
+    assert len(shown) == 21
+    first = [t for t in derived_texts(ctx) if t.startswith("The first alarm")]
+    assert len(first) == 1 and "busy" in first[0] and zulu(1) in first[0]
+    note = [t for t in derived_texts(ctx) if "pages" in t]
+    assert len(note) == 1 and "3 pages" in note[0] and "60" in note[0]
+    assert "older changes exist" not in note[0]
+
+
+def test_the_busy_alarm_that_fired_first_is_named_over_a_quiet_one(config_data, tmp_path):
+    reply = {"MetricAlarms": [alarm("quiet"), alarm("busy")]}
+    changes = {"busy": flapping(60, first_minute=2), "quiet": [(30, "OK", "ALARM")]}
+    ctx, _ = paged_history(config_data, tmp_path, reply, changes, {"alarm_names": "quiet,busy"})
+    first = [t for t in derived_texts(ctx) if t.startswith("The first alarm")]
+    assert len(first) == 1 and f"was busy at {zulu(2)}" in first[0]
+
+
+def test_history_still_cut_after_five_pages_does_not_name_the_first_alarm(config_data, tmp_path):
+    reply = {"MetricAlarms": [alarm("endless"), alarm("calm")]}
+    changes = {"endless": flapping(130), "calm": [(30, "OK", "ALARM")]}
+    ctx, aws = paged_history(config_data, tmp_path, reply, changes, {"alarm_names": "endless,calm"})
+    calls = [c for c in aws.called("cloudwatch", "describe-alarm-history") if "endless" in c]
+    assert len(calls) == 5
+    texts = derived_texts(ctx)
+    note = [t for t in texts if "endless" in t and "5 pages" in t]
+    assert len(note) == 1 and "older changes exist" in note[0]
+    assert not [t for t in texts if t.startswith("The first alarm to go into ALARM in the window was")]
+    cut = [t for t in texts if "cannot be named" in t]
+    assert len(cut) == 1 and "endless" in cut[0] and "calm" not in cut[0].split("cut")[-1]
