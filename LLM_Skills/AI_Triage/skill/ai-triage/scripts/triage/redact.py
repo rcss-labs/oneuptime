@@ -1544,6 +1544,63 @@ def _table_spans(text: str) -> list[Span]:
     return [span for span in spans if _usable(text, span)]
 
 
+# --- values right after a secret word in prose (final review C2) ---------------------------
+
+# key, api key, access key, token, secret, credential(s), passphrase, lease (and compounds such as
+# "gateway key" or "client secret"), joined to the value by a space, ":", "=", "is"/"was", or quotes.
+SECRET_WORD_VALUE_RE = re.compile(
+    r"""(?i)(?<![\w:/.-])(?:key|token|secret|credentials?|passphrase|lease)(?![\w-])"""
+    r"""(?:["']?[ \t]*[:=][ \t]*["']?|[ \t]+(?:(?:is|was)[ \t]+)?["']?|["'])"""
+    r"""(?P<value>[^\s"'`,;)\]}<>{\[|]+)"""
+)
+_WORD_PART_SEPARATORS_RE = re.compile(r"[-_./:@]+")
+MIN_MASKED_AFTER_WORD = 8      # shorter values after a secret word stay readable
+MAX_PLAIN_WORD = 15            # a single letter-only word up to this length reads as English
+MAX_PLAIN_NUMBER = 14          # dates, counts and epoch seconds
+
+
+def _readable_after_secret_word(value: str) -> bool:
+    """What may follow "key", "token" or "secret" and still be shown: short values, status words,
+    ARNs, plain paths and names made of letter-only parts (alias/payments-prod, customer_id,
+    sessions-001), single English-like words, and numbers up to 14 digits. Everything else - hex,
+    UUIDs, mixed letters and digits, long letter runs, punctuated values - is masked."""
+    if len(value) < MIN_MASKED_AFTER_WORD or PLACEHOLDER_RE.search(value):
+        return True
+    if value.lower().startswith("arn:") or _harmless_secret_value(value):
+        return True
+    if value.isdigit():
+        return len(value) <= MAX_PLAIN_NUMBER
+    if value.isalpha():
+        return len(value) <= MAX_PLAIN_WORD and (value.islower() or value.isupper() or value.istitle()
+                                                 or _plain_piece(value))
+    parts = [part for part in _WORD_PART_SEPARATORS_RE.split(value) if part]
+    if len(parts) < 2 or not _WORD_PART_SEPARATORS_RE.search(value):
+        return False
+    return all(
+        (part.isalpha() and len(part) <= MAX_PLAIN_WORD and (part.islower() or part.isupper() or part.istitle()))
+        or (part.isdigit() and len(part) <= 4)
+        for part in parts
+    )
+
+
+def _secret_word_value_spans(text: str) -> list[Span]:
+    """The value right after a secret word in prose, whatever its shape (unless it is readable)."""
+    arns = [m.span() for m in _ARN_RE.finditer(text)] if "arn:" in text else []
+    arn_starts = [start for start, _ in arns]
+    spans = []
+    for match in SECRET_WORD_VALUE_RE.finditer(text):
+        _tick()
+        index = bisect.bisect_right(arn_starts, match.start()) - 1
+        if index >= 0 and match.start() < arns[index][1]:
+            continue  # "secret" inside an ARN
+        start, end = match.span("value")
+        while end > start and text[end - 1] in ".:!?":
+            end -= 1
+        if end > start and not _readable_after_secret_word(text[start:end]):
+            spans.append((start, end))
+    return [span for span in spans if _usable(text, span)]
+
+
 # --- schemeless userinfo and Windows shapes ------------------------------------------------
 
 # user:password@host( / user:password@host:port / user/password@host, with no scheme in front.
@@ -1620,6 +1677,7 @@ SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("auth_header", _auth_spans),
     ("secret_key_value", _key_value_spans),
     ("secret_name_value", _name_value_spans),
+    ("secret_after_word", _secret_word_value_spans),
     ("cli_shorthand", _shorthand_spans),
     ("secret_loose_name_value", lambda text: _merge(_loose_name_value_spans(text) + _yaml_item_spans(text))),
     ("secret_sentence", _sentence_spans),

@@ -320,6 +320,14 @@ LEAKS = [
     ("license-env", "NEW_RELIC_LICENSE=" + PWP, PWP),
     ("prose-db-password", "the db password: " + PWP, PWP),
     ("prose-admin-token", "new admin token: " + PWP, PWP),
+    # final review C2: values after secret words, whatever their shape
+    ("c2-gateway-key-hex", "Vendor issued temporary gateway key " + _hex(70, 32) + ".", _hex(70, 32)),
+    ("c2-token-uuid", "notify failed; token 3f2b8c1e-" + "9a4d-4c7e-b1f2-" + "0d9e8a7b6c5f", "0d9e8a7b6c5f"),
+    ("c2-api-key-lower", "api key: " + "qwhzrtvbnmkplsdfjgxc", "qwhzrtvbnmkplsdfjgxc"),
+    ("c2-key-equals-mixed", "key=" + _random(71, 20), _random(71, 20)),
+    ("c2-secret-rejected", "secret " + _random(72, 20) + " was rejected", _random(72, 20)),
+    ("c2-credential-passphrase", "gateway rejected credential " + "Winter" + "2026!" + "Kassa#9", "Kassa#9"),
+    ("c2-lease", "vault lease " + _hex(73, 32) + " expired", _hex(73, 32)),
     # follow-up after round 5
     ("go-mysql-dsn", "dial failed: app:" + PWP + "@tcp(db.internal:3306)/orders", PWP),
     ("oracle-bare-host", "sqlplus -s scott/" + PWP + "@//orcldb:1521/ORCL", PWP),
@@ -435,6 +443,11 @@ HARMLESS = [
     ("elasticache-failover", "Event on sessions-001: Failover from master node sessions-001 to replica"),
     ("target-unhealthy", "Target on sessions: unhealthy (Target.FailedHealthChecks)"),
     ("secret-rotation-summary", "Secret auth-service: rotation enabled, last rotated 40 days ago"),
+    ("c2-kms-alias", "KMS key alias/payments-prod is disabled"),
+    ("c2-secret-arn", "secret arn:aws:secretsmanager:eu-west-1:111111111111:secret:db-AbCdEf rotated"),
+    ("c2-partition-key", "partition key customer_id is hot"),
+    ("c2-cache-key-prefix", "cache key prefix sessions- evicted"),
+    ("c2-token-expired", "token expired at 10:00"),
     # round 5 ruling 6: labelled commits and AWS request ids
     ("git-commit", "deployed commit " + _hex(60, 40) + " to prod"),
     ("image-tag-sha", "image tag " + _hex(61, 40)),

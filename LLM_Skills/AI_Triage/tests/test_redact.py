@@ -247,8 +247,9 @@ def test_audit_finds_each_category_with_location_and_no_value():
     hits = audit_text(text)
     assert all(isinstance(hit, AuditHit) for hit in hits)
     by_category = {hit.category: hit for hit in hits}
+    # "key AKIA..." is also a value right after a secret word (final review C2)
     assert set(by_category) == {"url_credential", "auth_header", "secret_key_value",
-                                "aws_access_key", "jwt", "private_key"}
+                                "aws_access_key", "jwt", "private_key", "secret_after_word"}
     url_line = text.splitlines()[1]
     assert (by_category["url_credential"].line, by_category["url_credential"].column) == (
         2,
@@ -2272,4 +2273,95 @@ def test_unambiguous_secret_words_after_ordinary_words_are_masked(source):
     ],
 )
 def test_status_values_and_resource_names_stay_readable(source):
+    assert Redactor().text(source) == source
+
+
+# ---------------------------------------------------------------------------
+# Final review C2: a value directly after a secret word is masked whatever its shape
+# ---------------------------------------------------------------------------
+import string as _c2_string
+import uuid as _c2_uuid
+
+_C2_RNG = _random.Random(20261006)
+
+
+def _c2_hex(n):
+    return "".join(_C2_RNG.choice("0123456789abcdef") for _ in range(n))
+
+
+def _c2_from(alphabet, n):
+    return "".join(_C2_RNG.choice(alphabet) for _ in range(n))
+
+
+C2_SHAPES = {
+    "hex32": lambda: _c2_hex(32),
+    "uuid": lambda: str(_c2_uuid.UUID(int=_C2_RNG.getrandbits(128), version=4)),
+    "lower20": lambda: _c2_from(_c2_string.ascii_lowercase, 20),
+    "mixed20": lambda: _c2_from(_c2_string.ascii_letters + _c2_string.digits, 20),
+    "lowalnum20": lambda: _c2_from(_c2_string.ascii_lowercase + _c2_string.digits, 20),
+    "lowalnum32": lambda: _c2_from(_c2_string.ascii_lowercase + _c2_string.digits, 32),
+}
+C2_TEMPLATES = [
+    "Vendor issued temporary gateway key {v}.",
+    "notify failed; token {v}",
+    "api key: {v}",
+    "key={v}",
+    "secret {v} was rejected",
+    "X-Api-Key: {v}",
+    "api_key={v}",
+    "token={v}",
+    "client_secret: {v}",
+    "gateway rejected credential {v}",
+    "vault lease {v} expired",
+    "the access key is {v}",
+    "passphrase '{v}'",
+    "credentials: {v}",
+]
+C2_SAMPLES = 60
+
+
+def c2_survival(shape: str, template: str) -> float:
+    survived = 0
+    for _ in range(C2_SAMPLES):
+        value = C2_SHAPES[shape]()
+        if value in Redactor().text(template.format(v=value)):
+            survived += 1
+    return survived / C2_SAMPLES
+
+
+@pytest.mark.parametrize("template", C2_TEMPLATES)
+@pytest.mark.parametrize("shape", sorted(C2_SHAPES))
+def test_values_after_secret_words_never_survive(shape, template):
+    assert c2_survival(shape, template) == 0
+
+
+@pytest.mark.parametrize("template", ["gateway rejected credential {v}", "gateway refused key {v}", "token {v}"])
+def test_passphrase_like_value_after_a_secret_word_is_masked(template):
+    value = "Winter" + "2026" + "!" + "Kassa" + "#9"
+    assert value not in Redactor().text(template.format(v=value))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "KMS key alias/payments-prod is disabled",
+        "secret arn:aws:secretsmanager:eu-west-1:111111111111:secret:db-AbCdEf rotated",
+        "partition key customer_id is hot",
+        "cache key prefix sessions- evicted",
+        "token expired at 10:00",
+        "secret rotation succeeded",
+        "key rotation enabled",
+        "lease renewed for 3600 seconds",
+        "credentials loaded from IMDS",
+        "Secret prod-db: rotation enabled, last rotated 40 days ago",
+        "Event on sessions-001: Failover from master node sessions-001 to replica",
+        "key: KMS",
+        "the key name is payments",
+        'MountVolume.SetUp failed for volume "db-creds" : secret "db-creds" not found',
+        "key=abc",
+        "S3 key logs/2026/10/04/app.log uploaded",
+        "token count 512",
+    ],
+)
+def test_readable_values_after_secret_words_are_kept(source):
     assert Redactor().text(source) == source
