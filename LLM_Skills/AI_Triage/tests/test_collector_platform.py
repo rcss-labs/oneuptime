@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from fakes import SSO_EXPIRED_ERROR, access_denied
@@ -20,7 +22,11 @@ def health_event(service="EC2", start="2026-10-04T10:30:00+00:00", status="open"
 def quota(name, value, usage=True):
     body = {"QuotaName": name, "QuotaCode": "L-1", "Value": value}
     if usage:
-        body["UsageMetric"] = {"MetricNamespace": "AWS/Usage", "MetricName": "ResourceCount"}
+        body["UsageMetric"] = {
+            "MetricNamespace": "AWS/Usage", "MetricName": "ResourceCount",
+            "MetricDimensions": {"Service": "Lambda", "Type": "Resource", "Resource": name},
+            "MetricStatisticRecommendation": "Maximum",
+        }
     return body
 
 
@@ -127,14 +133,72 @@ def test_default_service_codes_one_call_each(config_data, tmp_path):
     assert all(c[c.index("--max-items") + 1] == "50" for c in calls)
 
 
-def test_quota_fact_lists_only_quotas_with_a_usage_metric_capped_at_ten(config_data, tmp_path):
-    quotas = [quota(f"Quota {n}", n) for n in range(15)] + [quota("No usage", 5, usage=False)]
-    ctx, aws, kube = run(config_data, tmp_path, {"service-quotas list-service-quotas": {"Quotas": quotas}},
-                         {"service_codes": "lambda"})
+def usage_reply(*peaks):
+    """A get-metric-data answer with one result per peak, each peaking at 10:40."""
+    return {"MetricDataResults": [
+        {"Id": f"m{n}", "Timestamps": ["2026-10-04T10:30:00+00:00", "2026-10-04T10:40:00+00:00"],
+         "Values": [peak / 2, peak]} if peak is not None else {"Id": f"m{n}", "Timestamps": [], "Values": []}
+        for n, peak in enumerate(peaks)
+    ]}
+
+
+def quota_answers(quotas, usage):
+    return {"service-quotas list-service-quotas": {"Quotas": quotas}, "cloudwatch get-metric-data": usage}
+
+
+def test_quota_fact_states_limit_peak_and_share(config_data, tmp_path):
+    quotas = [quota("Concurrent executions", 1000), quota("Function count", 200), quota("No usage", 5, usage=False)]
+    ctx, aws, kube = run(config_data, tmp_path, quota_answers(quotas, usage_reply(250, 20)), {"service_codes": "lambda"})
     facts = [f for f in ctx.evidence.facts if f.kind == "current"]
     assert len(facts) == 1
-    assert "lambda" in facts[0].summary and "Quota 9 = 9" in facts[0].summary
-    assert "Quota 10" not in facts[0].summary and "No usage" not in facts[0].summary
+    assert "lambda" in facts[0].summary
+    assert "Concurrent executions: limit 1000, peak 250 (25% of the limit)" in facts[0].summary
+    assert "Function count: limit 200, peak 20 (10% of the limit)" in facts[0].summary
+    assert "No usage" not in facts[0].summary
+    assert not [f for f in ctx.evidence.facts if "of its limit" in f.summary]
+    call = aws.called("cloudwatch", "get-metric-data")[0]
+    queries = json.loads(call[call.index("--metric-data-queries") + 1])
+    metric = queries[0]["MetricStat"]
+    assert metric["Stat"] == "Maximum" and metric["Metric"]["Namespace"] == "AWS/Usage"
+    assert metric["Metric"]["MetricName"] == "ResourceCount"
+    assert {"Name": "Service", "Value": "Lambda"} in metric["Metric"]["Dimensions"]
+    assert len(queries) == 2
+    assert_read_only(ctx, aws, kube)
+
+
+def test_quota_at_eighty_percent_gets_its_own_fact_with_the_peak_time(config_data, tmp_path):
+    quotas = [quota("Concurrent executions", 1000), quota("Function count", 200)]
+    ctx, _, _ = run(config_data, tmp_path, quota_answers(quotas, usage_reply(800, 20)), {"service_codes": "lambda"})
+    near = [f for f in ctx.evidence.facts if "of its limit" in f.summary]
+    assert len(near) == 1
+    assert near[0].kind == "incident_time" and near[0].time == "2026-10-04T10:40:00Z"
+    assert "Concurrent executions" in near[0].summary and "80% of its limit" in near[0].summary
+    assert "peak 800 of 1000" in near[0].summary
+
+
+def test_unreadable_usage_keeps_the_limit(config_data, tmp_path):
+    quotas = [quota("Concurrent executions", 1000)]
+    answers = quota_answers(quotas, access_denied("GetMetricData"))
+    ctx, _, _ = run(config_data, tmp_path, answers, {"service_codes": "lambda"})
+    fact = next(f for f in ctx.evidence.facts if f.kind == "current")
+    assert "Concurrent executions: limit 1000, usage could not be read" in fact.summary
+    assert [e["code"] for e in ctx.evidence.errors].count("AccessDeniedException") >= 1
+
+
+def test_quota_without_datapoints_says_usage_could_not_be_read(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, quota_answers([quota("Q", 10)], usage_reply(None)), {"service_codes": "lambda"})
+    assert "Q: limit 10, usage could not be read" in next(f for f in ctx.evidence.facts if f.kind == "current").summary
+
+
+def test_more_than_ten_tracked_quotas_say_how_many_were_not_read(config_data, tmp_path):
+    quotas = [quota(f"Quota {n}", 100) for n in range(15)] + [quota("No usage", 5, usage=False)]
+    ctx, aws, kube = run(config_data, tmp_path, quota_answers(quotas, usage_reply(*range(1, 11))),
+                         {"service_codes": "lambda"})
+    fact = next(f for f in ctx.evidence.facts if f.kind == "current")
+    assert "Quota 9:" in fact.summary and "Quota 10:" not in fact.summary
+    assert "5 more tracked quotas were not read" in fact.summary
+    call = aws.called("cloudwatch", "get-metric-data")[0]
+    assert len(json.loads(call[call.index("--metric-data-queries") + 1])) == 10
     assert len(aws.called("service-quotas", "list-service-quotas")) == 1
     assert_read_only(ctx, aws, kube)
 
