@@ -127,10 +127,7 @@ def test_the_top_cause_does_not_name_a_distractor(run):
     top = next(cause for cause in report["causes"] if cause["id"] == report["summary"]["top_cause"])
     for word in run["expected"]["not_the_cause"]:
         assert word.lower() not in top["statement"].lower(), word
-    if run["name"] == "ecs-bad-deploy":
-        assert top["label"] == "confirmed"
-    else:  # see test_an_expired_certificate_can_be_a_confirmed_cause
-        assert top["label"] in ("probable", "confirmed")
+    assert top["label"] == "confirmed"
 
 
 def test_the_work_order_validates(run):
@@ -162,17 +159,20 @@ def test_replay_never_leaves_the_scenario_folder_or_the_case_folder(run):
         assert name in names
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Defect in triage/collectors/edge.py: the certificate expiry is a derived fact without a time ('Certificate ... "
-    "expired at 2026-10-04T12:00:00Z, inside the incident window'), so no finding can cite it as incident_time "
-    "evidence, the timing gate of the judgments always fails, and an expired certificate can never be a confirmed "
-    "cause (so its mitigation is never recommended)."))
-def test_an_expired_certificate_can_be_a_confirmed_cause(cert_run):
+def test_an_expired_certificate_is_a_confirmed_cause_with_a_recommended_mitigation(cert_run):
     report = read_json(cert_run["case_dir"] / "report.json")
     summary = read_json(cert_run["case_dir"] / "judgments" / "summary.json")
     assert summary["causes"]["C1"]["gates"]["timing"] is True
     assert report["causes"][0]["label"] == "confirmed"
     assert report["actions"][0]["label"] == "recommended"
+
+
+def test_the_report_names_both_database_hosts_of_the_mismatch(ecs_run):
+    report = (ecs_run["case_dir"] / "report.md").read_text()
+    assert "checkout-prod-db.cluster-abc.eu-west-1.rds.example.com" in report
+    assert "checkout-db.internal.example.com" in report
+    checked = read_json(ecs_run["case_dir"] / "findings" / "checked.json")
+    assert "data-4" in {item["id"] for item in checked["valid"]}
 
 
 # --- the secret ----------------------------------------------------------------------------

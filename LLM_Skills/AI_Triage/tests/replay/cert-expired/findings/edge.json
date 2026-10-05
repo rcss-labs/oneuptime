@@ -18,7 +18,7 @@
         "edge-prod-main-eu-west-1:edge-0008"
       ],
       "excerpt": "expired at 2026-10-04T12:00:00Z, inside the incident window",
-      "provenance": "inferred",
+      "provenance": "incident_time",
       "confidence": "high",
       "time": "2026-10-04T12:00:00Z"
     },
