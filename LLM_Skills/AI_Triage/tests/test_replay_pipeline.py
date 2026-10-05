@@ -519,11 +519,6 @@ def test_the_canned_eks_draft_names_no_trigger_that_no_evidence_holds():
     assert "marketing" not in text
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Defect in triage/audit_scan.py: the report prints the command of a cited fact, and the skill's own CloudTrail "
-    "lookup by event source ('AttributeKey=EventSource,AttributeValue=eks.amazonaws.com') is read as a secret: "
-    "'AttributeKey' ends in the secret word 'key', and the 17-character host name two tokens later is flagged "
-    "'secret_word_value', so publish audit refuses an ordinary report that cites a change-lookup absence fact."))
 def test_a_report_that_cites_a_change_lookup_by_event_source_audits_clean(tmp_path):
     folder = REPLAY_DIR / "eks-oom-discovered"
     case = start_case(folder, tmp_path)

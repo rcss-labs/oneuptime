@@ -531,6 +531,12 @@ _AFTER_WORD_RE = re.compile(r"<[A-Z][A-Z0-9_]*(?:-[A-Z0-9_]+)*>|[^\s|,;\"'`()\[\
 MIN_VALUE_AFTER_WORD = 16
 
 
+# CloudTrail lookup-attributes: "AttributeKey=EventSource" names what to look up and holds no secret
+_LOOKUP_ATTRIBUTE_RE = re.compile(
+    r"=(?:EventId|EventName|EventSource|ReadOnly|Username|ResourceType|ResourceName|AccessKeyId)(?![A-Za-z0-9])"
+)
+
+
 def _secret_word_values(text: str, allowed: frozenset[str], words: dict):
     """Any token of 16 or more characters within three words after a secret word, whatever its shape."""
     for word in _SECRET_WORD_RE.finditer(text):
@@ -540,6 +546,14 @@ def _secret_word_values(text: str, allowed: frozenset[str], words: dict):
         chunk_start = max(text.rfind(" ", floor, word.start()), text.rfind("\n", floor, word.start()), floor - 1) + 1
         if text[chunk_start : chunk_start + 4].lower() == "arn:":
             continue  # the word is a part of an ARN
+        before = text[max(0, word.start() - 10) : word.start()]
+        if (
+            word.group().lower() == "key"
+            and before[-9:].lower() == "attribute"
+            and not before[:-9].isalnum()
+            and _LOOKUP_ATTRIBUTE_RE.match(text, word.end())
+        ):
+            continue  # the AWS CLI parameter of a CloudTrail lookup
         for count, token in enumerate(_AFTER_WORD_RE.finditer(text, word.end(), stop)):
             if count == 3:
                 break

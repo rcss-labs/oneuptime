@@ -1078,3 +1078,34 @@ def test_each_invisible_character_inside_a_token_is_removed_before_matching(char
     key = "AK" + "IA" + "X" * 16
     assert [h.kind for h in scan("see " + key[:2] + char + key[2:])] == ["vendor_token"]
     assert [h.kind for h in scan("pass" + char + "word=" + "hunter" + "22")] == ["named_value"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventSource,AttributeValue=eks.amazonaws.com",
+        "--lookup-attributes AttributeKey=EventName,AttributeValue=UpdateNodegroupConfigVersion",
+        "AttributeKey=ResourceName,AttributeValue=orders-prod-database-primary",
+        "AttributeKey=Username,AttributeValue=deploy-automation-role-session",
+    ],
+)
+def test_a_cloudtrail_lookup_attribute_is_not_read_as_a_secret(line):
+    assert scan(line) == [], describe(scan(line))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "AttributeKey=" + "q" * 20,
+        "AttributeKey=Other,AttributeValue=" + plain(24, 500, ALNUM),
+        "secretKey=" + plain(32, 501, HEX),
+        "accessKey: " + plain(32, 502, HEX),
+        "AccessKey=" + uuid_text(503),
+        "api_key=" + plain(20, 504, string.ascii_lowercase),
+        "X-Api-Key: " + plain(32, 505, ALNUM),
+        "client_secret: " + plain(40, 506, HEX),
+        "MyAttributeKey=EventSource,AttributeValue=" + plain(24, 507, ALNUM),
+    ],
+)
+def test_the_lookup_exemption_does_not_hide_other_keys(line):
+    assert scan(line), line
