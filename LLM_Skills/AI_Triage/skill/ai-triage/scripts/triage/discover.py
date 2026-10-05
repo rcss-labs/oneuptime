@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import urlparse
 
-from triage.awscli import SSO_EXPIRED, Runner, run_aws, subprocess_runner
+from triage.awscli import SSO_EXPIRED, UNKNOWN, Runner, run_aws, subprocess_runner
 from triage.config import Account, TriageConfig
 from triage.context import SignInExpired
 from triage.guard import KUBECONFIG_NAME
@@ -104,7 +104,10 @@ class _Walk:
             return result.data or {}, command
         if result.error_code == SSO_EXPIRED:
             raise SignInExpired(account.profile)
-        self.discovery.notes.append(f"{command}: {result.error_code}")
+        code = result.error_code
+        if code == UNKNOWN:
+            code = _error_class(result.error_message or "") or code
+        self.discovery.notes.append(f"{service} {operation} failed: {code}")
         return None, command
 
     def note_if_more(self, data: Any, what: str, limit: int) -> None:
@@ -228,7 +231,9 @@ class _Walk:
             except (ValueError, AttributeError):
                 items = None
             if items is None:
-                self.discovery.notes.append(f"{command}: KubectlError")
+                reason = _error_class(result.error_message or "") if not result.ok else None
+                self.discovery.notes.append(
+                    f"EKS cluster {cluster.name} could not be read" + (f" ({reason})" if reason else ""))
                 continue
             self.note_cut(f"pods in EKS cluster {cluster.name}", MAX_PODS, len(items))
             matched = _matching_pods(items[:MAX_PODS], addresses)
@@ -325,6 +330,22 @@ class _Walk:
                 self.discovery.resources["elasticache"] = group["ReplicationGroupId"]
                 self.step(account, region, command, f"cache {group['ReplicationGroupId']}")
                 return
+
+
+_ERROR_CLASSES = (
+    ("forbidden", ("forbidden",)),
+    ("unauthorized", ("unauthorized", "must be logged in")),
+    ("not found", ("notfound", "not found")),
+    ("timeout", ("no answer within", "timeout", "timed out", "deadline exceeded")),
+    ("connection", ("unable to connect", "connection refused", "no such host", "unreachable", "could not connect")),
+    ("AccessDenied", ("not authorized", "access denied", "accessdenied")),
+)
+
+
+def _error_class(message: str) -> str | None:
+    """A short class for an error message; the message itself is never kept."""
+    lowered = message.lower()
+    return next((name for name, words in _ERROR_CLASSES if any(word in lowered for word in words)), None)
 
 
 def _owner_workload(pod: dict) -> str | None:

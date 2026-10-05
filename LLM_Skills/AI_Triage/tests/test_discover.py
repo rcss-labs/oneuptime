@@ -499,7 +499,7 @@ def test_second_cluster_holds_the_pods(config_data, tmp_path):
 def test_kubectl_failure_is_a_note_and_discovery_returns_what_it_has(config, tmp_path):
     found = kube(config, tmp_path, ip_target_answers(), FakeKubectl({"get pods": (1, "Unable to connect")}))
     assert "eks" not in found.resources and found.resources["load_balancer"] == "shop-alb"
-    assert any("KubectlError" in note for note in found.notes)
+    assert "EKS cluster platform-prod could not be read (connection)" in found.notes
     assert not any("Unable to connect" in note for note in found.notes)
 
 
@@ -556,3 +556,23 @@ def test_every_kubectl_argv_is_allowed_by_the_guard(config, tmp_path):
     for argv in kubectl.calls:
         verdict = check_kubectl(tuple(argv), (), str(tmp_path / "config" / KUBECONFIG_NAME), config.kube_contexts())
         assert verdict.kind == ALLOW, verdict.reason
+
+
+def test_failed_aws_note_names_the_operation_and_the_code(config):
+    answers = full_walk(**{"ecs describe-task-definition": access_denied("DescribeTaskDefinition")})
+    found = discover_hostname(HOSTNAME, config, runner=FakeAws(answers))
+    assert "ecs describe-task-definition failed: AccessDeniedException" in found.notes
+
+
+def test_unknown_aws_code_is_classified_from_the_message(config):
+    answers = full_walk(**{"elbv2 describe-target-groups": (254, "not authorized to perform elasticloadbalancing:DescribeTargetGroups")})
+    found = discover_hostname(HOSTNAME, config, runner=FakeAws(answers))
+    assert "elbv2 describe-target-groups failed: AccessDenied" in found.notes
+
+
+def test_forbidden_kubectl_read_says_the_cluster_could_not_be_read(config, tmp_path):
+    stderr = 'Error from server (Forbidden): pods is forbidden: User "arn:aws:sts::111111111111:assumed-role/x" cannot list resource'
+    found = kube(config, tmp_path, ip_target_answers(), FakeKubectl({"get pods": (1, stderr)}))
+    assert "EKS cluster platform-prod could not be read (forbidden)" in found.notes
+    assert not any("111111111111" in note or "Error from server" in note for note in found.notes)
+    assert found.resources["load_balancer"] == "shop-alb"
