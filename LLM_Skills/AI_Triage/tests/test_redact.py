@@ -1888,8 +1888,8 @@ PUNCT_PW = "Qa" + "!z9#" + "Lk"
 
 ROUND_FIVE_LEAKS = [
     ("odbc-braces", "Driver={ODBC Driver 18};Server=db.example.com;Uid=app;Pwd={" + PUNCT_PW + ";x};Encrypt=yes"),
-    ("oracle-sqlplus", "sqlplus scott/" + PUNCT_PW + "@db.example.com:1521/ORCL"),
-    ("oracle-jdbc", "jdbc:oracle:thin:scott/" + PUNCT_PW + "@db.example.com:1521:ORCL"),
+    ("oracle-sqlplus", "sqlplus scott/" + PUNCT_PW + "@orcldb:1521/ORCL"),  # a host without dots (follow-up 1)
+    ("oracle-jdbc", "jdbc:oracle:thin:scott/" + PUNCT_PW + "@orcldb:1521:ORCL"),
     ("htpasswd-path", "htpasswd -b /etc/nginx/htpasswd admin " + PUNCT_PW),
     ("htpasswd-path-c", "/usr/bin/htpasswd -bc /srv/auth/users admin " + PUNCT_PW),
     ("k8s-secret-yaml", "apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\ndata:\n  DATABASE_URL: " + PUNCT_PW + "\n  other: x" + PUNCT_PW + "\ntype: Opaque"),
@@ -2008,3 +2008,133 @@ def test_module_docstring_states_the_limits():
     doc = (redact_module.__doc__ or "").lower()
     for phrase in ("separate lines", "short passwords", "ipv6", "look-alike", "across files"):
         assert phrase in doc, phrase
+
+
+
+# ---------------------------------------------------------------------------
+# Follow-up after round 5
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "dial failed: app:" + PUNCT_PW + "@tcp(db.internal:3306)/orders",
+        "dsn app:" + PW + "@tcp(10.0.1.5:3306)/orders?parseTime=true",
+        "sqlplus scott/" + PUNCT_PW + "@orcldb",
+        "sqlplus -s scott/" + PUNCT_PW + "@//orcldb:1521/ORCL",
+        "sqlplus scott/" + PUNCT_PW + "@10.0.1.5:1521/ORCL",
+        "CONNECT scott/" + PUNCT_PW + "@ORCL",
+        "expdp system/" + PUNCT_PW + "@ORCL directory=dp",
+        "rman target sys/" + PUNCT_PW + "@prod",
+        "user app:" + PUNCT_PW + "@db.internal/app",
+    ],
+)
+def test_schemeless_userinfo_is_masked(source):
+    out = Redactor().text(source)
+    assert PUNCT_PW not in out and PW not in out
+    assert PUNCT_PW[:3] not in out
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "git clone git@github.com:org/repo.git",
+        "mail bob@example.com: delivered",
+        "contact bob@example.com",
+        "docker pull registry.example.com/team/app:1.2@sha256:" + "0123456789abcdef" * 4,
+        "npm install left-pad@1.3.0",
+        "user bob@host1 logged in at 10:00",
+        "svc/mail-ops@example.com",
+    ],
+)
+def test_schemeless_userinfo_neighbours_are_kept(source):
+    out = Redactor().text(source)
+    assert "<SECRET-" not in out
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("password: the dog", "password: <SECRET-1>"),
+        ("password: let me in", "password: <SECRET-1>"),
+        ("password: not set", "password: not set"),
+        ("token: expired at 12:00", "token: expired at 12:00"),
+        ("secret: is missing", "secret: is missing"),
+    ],
+)
+def test_prose_exemption_needs_a_log_or_status_word(source, expected):
+    assert Redactor().text(source) == expected
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [("SignatureDoesNotMatch", False), ("auth_method", False), ("auth_result", False), ("auth_type", False),
+     ("auth_mode", False), ("auth_token", True), ("signature", True)],
+)
+def test_follow_up_secret_names(name, expected):
+    assert looks_secret_key(name) is expected
+
+
+def test_home_address_is_personal():
+    assert looks_personal_key("home_address") is True
+
+
+def test_signature_does_not_match_keeps_its_message():
+    source = "SignatureDoesNotMatch: Signature expired: 20261005T100000Z is now earlier than 20261005T101500Z"
+    assert Redactor().text(source) == source
+
+
+WINDOWS_LEAKS = [
+    ("net-user", "net user bob " + PUNCT_PW + " /add"),
+    ("secure-string", 'ConvertTo-SecureString "' + PUNCT_PW + '" -AsPlainText -Force'),
+    ("secure-string-single", "ConvertTo-SecureString -String '" + PUNCT_PW + "' -AsPlainText -Force"),
+    ("env-assignment", '$env:DB_PASSWORD = "' + PUNCT_PW + '"'),
+    ("cmdkey", "cmdkey /add:server01 /user:bob /pass:" + PUNCT_PW),
+    ("psexec", "psexec \\\\server01 -u bob -p " + PUNCT_PW + " cmd"),
+    ("schtasks", "schtasks /create /tn job /ru bob /rp " + PUNCT_PW + " /tr app.exe"),
+]
+
+
+@pytest.mark.parametrize("name, source", WINDOWS_LEAKS, ids=[case[0] for case in WINDOWS_LEAKS])
+def test_windows_and_powershell_shapes(name, source):
+    out = Redactor().text(source)
+    assert PUNCT_PW not in out
+    assert Redactor().text(out) == out
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["net user bob /delete", "$env:PATH = 'C:\\Tools'", "schtasks /query /tn job", "cmdkey /list"],
+)
+def test_windows_neighbours_are_kept(source):
+    assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "| Secret | Rotated |\n|---|---|\n| prod/db | yes |\n| prod/api-keys | no |",
+        "Token,Owner\nci/deploy,platform",
+    ],
+)
+def test_tables_keep_secret_names_that_are_plain_paths(source):
+    assert Redactor().text(source) == source
+
+
+def test_tables_still_mask_values_under_a_secret_header():
+    out = Redactor().text("| Secret | Rotated |\n|---|---|\n| " + PUNCT_PW + " | yes |")
+    assert PUNCT_PW not in out
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["a:b@c ", "a/b@c(", "x:y@", "net user a b ", "$env:TOKEN = x ", "| Secret |\n| a/b |\n", "cmdkey /pass:x ",
+     "password: not set\n"],
+)
+def test_one_megabyte_follow_up_shapes_are_fast(shape):
+    source = shape * (MEGABYTE // len(shape))
+    for call in (Redactor().text, audit_text):
+        started = time.perf_counter()
+        call(source)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 2, (shape, elapsed)

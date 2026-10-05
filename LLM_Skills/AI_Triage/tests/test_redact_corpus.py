@@ -318,6 +318,16 @@ LEAKS = [
     ("multipart-password", 'Content-Disposition: form-data; name="password"\r\n\r\n' + PWP + "\r\n--b", PWP),
     ("add-mask", "::add-mask::" + PWP, PWP),
     ("license-env", "NEW_RELIC_LICENSE=" + PWP, PWP),
+    # follow-up after round 5
+    ("go-mysql-dsn", "dial failed: app:" + PWP + "@tcp(db.internal:3306)/orders", PWP),
+    ("oracle-bare-host", "sqlplus -s scott/" + PWP + "@//orcldb:1521/ORCL", PWP),
+    ("net-user", "net user bob " + PWP + " /add", PWP),
+    ("convertto-securestring", 'ConvertTo-SecureString "' + PWP + '" -AsPlainText -Force', PWP),
+    ("ps-env", '$env:API_TOKEN = "' + PWP + '"', PWP),
+    ("cmdkey", "cmdkey /add:srv /user:bob /pass:" + PWP, PWP),
+    ("psexec", "psexec \\\\srv -u bob -p " + PWP + " cmd", PWP),
+    ("schtasks", "schtasks /create /tn job /ru bob /rp " + PWP, PWP),
+    ("prose-no-status-word", "password: let me in", "let me in"),
 ]
 
 assert len(LEAKS) >= 150, len(LEAKS)
@@ -416,6 +426,10 @@ HARMLESS = [
     ("key-manager", "KeyManager: CUSTOMER"),
     ("license-type", "license_type: BYOL"),
     ("license-count", "LicenseCount: 4"),
+    ("signature-does-not-match", "SignatureDoesNotMatch: Signature expired: 20261005T100000Z is now earlier than 20261005T101500Z"),
+    ("secret-name-table", "| Secret | Rotated |\n|---|---|\n| prod/db | yes |"),
+    ("git-ssh-colon", "git clone git@github.com:org/repo.git"),
+    ("status-prose", "password: not set"),
     # round 5 ruling 6: labelled commits and AWS request ids
     ("git-commit", "deployed commit " + _hex(60, 40) + " to prod"),
     ("image-tag-sha", "image tag " + _hex(61, 40)),

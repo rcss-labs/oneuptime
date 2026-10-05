@@ -104,6 +104,8 @@ NAME_ENDINGS = REFERENCE_SUFFIXES | frozenset({
     "ref", "refs", "from", "limit", "limits", "quota",
     # round 5: KeyManager, LicenseModel, CodeSize, CPUCreditBalance, KeyPairs, AuthenticationStrategy
     "manager", "model", "size", "balance", "pair", "pairs", "strategy",
+    # follow-up: SignatureDoesNotMatch, auth_method, auth_result
+    "match", "mismatch", "method", "methods", "result", "results",
 })
 # Upper-case environment names keep these endings secret: DB_PASSWORD_NAME, API_KEY2_URL.
 ENV_STYLE_SECRET_ENDINGS = frozenset({"name", "url", "host", "path"})
@@ -128,6 +130,8 @@ PERSONAL_WORDS = frozenset({
 })
 # X_name is personal for these X (full_name, customer_name); account_number is personal too.
 PERSONAL_NAME_QUALIFIERS = frozenset({"full", "first", "last", "middle", "given", "family", "customer", "display"})
+# home_address is personal; PrivateIpAddress is not.
+PERSONAL_ADDRESS_QUALIFIERS = frozenset({"home", "street", "postal", "mailing", "billing", "shipping", "residential"})
 # A personal word that only qualifies one of these is not personal (UserAgent, OwnerId, mail_server).
 NON_PERSONAL_ENDINGS = frozenset({
     "agent", "id", "ids", "arn", "attempts", "server", "servers", "pool", "verified",
@@ -253,7 +257,11 @@ def looks_personal_key(key: str) -> bool:
     if any(part in PERSONAL_WORDS for part in parts):
         return True
     pairs = list(zip(parts, parts[1:]))
-    return any((a in PERSONAL_NAME_QUALIFIERS and b == "name") or (a == "account" and b == "number") for a, b in pairs)
+    return any(
+        (a in PERSONAL_NAME_QUALIFIERS and b == "name") or (a == "account" and b == "number")
+        or (a in PERSONAL_ADDRESS_QUALIFIERS and b == "address")
+        for a, b in pairs
+    )
 
 
 # --- plain words: what file paths and identifiers are made of ---------------------------------
@@ -410,18 +418,19 @@ LITERAL_VALUES = frozenset({
 # A colon value that reads as a sentence is a message about a secret, not the secret. It needs at
 # least one of these words, so a passphrase of plain words ("correct horse battery staple") stays
 # masked. Single status words are kept too ("token: expired").
+# Log and status words: a colon value is kept as prose only when it holds one of these, never
+# because of an article or pronoun alone ("password: let me in" stays masked).
 _PROSE_WORDS = frozenset({
-    "the", "a", "an", "to", "of", "for", "from", "not", "no", "does", "do", "did", "is", "are", "was",
-    "were", "be", "been", "has", "have", "had", "in", "on", "at", "with", "without", "or", "and", "but",
-    "cannot", "could", "would", "should", "will", "must", "can", "failed", "succeeded", "loaded",
-    "expired", "missing", "required", "invalid", "denied", "found", "rejected", "accepted", "refused",
-    "unable", "via", "using",
+    "not", "no", "failed", "failure", "expired", "missing", "invalid", "denied", "required", "incorrect",
+    "does", "did", "was", "is", "cannot", "unable",
+    # status participles from the round 4 false-positive lines
+    "loaded", "succeeded", "rotated", "revoked", "refused", "rejected",
 })
 _STATUS_WORDS = frozenset({
     "expired", "invalid", "missing", "required", "revoked", "rotated", "loaded", "set", "unset",
     "present", "absent", "empty", "valid", "refreshed", "rejected", "accepted", "denied", "unknown",
 })
-_PROSE_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'-]*[.,:;!?)]*")
+_PROSE_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'-]*[.,:;!?)]*|[\d:.TZ+-]+[.,;)]*")
 _LITERAL_THEN_PAIR_RE = re.compile(r"(?P<word>\S+)[ \t]+[\w.\-]+=")
 
 
@@ -1439,6 +1448,13 @@ def _cells(line: str, base: int, delimiter: str) -> list[Span]:
     return spans
 
 
+def _plain_slash_name(cell: str) -> bool:
+    """prod/db, ci/deploy: a secret's name written as a slash path of plain words, not its value."""
+    segments = cell.split("/")
+    return len(segments) >= 2 and all(segment and re.fullmatch(r"[\w.-]+", segment) and _plain_words(segment)
+                                      for segment in segments)
+
+
 def _table_spans(text: str) -> list[Span]:
     """CSV, TSV and Markdown table cells under a header cell with a secret name."""
     if "\n" not in text:
@@ -1472,10 +1488,74 @@ def _table_spans(text: str) -> list[Span]:
                 break
             for column in secret_columns:
                 start, end = cells[column]
-                if end > start and not _harmless_secret_value(text[start:end]):
+                if end > start and not _harmless_secret_value(text[start:end]) and not _plain_slash_name(text[start:end]):
                     spans.append((start, end))
             index += 1
     return [span for span in spans if _usable(text, span)]
+
+
+# --- schemeless userinfo and Windows shapes ------------------------------------------------
+
+# user:password@host( / user:password@host:port / user/password@host, with no scheme in front.
+SCHEMELESS_USERINFO_RE = re.compile(
+    r"""(?:(?<![\w.:/@$#-])|(?<=:thin:))(?P<user>[A-Za-z_][\w.$#-]{0,63})(?P<sep>[:/])(?P<value>[^\s/@"'`]{1,128}?)@(?://)?"""
+    r"""(?P<host>[A-Za-z0-9](?:[\w.-]{0,253}[A-Za-z0-9])?)(?=\(|:\d|/|[\s"',;)]|$)"""
+)
+_USERINFO_LABELS = frozenset({
+    "mailto", "mail", "email", "e-mail", "from", "to", "cc", "bcc", "contact", "owner", "author", "sender",
+    "recipient", "reply-to",
+})
+_DIGEST_HOST_RE = re.compile(r"(?i)sha\d+|md5")
+
+
+def _schemeless_userinfo_spans(text: str) -> list[Span]:
+    """Go DSNs (app:pw@tcp(host:3306)/db) and Oracle connect strings (scott/pw@host, @//host)."""
+    if "@" not in text:
+        return []
+    spans = []
+    for match in SCHEMELESS_USERINFO_RE.finditer(text):
+        if match.group("user").lower() in _USERINFO_LABELS or _DIGEST_HOST_RE.fullmatch(match.group("host")):
+            continue
+        if match.group("sep") == "/" and EMAIL_RE.fullmatch(match.group("value") + "@" + match.group("host")):
+            continue  # svc/mail-ops@example.com: the email rule masks value and host together
+        spans.append(match.span("value"))
+    return [span for span in spans if _usable(text, span)]
+
+
+_WINDOWS_QUOTED = r"""(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)'|(?P<bare>[^\s"'/*][^\s]*))"""
+NET_USER_RE = re.compile(r"(?i)\bnet(?:\.exe)?[ \t]+user[ \t]+(?:\"[^\"\n]+\"|[^\s/]\S*)[ \t]+" + _WINDOWS_QUOTED)
+SECURE_STRING_RE = re.compile(r"""(?i)\bConvertTo-SecureString[ \t]+(?:-String[ \t]+)?(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')""")
+PS_ENV_RE = re.compile(r"""(?i)\$env:(?P<name>[\w.]+)[ \t]*=[ \t]*(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)'|(?P<bare>\S+))""")
+CMDKEY_RE = re.compile(r"(?i)\bcmdkey\b[^\n]*?/pass:" + _WINDOWS_QUOTED)
+PSEXEC_RE = re.compile(r"(?i)\bpsexec(?:64)?(?:\.exe)?\b[^\n]*?(?<!\S)-p[ \t]+" + _WINDOWS_QUOTED)
+SCHTASKS_RE = re.compile(r"(?i)\bschtasks(?:\.exe)?\b[^\n]*?(?<!\S)/rp[ \t]+" + _WINDOWS_QUOTED)
+
+
+def _windows_spans(text: str) -> list[Span]:
+    """net user NAME PW, ConvertTo-SecureString "PW", $env:SECRET = "PW", cmdkey /pass:, psexec -p, schtasks /rp."""
+    lowered = text.lower()
+    spans: list[Span] = []
+    patterns = []
+    if "net" in lowered and "user" in lowered:
+        patterns.append(NET_USER_RE)
+    if "securestring" in lowered:
+        patterns.append(SECURE_STRING_RE)
+    if "cmdkey" in lowered:
+        patterns.append(CMDKEY_RE)
+    if "psexec" in lowered:
+        patterns.append(PSEXEC_RE)
+    if "schtasks" in lowered:
+        patterns.append(SCHTASKS_RE)
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            group = next(g for g in ("dq", "sq", "bare") if g in pattern.groupindex and match.group(g) is not None)
+            spans.append(match.span(group))
+    if "$env:" in lowered:
+        for match in PS_ENV_RE.finditer(text):
+            if looks_secret_key(match.group("name")):
+                group = next(g for g in ("dq", "sq", "bare") if match.group(g) is not None)
+                spans.append(match.span(group))
+    return [span for span in spans if _usable(text, span) and not _harmless_secret_value(text[span[0]:span[1]])]
 
 
 # (audit category, rule), in redaction order.
@@ -1486,6 +1566,7 @@ SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("private_key", _pem_spans),
     ("sql_password", _sql_spans),
     ("url_credential", _group_rule(URL_CREDENTIAL_RE, "secret")),
+    ("schemeless_userinfo", _schemeless_userinfo_spans),
     ("auth_header", _auth_spans),
     ("secret_key_value", _key_value_spans),
     ("secret_name_value", _name_value_spans),
@@ -1499,6 +1580,7 @@ SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("secret_command_log", _more_command_spans),
     ("secret_positional", _positional_spans),
     ("secret_table_column", _table_spans),
+    ("secret_windows_command", _windows_spans),
     ("aws_access_key", lambda text: [m.span() for m in AWS_KEY_RE.finditer(text)]),
     ("vendor_token", lambda text: [m.span() for m in VENDOR_TOKEN_RE.finditer(text)]),
     ("aws_secret_key", _aws_secret_key_spans),
