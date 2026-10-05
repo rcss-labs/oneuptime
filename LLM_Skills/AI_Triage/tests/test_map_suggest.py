@@ -515,3 +515,47 @@ def test_apply_keeps_a_lock_file_that_another_live_run_holds(config, skill_dir, 
         with pytest.raises(SuggestError, match="another run is applying"):
             run_apply(case_dir, config, path)
     assert lock.exists()
+
+
+# safety checks that the first reviews left untested, and the newer resource keys
+
+def test_two_services_lines_are_refused_with_the_block(config, skill_dir, tmp_path):
+    original = "services: {}\nservices: {}\n"
+    path = write_map(tmp_path, original)
+    with pytest.raises(SuggestError, match="could not be edited exactly"):
+        run_apply(make_case(config, skill_dir), config, path)
+    assert path.read_bytes() == original.encode()
+
+
+def test_the_new_map_must_keep_every_earlier_entry_unchanged(config, skill_dir, tmp_path, monkeypatch):
+    path = write_map(tmp_path, COMMENTED_MAP)
+    from triage import map_suggest
+
+    real = map_suggest._new_content
+
+    def altering(original, data, block):
+        return real(original, data, block).replace(b"source: confirmed", b"source: discovered")
+
+    monkeypatch.setattr(map_suggest, "_new_content", altering)
+    with pytest.raises(SuggestError, match="could not be updated automatically"):
+        run_apply(make_case(config, skill_dir), config, path)
+    assert path.read_bytes() == COMMENTED_MAP.encode()
+
+
+def test_the_new_map_keeps_the_permissions_of_the_old_one(config, skill_dir, tmp_path):
+    path = write_map(tmp_path, COMMENTED_MAP)
+    path.chmod(0o640)
+    run_apply(make_case(config, skill_dir), config, path)
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert "orders-api" in load_map(path, config).services
+
+
+def test_a_proposal_with_alarms_ecr_and_opensearch_domain_validates(config, skill_dir, tmp_path):
+    resources = {"alarms": ["orders-5xx"], "ecr_repository": "orders-api", "opensearch_domain": "logs-domain"}
+    case_dir = make_case(config, skill_dir, {**DISCOVERY, "resources": resources})
+    path = write_map(tmp_path, COMMENTED_MAP)
+    result = propose(case_dir, config, path, "orders-api", "prod", TODAY)
+    assert result["valid"] is True
+    run_apply(case_dir, config, path)
+    loaded = load_map(path, config).services["orders-api"].environments["prod"]
+    assert loaded.resources == resources
