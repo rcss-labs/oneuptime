@@ -375,6 +375,26 @@ HARMLESS = [
     ("iam-policy", '{"Effect": "Allow", "Action": ["kms:Decrypt", "secretsmanager:GetSecretValue"]}'),
     ("secret-key-ref", "valueFrom:\n  secretKeyRef: db-password"),
     ("secret-ref", "envFrom:\n- secretRef: app-secrets\n  secretName: tls-secret"),
+    # round 5: the re-review's wrongly changed lines
+    ("aws-error-code-json", '{"Error":{"Code":"AccessDenied","Message":"Access Denied"}}'),
+    ("s3-error-text", "Code: NoSuchKey Message: The specified key does not exist. Key: logs/app.log"),
+    ("s3-error-xml", "<Error><Code>SignatureDoesNotMatch</Code></Error>"),
+    ("grpc-code", "rpc error: code = Unknown desc = context deadline exceeded"),
+    ("node-code", "Error: connect ECONNREFUSED 10.0.1.5:6379 code=ECONNREFUSED"),
+    ("code-500", "Code: 500"),
+    ("lambda-code", '{"code": "ResourceNotFoundException", "message": "Function not found"}'),
+    ("reset-code-paren", "password reset requested for user 42 (code=PR-1)"),
+    ("unauthorized", "401 Unauthorized: invalid_token"),
+    ("authorize-chain", "failed to authorize: failed to fetch anonymous token"),
+    ("ecs-secrets-error", "unable to pull secrets or registry auth: execution resource retrieval failed: unable to retrieve secret"),
+    ("auth-ok", "auth: OK user=bob mfa=true"),
+    ("author", "author: pavel committed 3 files"),
+    ("set-secret-prose", "ResourceInitializationError: setSecret: password does not meet complexity requirements"),
+    ("mount-volume", 'MountVolume.SetUp failed for volume "db-creds" : secret "db-creds" not found'),
+    ("cpu-credit", "CPUCreditBalance: 0.0"),
+    ("private-subnets", "private_subnets: subnet-0123456789abcdef0"),
+    ("license-model", "LicenseModel: license-included"),
+    ("key-manager", "KeyManager: CUSTOMER"),
 ]
 
 assert len(HARMLESS) >= 60, len(HARMLESS)

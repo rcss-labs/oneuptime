@@ -700,8 +700,9 @@ def test_text_over_redaction_fixes():
         "run --password-file /run/secrets/db --token-file=/var/run/t"
     )
     assert Redactor().text('{"password": null, "token": true}') == '{"password": null, "token": true}'
-    out = Redactor().text("error: auth_token: field required (type=value_error.missing)")
-    assert out == "error: auth_token: <SECRET-1> (type=value_error.missing)"
+    # round 5: a colon value that reads as a sentence ("field required") is kept
+    source = "error: auth_token: field required (type=value_error.missing)"
+    assert Redactor().text(source) == source
     assert value_after_flag_kept()
 
 
@@ -1055,13 +1056,15 @@ RULING_11_SECRET_NAMES = [
     # trailing digits are stripped from every part
     "DB_PASS1", "DbPassword2", "DB_TOKEN2", "SERVICE_SECRET2", "DB_KEY1", "REDIS_AUTH1_HOST",
     # long stems anywhere inside a part
-    "pass", "passwd", "password", "secret", "token", "cred", "auth", "private", "session", "cookie",
-    "bearer", "signature", "license", "licence", "hmac", "MyPassValue", "oauthState2Value", "x_sessionx",
-    "github_bearer_value", "X-Amz-Signature", "hmacvalue", "client_licence",
+    "pass", "passwd", "password", "secret", "token", "cred", "auth", "session", "cookie",
+    "bearer", "signature", "hmac", "MyPassValue", "x_sessionx",
+    "github_bearer_value", "X-Amz-Signature", "hmacvalue", "license_key", "private_key",
     # short stems as whole parts, key and pwd also at the end of a part
     "db_key", "apikey", "db_pwd", "mysqlpwd", "psw", "pswd", "psk", "sk", "pat", "pin",
-    "otp", "mfa", "jwt", "sig", "salt", "pepper", "nonce", "seed", "dsn", "cert", "code",
+    "otp", "mfa", "jwt", "sig", "salt", "pepper", "nonce", "seed", "dsn", "cert", "passcode",
     "USER_PIN", "SENTRY_DSN", "TLS_CERT", "GITHUB_PAT", "MFA_SEED", "STRIPE_SK", "WIFI_PSK", "OTP_CODE",
+    # round 5 stems
+    "api_tkn", "db_pword", "PSSWD", "rootpw", "DBPW", "DB_PASSWORD_NAME", "API_KEY2_URL", "SECRET_HOST", "TOKEN_PATH",
 ]
 
 
@@ -1075,7 +1078,7 @@ def test_ruling_11_secret_names(name):
     [
         ("MONKEY", True, "key at the end of a part, as in apikey: hiding a harmless value is acceptable"),
         ("KEYSPACE", False, "key neither a whole part nor the end of one"),
-        ("AUTHOR", True, "auth is a long stem and matches inside a part"),
+        ("AUTHOR", False, "round 5: auth matches a whole part or authorization/authentication/authtoken only"),
         ("PASSENGER_COUNT", False, "the Count ending (ruling 9) wins over the pass stem"),
         ("TOKENIZER_MODE", False, "the Mode ending wins over the token stem"),
         ("TOKENIZER", True, "token is a long stem and matches inside a part"),
@@ -1500,8 +1503,8 @@ BODY_LINE = ("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC" + "7Vb3x" + "
         (f"  {BODY_LINE}", "  <SECRET-1>"),
         (f"{BODY_LINE}\n-----END " + "PRIVATE KEY-----", "<SECRET-1>"),
         (f"tail of key {BODY_LINE[:20]}==\n-----END " + "RSA PRIVATE KEY-----\nnext line", "<SECRET-1>\nnext line"),
-        # Private-Lines and Private-MAC hold the "private" stem (ruling 11), so their values are hidden too.
-        (f"Private-Lines: 2\n{BODY_LINE}\n{BODY_LINE[:30]}\nPrivate-MAC: x", "Private-Lines: <SECRET-2>\n<SECRET-1>\nPrivate-MAC: <SECRET-3>"),
+        # round 5: "private" is a secret word only together with key, so Private-Lines keeps its count
+        (f"Private-Lines: 2\n{BODY_LINE}\n{BODY_LINE[:30]}\nPrivate-MAC: x", "Private-Lines: 2\n<SECRET-1>\nPrivate-MAC: x"),
     ],
 )
 def test_pem_body_lines_arriving_separately(source, expected):
@@ -1777,3 +1780,100 @@ def test_safety_net_never_swallows_base_exceptions(monkeypatch):
     monkeypatch.setattr(redact_module, "SECRET_RULES", (("ring", ring),))
     with pytest.raises(Alarm):
         Redactor().text("anything")
+
+
+
+# Ruling 3: names that are not secret names
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("Code", False), ("code", False), ("ErrorCode", False), ("StatusCode", False), ("ExitCode", False),
+        ("CodeSize", False), ("CodeSha256", False), ("promo_code", False), ("source_code", False),
+        ("passcode", True), ("pincode", True), ("access_code", True), ("authCode", True), ("auth_code", True),
+        ("verification_code", True), ("security_code", True), ("otp_code", True), ("mfa_code", True),
+        ("recovery_code", True), ("backup_code", True), ("AuthorizationCode", True),
+        ("cred", True), ("creds", True), ("credential", True), ("Credentials", True), ("db_credentials", True),
+        ("CPUCreditBalance", False), ("credits", False), ("incredible", False), ("accredited", False),
+        ("private_key", True), ("privateKey", True), ("PRIVATE_KEY", True),
+        ("private_subnets", False), ("PrivateIpAddress", False), ("PrivateDnsName", False), ("PrivateLink", False),
+        ("auth", True), ("authorization", True), ("authentication", True), ("authtoken", True), ("x-auth-token", True),
+        ("author", False), ("authority", False), ("authorize", False), ("authorized", False), ("unauthorized", False),
+        ("Authenticated", False), ("authenticator", False),
+        ("license", False), ("licence", False), ("LicenseModel", False), ("license_key", True), ("licenceKey", True),
+        ("passive", False), ("passed", False), ("passing", False), ("bypass", False), ("passenger", False),
+        ("passthrough", False),
+        ("KeyManager", False), ("LicenseModel", False), ("TokenSize", False), ("KeyPairs", False),
+        ("AuthenticationStrategy", False),
+        ("DB_PASSWORD_NAME", True), ("API_KEY2_URL", True), ("secret_name", False), ("SecretName", False),
+        ("api_tkn", True), ("db_pword", True), ("psswd", True), ("rootpw", True), ("pw", True),
+    ],
+)
+def test_round_five_secret_names(name, expected):
+    assert looks_secret_key(name) is expected
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("UserAgent", False), ("OwnerId", False), ("UserPoolId", False), ("login_attempts", False), ("mail_server", False),
+        ("email_verified", False),
+        ("full_name", True), ("first_name", True), ("last_name", True), ("surname", True), ("customer_name", True),
+        ("dob", True), ("birth", True), ("date_of_birth", True), ("account_number", True), ("passport", True),
+        ("mobile", True), ("username", True), ("DbUser", True), ("MasterUsername", True), ("phone_number", True),
+        ("email", True),
+    ],
+)
+def test_round_five_personal_names(name, expected):
+    assert looks_personal_key(name) is expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '{"Error":{"Code":"AccessDenied","Message":"Access Denied"}}',
+        "Code: NoSuchKey Message: The specified key does not exist. Key: logs/app.log",
+        "<Error><Code>SignatureDoesNotMatch</Code></Error>",
+        "rpc error: code = Unknown desc = context deadline exceeded",
+        "Error: connect ECONNREFUSED 10.0.1.5:6379 code=ECONNREFUSED",
+        "Code: 500",
+        '{"code": "ResourceNotFoundException", "message": "Function not found"}',
+        "password reset requested for user 42 (code=PR-1)",
+        "401 Unauthorized: invalid_token",
+        "failed to authorize: failed to fetch anonymous token",
+        "unable to pull secrets or registry auth: execution resource retrieval failed: unable to retrieve secret",
+        "auth: OK user=bob mfa=true",
+        "author: pavel committed 3 files",
+        "ResourceInitializationError: setSecret: password does not meet complexity requirements",
+        'MountVolume.SetUp failed for volume "db-creds" : secret "db-creds" not found',
+        "CPUCreditBalance: 0.0",
+        "private_subnets: subnet-0123456789abcdef0",
+        "LicenseModel: license-included",
+        "KeyManager: CUSTOMER",
+        "Credentials: loaded from IMDS",
+        "token: expired",
+        "secret: rotation succeeded",
+        "token=<none>",
+    ],
+)
+def test_round_five_error_codes_and_prose_are_kept(source):
+    assert Redactor().text(source) == source
+
+
+def test_round_five_error_code_in_value():
+    obj = {"Error": {"Code": "AccessDenied"}, "CodeSize": 1024, "CodeSha256": "abc", "PrivateSubnets": ["subnet-1"],
+           "KeyPairs": [{"KeyName": "k", "Tags": [{"Key": "team", "Value": "core"}]}]}
+    assert Redactor().value(obj) == obj
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("password: correct horse battery staple", "password: <SECRET-1>"),
+        ("verification_code=482913", "verification_code=<SECRET-1>"),
+        ("auth: " + PW, "auth: <SECRET-1>"),
+        ("password: the " + PW, "password: <SECRET-1>"),
+    ],
+)
+def test_round_five_secrets_next_to_those_words_stay_masked(source, expected):
+    assert Redactor().text(source) == expected

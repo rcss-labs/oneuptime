@@ -36,28 +36,33 @@ SECRET_WORDS = frozenset({
     "apikey", "apikeys", "credential", "credentials", "auth", "cookie", "cookies",
     "authorization", "proxyauthorization", "pw", "cred", "creds",
 })
-# Long stems match anywhere inside a part.
+# Long stems match anywhere inside a part (round 5: private, license and licence only count
+# together with key, and cred, auth and code have their own rules in _holds_secret_stem).
 LONG_SECRET_STEMS = (
-    "pass", "passwd", "password", "secret", "token", "cred", "auth", "private", "session", "cookie",
-    "bearer", "signature", "license", "licence", "hmac",
+    "pass", "passwd", "password", "secret", "token", "session", "cookie", "bearer", "signature", "hmac",
+    "tkn", "pword", "psswd",
 )
+# Words inside which "auth" names a secret; a whole part "auth" does too. Not author, authorize ...
+AUTH_SECRET_WORDS = ("authorization", "authentication", "authtoken")
 # Whole English words that hold a long stem but never name a secret ("Gates passed: ...").
-STEM_WORD_EXCEPTIONS = frozenset({"passed", "passing", "bypass", "passenger", "passengers", "compass"})
+STEM_WORD_EXCEPTIONS = frozenset({
+    "passed", "passing", "bypass", "passenger", "passengers", "compass", "passive", "passthrough",
+    "passage", "passport",
+})
+# "code" is a secret word only as passcode or pincode, or after one of these words (auth code).
+SECRET_CODE_QUALIFIERS = frozenset({
+    "access", "auth", "authorization", "verification", "security", "otp", "mfa", "recovery", "backup",
+    "one", "totp", "sms", "confirmation", "pass", "pin",
+})
 # Short stems match a whole part only.
 SHORT_SECRET_STEMS = frozenset({
     "key", "keys", "pwd", "pw", "psw", "pswd", "psk", "sk", "pat", "pin", "otp", "mfa", "jwt", "sig",
-    "salt", "pepper", "nonce", "seed", "dsn", "cert", "code",
+    "salt", "pepper", "nonce", "seed", "dsn", "cert", "passcode", "pincode",
     # beyond ruling 11, from the re-review's leak shapes: refresh_tok, and card and identity numbers
     "tok", "ssn", "cvv", "cvc", "iban", "card",
 })
-# "code" names a status, not a one-time code, after these qualifiers (statusCode, exit_code).
-NON_SECRET_CODE_QUALIFIERS = frozenset({
-    "status", "exit", "error", "err", "response", "http", "return", "reason", "result", "country",
-    "currency", "language", "lang", "zip", "postal", "region", "event", "sql", "elb", "target",
-    "state", "iso", "area", "op", "program", "char", "unicode", "color", "colour", "product",
-})
-# These short stems also match at the end of a part (apikey, mysqlpwd).
-END_SECRET_STEMS = ("key", "keys", "pwd")
+# These short stems also match at the end of a part (apikey, mysqlpwd, rootpw).
+END_SECRET_STEMS = ("key", "keys", "pwd", "pw")
 KEY_WORDS = frozenset({"key", "keys"})
 # A "key" part is not secret when the part before it (or its own prefix) says what kind of key it is.
 NON_SECRET_KEY_KINDS = frozenset({
@@ -80,7 +85,12 @@ NAME_ENDINGS = REFERENCE_SUFFIXES | frozenset({
     "address", "addresses", "ip", "ips", "dns", "duration", "error", "exception",
     # references to a secret (secretKeyRef, secretRef, valueFrom) and limits on a count
     "ref", "refs", "from", "limit", "limits", "quota",
+    # round 5: KeyManager, LicenseModel, CodeSize, CPUCreditBalance, KeyPairs, AuthenticationStrategy
+    "manager", "model", "size", "balance", "pair", "pairs", "strategy",
 })
+# Upper-case environment names keep these endings secret: DB_PASSWORD_NAME, API_KEY2_URL.
+ENV_STYLE_SECRET_ENDINGS = frozenset({"name", "url", "host", "path"})
+_ENV_STYLE_RE = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+")
 # A plain number is not a secret under a counted name: a plural of a secret word as the last
 # part (tokens, keys, secrets) or a counting word anywhere (max_tokens, num_keys).
 # "number" is not one: card_number, account_number hold the secret itself.
@@ -95,7 +105,17 @@ IAM_SERVICE_PREFIXES = frozenset({
     "ec2messages", "kafka", "elasticfilesystem", "backup", "config", "guardduty", "wafv2", "cloudfront",
     "rds-db", "redshift", "sagemaker", "bedrock", "appconfig", "servicediscovery", "application-autoscaling",
 })
-PERSONAL_WORDS = frozenset({"user", "usr", "username", "login", "email", "mail", "owner", "phone", "msisdn", "ssn"})
+PERSONAL_WORDS = frozenset({
+    "user", "usr", "username", "login", "email", "mail", "owner", "phone", "msisdn", "ssn",
+    "surname", "dob", "birth", "passport", "mobile",
+})
+# X_name is personal for these X (full_name, customer_name); account_number is personal too.
+PERSONAL_NAME_QUALIFIERS = frozenset({"full", "first", "last", "middle", "given", "family", "customer", "display"})
+# A personal word that only qualifies one of these is not personal (UserAgent, OwnerId, mail_server).
+NON_PERSONAL_ENDINGS = frozenset({
+    "agent", "id", "ids", "arn", "attempts", "server", "servers", "pool", "verified",
+    "count", "type", "group", "groups", "role", "policy", "enabled", "status",
+})
 AUTHORIZATION_WORDS = frozenset({"authorization", "proxyauthorization"})
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
@@ -140,16 +160,25 @@ def _is_key_kind(part: str) -> bool:
     return part in NON_SECRET_KEY_KINDS or part.rstrip("0123456789") in NON_SECRET_KEY_KINDS
 
 
-def _secret_part(parts: tuple[str, ...], raw: tuple[str, ...], index: int) -> bool:
-    part = parts[index]
+def _holds_secret_stem(part: str) -> bool:
+    """Whether one lower-case name part holds a long secret stem."""
     if part in STEM_WORD_EXCEPTIONS:
         return False
     if any(stem in part for stem in LONG_SECRET_STEMS):
         return True
+    if part in ("cred", "creds") or "credential" in part:  # not credit
+        return True
+    return part in ("auth", "oauth") or any(word in part for word in AUTH_SECRET_WORDS)
+
+
+def _secret_part(parts: tuple[str, ...], raw: tuple[str, ...], index: int) -> bool:
+    part = parts[index]
+    if _holds_secret_stem(part):
+        return True
+    if part == "code":
+        return index > 0 and parts[index - 1] in SECRET_CODE_QUALIFIERS
     if part in KEY_WORDS:  # a bare "key" is a lookup key (S3 Key=, a tag Key)
         return len(parts) > 1 and not (index > 0 and _is_key_kind(raw[index - 1]))
-    if part == "code" and index > 0 and parts[index - 1] in NON_SECRET_CODE_QUALIFIERS:
-        return False
     if part in SHORT_SECRET_STEMS:
         return True
     for stem in END_SECRET_STEMS:
@@ -168,9 +197,17 @@ def looks_secret_key(key: str) -> bool:
     (PartitionKey, AttributeKey) are not secret.
     """
     parts = _name_parts(key)
-    if not parts or parts[-1] in NAME_ENDINGS:
+    if not parts:
         return False
+    env_style = parts[-1] in ENV_STYLE_SECRET_ENDINGS and bool(_ENV_STYLE_RE.fullmatch(key))
+    if parts[-1] in NAME_ENDINGS and not env_style:
+        return False
+    if env_style:
+        parts = parts[:-1]
+        if not parts:
+            return False
     raw = tuple(part for part in _components(key) if part.rstrip("0123456789"))
+    raw = raw[:len(parts)]
     return any(_secret_part(parts, raw, index) for index in range(len(parts))) or _odd_case_secret(key)
 
 
@@ -182,15 +219,22 @@ def _odd_case_secret(key: str) -> bool:
         if len(pieces) < 2 or not any(len(piece) <= 3 for piece in pieces):
             continue
         whole = chunk.lower().rstrip("0123456789")
-        if whole not in STEM_WORD_EXCEPTIONS and any(stem in whole for stem in LONG_SECRET_STEMS):
+        if _holds_secret_stem(whole):
             return True
     return False
 
 
 @functools.lru_cache(maxsize=8192)
 def looks_personal_key(key: str) -> bool:
-    """Whether a name says its value is personal data (user, email, phone ...), by whole parts."""
-    return any(part in PERSONAL_WORDS for part in _name_parts(key))
+    """Whether a name says its value is personal data (user, email, phone ...), by whole parts.
+    A personal word that only qualifies a non-personal thing (UserAgent, OwnerId) does not count."""
+    parts = _name_parts(key)
+    if not parts or parts[-1] in NON_PERSONAL_ENDINGS:
+        return False
+    if any(part in PERSONAL_WORDS for part in parts):
+        return True
+    pairs = list(zip(parts, parts[1:]))
+    return any((a in PERSONAL_NAME_QUALIFIERS and b == "name") or (a == "account" and b == "number") for a, b in pairs)
 
 
 # --- plain words: what file paths and identifiers are made of ---------------------------------
@@ -341,7 +385,40 @@ XML_ATTR_RE = re.compile(r"(?P<name>" + _XML_NAME + r""")\s*=\s*(?:"(?P<dq>[^"]*
 XML_NAME_VALUE_RE = re.compile(
     r"<(?P<nk>Name|Key|name|key)>(?P<name>[^<]{1,200})</(?P=nk)>\s*<(?P<vk>Value|value)>(?P<value>[^<]*)</(?P=vk)>"
 )
-LITERAL_VALUES = frozenset({"null", "true", "false", "yes", "no", "none", "ok"})
+LITERAL_VALUES = frozenset({
+    "null", "true", "false", "yes", "no", "none", "ok", "<none>", "<nil>", "<empty>", "<redacted>", "<unset>",
+})
+# A colon value that reads as a sentence is a message about a secret, not the secret. It needs at
+# least one of these words, so a passphrase of plain words ("correct horse battery staple") stays
+# masked. Single status words are kept too ("token: expired").
+_PROSE_WORDS = frozenset({
+    "the", "a", "an", "to", "of", "for", "from", "not", "no", "does", "do", "did", "is", "are", "was",
+    "were", "be", "been", "has", "have", "had", "in", "on", "at", "with", "without", "or", "and", "but",
+    "cannot", "could", "would", "should", "will", "must", "can", "failed", "succeeded", "loaded",
+    "expired", "missing", "required", "invalid", "denied", "found", "rejected", "accepted", "refused",
+    "unable", "via", "using",
+})
+_STATUS_WORDS = frozenset({
+    "expired", "invalid", "missing", "required", "revoked", "rotated", "loaded", "set", "unset",
+    "present", "absent", "empty", "valid", "refreshed", "rejected", "accepted", "denied", "unknown",
+})
+_PROSE_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'-]*[.,:;!?)]*")
+_LITERAL_THEN_PAIR_RE = re.compile(r"(?P<word>\S+)[ \t]+[\w.\-]+=")
+
+
+def _literal_then_pair(value: str) -> bool:
+    """auth: OK user=bob: a literal followed by other key=value pairs."""
+    match = _LITERAL_THEN_PAIR_RE.match(value)
+    return bool(match) and match.group("word").lower() in LITERAL_VALUES
+
+
+def _reads_as_prose(value: str) -> bool:
+    words = value.split()
+    if len(words) == 1:
+        return words[0].lower().rstrip(".") in _STATUS_WORDS
+    if not all(_PROSE_WORD_RE.fullmatch(word) for word in words):
+        return False  # a digit or a symbol inside a word: possibly a password
+    return any(word.lower().rstrip(".,:;!?)") in _PROSE_WORDS for word in words)
 _VALUE_END_RE = re.compile(r"""[),"]| \(|'(?=[\s,;)\]}]|$)""")
 _SCHEME_AND_TOKEN_RE = re.compile(r"(?P<scheme>[A-Za-z][\w-]*)(?P<gap>[ \t]+)(?P<token>\S.*)", re.DOTALL)
 _BLOCK_SCALAR_RE = re.compile(r"[|>][+-]?\d?")
@@ -645,6 +722,11 @@ def _key_value_spans(text: str) -> list[Span]:
             continue
         value = text[span[0]:span[1]]
         first_word = value.split(None, 1)[0] if value.strip() else value
+        unquoted_colon = "=" not in sep and text[span[0] - 1:span[0]] not in ("'", '"')
+        if unquoted_colon and quote and sep[:1] in " \t":
+            continue  # "db-creds" : secret ... is a quoted word in prose, not a key
+        if unquoted_colon and (_reads_as_prose(value) or _literal_then_pair(value)):
+            continue
         if sep == ":" and key.lower() in IAM_SERVICE_PREFIXES and _IAM_OPERATION_RE.fullmatch(first_word):
             continue  # secretsmanager:GetSecretValue is an IAM action name
         if is_counted_key(key.lstrip("-")) and _PLAIN_NUMBER_RE.fullmatch(first_word.rstrip(",;")):
