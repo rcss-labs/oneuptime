@@ -19,7 +19,9 @@ from replay_support import (
     SCENARIOS,
     PipelineError,
     contradicting_judge,
+    distractor_draft,
     favourable_judge,
+    load_call_log,
     load_log,
     run_pipeline,
     skill_style,
@@ -89,8 +91,8 @@ def test_the_pipeline_runs_the_planned_collectors_and_every_later_stage(run):
     steps = [record["step"] for record in run["log"]]
     assert steps[:3] == ["case init", "case target", "case plan"]
     assert sum(step.startswith("plan: ") for step in steps) >= 6
-    assert steps[-6:] == ["findings check", "timeline", "report render", "publish audit", "publish confluence",
-                          "publish slack-message"]
+    assert steps[-7:] == ["findings check", "timeline", "judge run", "report render", "publish audit",
+                          "publish confluence", "publish slack-message"]
 
 
 def test_no_evidence_file_holds_an_error(run):
@@ -153,10 +155,11 @@ def read_json_text(text: str):
     return json.loads(text)
 
 
-def test_replay_never_leaves_the_scenario_folder_or_the_case_folder(run):
-    names = sorted(path.name for path in (run["case_dir"]).iterdir())
-    for name in ("case.md", "case.json", "evidence", "findings", "judgments", "report.md", "work-order.json"):
-        assert name in names
+def test_the_case_folder_holds_the_output_of_every_stage(run):
+    names = {path.name for path in run["case_dir"].iterdir() if not path.name.endswith(".tmp")}
+    assert {"case.md", "case.json", "incident.json", "evidence", "findings", "judgments", "timeline.json", "report.json",
+            "report.md", "work-order.json", "render.json", "audit.json", "slack-message.md"} <= names
+    assert not any(path.name.endswith((".stale", ".tmp")) for path in run["case_dir"].rglob("*"))
 
 
 def test_an_expired_certificate_is_a_confirmed_cause_with_a_recommended_mitigation(cert_run):
@@ -175,11 +178,37 @@ def test_the_report_names_both_database_hosts_of_the_mismatch(ecs_run):
     assert "data-4" in {item["id"] for item in checked["valid"]}
 
 
+def test_no_call_was_missed_and_every_recorded_answer_was_used(run):
+    calls = load_call_log(run["base"])
+    assert calls
+    missed = [call.get("argv") or f"{call['method']} {call['url']}" for call in calls if call["entry"] is None]
+    assert missed == []
+    unused = []
+    for tool, name in (("aws", "aws.json"), ("opensearch", "opensearch.json")):
+        recorded = read_json(run["scenario"] / name) if (run["scenario"] / name).is_file() else []
+        used = {call["entry"] for call in calls if call["tool"] == tool}
+        unused += [f"{name}[{index}] {entry.get('match') or entry.get('path_contains')}"
+                   for index, entry in enumerate(recorded) if index not in used]
+    assert unused == []
+
+
+def test_every_planned_collector_wrote_a_fact_or_is_listed_with_its_reason(run):
+    allowed = run["expected"].get("no_facts_expected", {})
+    assert all(isinstance(reason, str) and reason.strip() for reason in allowed.values())
+    documents = [read_json(path) for path in sorted((run["case_dir"] / "evidence").glob("*.json"))]
+    planned = {record["step"][len("plan: "):] for record in run["log"] if record["step"].startswith("plan: ")}
+    assert planned <= {document["collector"] for document in documents}
+    silent = {document["collector"] for document in documents if not document["facts"]}
+    assert silent == set(allowed)
+
+
 # --- the secret ----------------------------------------------------------------------------
 
-def test_the_static_secret_is_really_in_the_fixtures():
+def test_the_static_secret_is_in_the_fixtures_where_only_the_redactor_can_stop_it():
     text = (REPLAY_DIR / "ecs-bad-deploy" / "aws.json").read_text()
-    assert text.count(SECRET) == 2  # both task definitions
+    assert text.count(SECRET) == 4  # both task definitions (hidden by name), one log line, one service event
+    for answer, needle in (("a Logs Insights line", "connect failed for postgres://"), ("an ECS service event", "stopped: container command failed")):
+        assert any(needle in line and SECRET in line for line in text.splitlines()), answer
 
 
 def test_the_secret_is_in_no_file_of_the_case_and_no_command_output(ecs_run):
@@ -241,9 +270,42 @@ def test_pipeline_error_names_the_step_that_failed(tmp_path):
         case.render(required=True)
 
 
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_a_draft_that_blames_the_distractor_is_not_confirmed_and_its_actions_are_not_recommended(scenario, tmp_path):
+    folder = REPLAY_DIR / scenario
+    draft = distractor_draft(folder)
+    distractor = draft["summary"]["top_cause"]
+    case = start_case(folder, tmp_path)
+    summary = case.judge(favourable_judge(folder), apply_labels=True, draft=draft)
+    assert summary["causes"][distractor]["label"] != "confirmed"
+    blamed = [action["id"] for action in draft["actions"] if action["cause"] == distractor]
+    assert blamed
+    assert {summary["actions"][action_id]["label"] for action_id in blamed} == {"candidate"}
+    report = read_json(case.case_dir / "report.json")
+    assert next(cause for cause in report["causes"] if cause["id"] == distractor)["label"] != "confirmed"
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_publishing_after_a_change_to_report_json_needs_a_new_render(scenario, tmp_path):
+    folder = REPLAY_DIR / scenario
+    case = start_case(folder, tmp_path)
+    case.judge(favourable_judge(folder), apply_labels=True)
+    case.render(required=True)
+    report = read_json(case.case_dir / "report.json")
+    report["open_questions"].append("Who approved the change, and when?")
+    (case.case_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+    refused = case.script("publish audit", "publish.py", "audit", "--case-dir", str(case.case_dir), required=False)
+    assert refused["returncode"] == 1 and "rendered again" in refused["stderr"]
+    assert not (case.case_dir / "audit.json").exists()
+    case.render(required=True)
+    case.publish()
+    assert read_json(case.case_dir / "audit.json")["clean"] is True
+
+
 # --- no real call ---------------------------------------------------------------------------
 
-def test_replay_makes_no_call_to_aws_or_kubectl(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scenario", SCENARIOS)
+def test_replay_makes_no_call_to_aws_or_kubectl(scenario, tmp_path, monkeypatch):
     stubs, marker = tmp_path / "stubs", tmp_path / "real-call-marker"
     stubs.mkdir()
     for tool in ("aws", "kubectl"):
@@ -251,8 +313,9 @@ def test_replay_makes_no_call_to_aws_or_kubectl(tmp_path, monkeypatch):
         script.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{marker}"\nexit 99\n')
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("PATH", f"{stubs}{os.pathsep}{os.environ['PATH']}")
-    run_pipeline(REPLAY_DIR / SCENARIOS[-1], tmp_path / "run", favourable_judge(REPLAY_DIR / SCENARIOS[-1]))
+    run_pipeline(REPLAY_DIR / scenario, tmp_path / "run", favourable_judge(REPLAY_DIR / scenario))
     assert not marker.exists()
+    assert load_call_log(tmp_path / "run")  # the replay did answer calls
 
 
 # --- the guard ------------------------------------------------------------------------------
@@ -262,8 +325,12 @@ def test_the_guard_allows_every_command_the_pipeline_ran_and_asks_before_a_map_c
     monkeypatch.setenv("HOME", str(home))
     skill_dir = home / ".claude" / "skills" / "ai-triage"
     context = context_from_config(load_config(skill_dir / "config" / "triage-config.yaml"), skill_dir)
-    verdicts = {record["step"]: decide(skill_style(record["argv"], home), context).kind for record in run["log"]}
-    assert {step: kind for step, kind in verdicts.items() if kind != ALLOW} == {}
+    checked = [(record["step"], skill_style(record["argv"], home)) for record in run["log"]]
+    assert [step for step, _ in checked].count("plan: opensearch") == (3 if run["name"] == "ecs-bad-deploy" else 0)
+    assert "judge run" in [step for step, _ in checked]
+    assert len({command for _, command in checked}) == len(checked)  # no command stands in for another
+    refused = [(step, command[-120:]) for step, command in checked if decide(command, context).kind != ALLOW]
+    assert refused == []
     apply_command = skill_style(
         [str(skill_dir / ".venv" / "bin" / "python"), str(skill_dir / "scripts" / "map_suggest.py"), "apply",
          "--case-dir", str(run["case_dir"]), "--service-name", "checkout-api"], home)
@@ -310,9 +377,11 @@ def test_a_finding_that_quotes_only_what_was_asked_is_refused_on_real_evidence(r
     assert wrong_reason == []
 
 
-def test_the_canned_findings_quote_found_text_not_the_request(run):
+def test_every_valid_finding_keeps_the_found_text_that_holds_its_excerpt(run):
     checked = read_json(run["case_dir"] / "findings" / "checked.json")
-    assert all(item["matched_text"] for item in checked["valid"])
+    collapse = lambda text: " ".join(text.split())  # noqa: E731
+    assert checked["valid"]
+    assert all(collapse(item["excerpt"]) in collapse(item["matched_text"]) for item in checked["valid"])
 
 
 # --- the judge sees what was asked of each source -------------------------------------------

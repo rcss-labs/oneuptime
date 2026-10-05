@@ -3,9 +3,9 @@
   "findings": [
     {
       "id": "compute-1",
-      "claim": "Task definition revision 42 of checkout-api differs from revision 41 only in the environment variable DB_HOST, which now names checkout-db.internal.example.com instead of the database endpoint.",
+      "claim": "The comparison of task definition revisions 41 and 42 of checkout-api found one change: DB_HOST now names checkout-db.internal.example.com instead of the database endpoint.",
       "fact_ids": [
-        "ecs-prod-main-eu-west-1:ecs-0014"
+        "ecs-prod-main-eu-west-1:ecs-0015"
       ],
       "excerpt": "DB_HOST changed from checkout-prod-db.cluster-abc.eu-west-1.rds.example.com to checkout-db.internal.example.com",
       "provenance": "inferred",
@@ -35,9 +35,9 @@
     },
     {
       "id": "compute-4",
-      "claim": "Tasks of the new revision stopped because the essential container exited with code 1.",
+      "claim": "A stopped task of checkout-api shows that its essential container exited with code 1.",
       "fact_ids": [
-        "ecs-prod-main-eu-west-1:ecs-0010"
+        "ecs-prod-main-eu-west-1:ecs-0011"
       ],
       "excerpt": "Essential container in task exited; containers: checkout-api exit code 1",
       "provenance": "incident_time",

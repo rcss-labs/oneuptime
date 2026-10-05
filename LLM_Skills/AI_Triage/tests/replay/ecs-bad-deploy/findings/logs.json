@@ -25,7 +25,7 @@
     },
     {
       "id": "logs-3",
-      "claim": "The ENOTFOUND message is by far the most frequent message pattern in the application log group.",
+      "claim": "The message patterns of the application log group include the ENOTFOUND error for checkout-db.internal.example.com.",
       "fact_ids": [
         "logs-prod-main-eu-west-1:logs-0009"
       ],

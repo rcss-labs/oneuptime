@@ -10,5 +10,8 @@
   "mitigation_keywords": [
     "certificate"
   ],
-  "must_not_contain": []
+  "must_not_contain": [],
+  "no_facts_expected": {
+    "platform": "The recorded world has no AWS Health event and no service quota with usage tracking"
+  }
 }

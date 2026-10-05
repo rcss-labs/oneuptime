@@ -45,18 +45,37 @@ ran are listed by `replay_support.load_log(tmp_path)`. The tests are in `tests/t
 
 ## Run a scenario by hand
 
-Point the commands at the scenario folder with `AI_TRIAGE_FIXTURES`; every command that would call a real tool prints
-`REPLAY MODE` and answers from the folder instead. Use a skill folder whose `config/` holds the scenario's
-`triage-config.yaml` and `service-map.yaml` (set `cases_dir` to a folder you can write to):
+Work in a scratch copy of the skill folder under a temporary `HOME`. Never use your installed skill folder or its
+config: the scenario's config and service map would replace yours. Point the commands at the scenario folder with
+`AI_TRIAGE_FIXTURES`; every command that would call a real tool prints `REPLAY MODE` and answers from the folder instead.
+A call with no recorded answer is an error in the evidence file. Set `AI_TRIAGE_FIXTURE_LOG` to a file to get one line per
+call, with the recorded entry that answered it.
 
 ```
-export AI_TRIAGE_FIXTURES="$PWD/tests/replay/ecs-bad-deploy"
+SCENARIO="$PWD/tests/replay/ecs-bad-deploy"
+export HOME="$(mktemp -d)"                      # this shell only; a scratch home
 S="$HOME/.claude/skills/ai-triage"
-"$S/.venv/bin/python" "$S/scripts/case.py" init --incident "$AI_TRIAGE_FIXTURES/incident.json" --now 2026-10-04T11:10:00Z
-"$S/.venv/bin/python" "$S/scripts/case.py" target --case-dir <the case_dir printed above> --service checkout-api --environment prod
-"$S/.venv/bin/python" "$S/scripts/case.py" plan --case-dir <the case_dir>
+mkdir -p "$S/config"
+cp -R skill/ai-triage/scripts skill/ai-triage/judgments skill/ai-triage/templates skill/ai-triage/VERSION "$S/"
+cp "$SCENARIO/triage-config.yaml" "$SCENARIO/service-map.yaml" "$S/config/"
+# edit cases_dir in "$S/config/triage-config.yaml" to a folder under $HOME, for example $HOME/cases
+export AI_TRIAGE_FIXTURES="$SCENARIO"
+python3 "$S/scripts/case.py" init --incident "$SCENARIO/incident.json" --now 2026-10-04T11:10:00Z
+python3 "$S/scripts/case.py" target --case-dir <the case_dir printed above> --service checkout-api --environment prod
+python3 "$S/scripts/case.py" plan --case-dir <the case_dir>
 ```
 
-Run each planned command, copy `findings/` into the case folder, and carry on with `findings.py check`,
-`timeline.py`, `judge.py run` (this one needs TypeSafe, or use the test), `report.py render`, and `publish.py audit`.
-`verify_access.py` refuses to run in replay mode, and preflight skips the kubeconfig and shell checks there.
+Run each planned command (with `python3` in place of the skill's venv python), copy `findings/` into the case folder, and
+carry on with `findings.py check`, `timeline.py`, `judge.py run` (this one needs TypeSafe, or use the test),
+`report.py render`, and `publish.py audit`. `verify_access.py` refuses to run in replay mode, and preflight skips the
+kubeconfig and shell checks there.
+
+## What the tests check beyond the happy path
+
+- Every call the collectors make is recorded: no call is missed and every recorded answer is used (the call log).
+- Every collector writes a fact, or is listed in `expected.json` under `no_facts_expected` with the reason.
+- Metric points and ECS service events are recorded in the order the real service returns them (newest first).
+- `fixture-db-password-do-not-leak` also sits in one application log line and one ECS service event, where only the
+  redactor can stop it.
+- The fake judge reads `expected.json`: it favours a cause only when its statement holds the cause keywords and none of
+  the `not_the_cause` words, so a draft that blames the distractor is not confirmed.

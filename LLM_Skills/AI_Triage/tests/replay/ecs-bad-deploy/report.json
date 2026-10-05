@@ -14,7 +14,7 @@
     {
       "id": "C1",
       "label": "confirmed",
-      "statement": "Revision 42 of checkout-api, deployed at 10:37, changed the environment variable DB_HOST to checkout-db.internal.example.com, which does not resolve, so every new task exits with code 1 and fails its health check",
+      "statement": "Revision checkout-api:42, deployed at 10:37, changed the environment variable DB_HOST to checkout-db.internal.example.com, which does not resolve, so every new task exits with code 1 and fails its health check",
       "supporting": [
         "compute-1",
         "compute-2",

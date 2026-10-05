@@ -22,7 +22,7 @@ import yaml
 
 from fakes import FakeJudge
 from triage.config import load_config
-from triage.fixtures import FIXTURE_ENV
+from triage.fixtures import FIXTURE_ENV, LOG_ENV
 from triage.judge import run_judgments
 from triage.questions import default_questions_path, load_questions
 
@@ -32,6 +32,7 @@ SKILL_SOURCE = TESTS_DIR.parent / "skill" / "ai-triage"
 SCENARIOS = ("ecs-bad-deploy", "cert-expired")
 SKILL_PARTS = ("scripts", "judgments", "templates", "VERSION")
 LOG_NAME = "pipeline-commands.json"
+CALL_LOG_NAME = "fixture-calls.jsonl"
 COMMAND_TIMEOUT_SECONDS = 120
 
 
@@ -46,15 +47,27 @@ def _choice(name: str, confidence: float, question: dict) -> dict:
             "probabilities": {option: (confidence if option == name else rest) for option in options}}
 
 
+def _expected(scenario: Path) -> dict:
+    return json.loads((scenario / "expected.json").read_text())
+
+
+def names_the_real_cause(scenario: Path, statement: str) -> bool:
+    """The ground truth of a scenario: a statement holds every expected cause keyword and none of the words of
+    the distractors (expected.json). The judges below read this, never the draft's own top cause."""
+    expected, text = _expected(scenario), str(statement).lower()
+    return (all(word.lower() in text for word in expected["cause_keywords"])
+            and not any(word.lower() in text for word in expected["not_the_cause"]))
+
+
 def _answers(scenario: Path, relation: str):
-    """A judge's answers that favour the canned top cause: its findings relate as `relation`, it fits the
-    symptoms and scope, it wins the ranking, and the actions address it. Any other cause fits poorly."""
-    report = json.loads((scenario / "report.json").read_text())
-    top = next(cause for cause in report["causes"] if cause["id"] == report["summary"]["top_cause"])
-    marker = top["statement"][:30]
+    """A judge's answers that favour a cause only when it is the real one (see names_the_real_cause): it fits the
+    symptoms and scope, wins the ranking, and its actions address it. Any other cause fits poorly, loses the
+    ranking, and its actions are judged unrelated. Findings are judged as `relation` (they are facts)."""
 
     def respond(state: Any, questions: dict[str, dict]) -> dict[str, dict]:
-        favoured = isinstance(state, dict) and str(state.get("hypothesis", "")).startswith(marker)
+        favoured = isinstance(state, dict) and names_the_real_cause(scenario, state.get("hypothesis", state.get("cause", "")))
+        winners = [cause_id for cause_id, candidate in (state.get("candidates") or {}).items()
+                   if names_the_real_cause(scenario, candidate.get("statement", ""))] if isinstance(state, dict) else []
         answers: dict[str, dict] = {}
         for question_id, question in questions.items():
             if question_id == "evidence_relation":
@@ -66,9 +79,10 @@ def _answers(scenario: Path, relation: str):
             elif question_id == "scope_fit":
                 answers[question_id] = _choice("matches" if favoured else "broader", 0.9, question)
             elif question_id == "cause_rank":
-                answers[question_id] = _choice(top["id"], 0.72, question)
+                pick = winners[0] if winners else "insufficient_evidence"
+                answers[question_id] = _choice(pick, 0.72, question)
             elif question_id == "remediation_target":
-                answers[question_id] = _choice("addresses_cause", 0.9, question)
+                answers[question_id] = _choice("addresses_cause" if favoured else "unrelated", 0.9, question)
             elif question_id == "action_specific":
                 answers[question_id] = {"type": "noul", "noul": 0.88}
         return answers
@@ -77,7 +91,7 @@ def _answers(scenario: Path, relation: str):
 
 
 def favourable_judge(scenario: Path) -> FakeJudge:
-    """A FakeJudge that answers every question in favour of the canned cause."""
+    """A FakeJudge that answers every question in favour of the scenario's real cause and against any other."""
     return FakeJudge(_answers(scenario, "supports"))
 
 
@@ -91,6 +105,12 @@ def skill_style(argv: list[str], home: Path) -> str:
     prefix = str(home) + "/"
     words = [f'"$HOME/{word[len(prefix):]}"' if word.startswith(prefix) else shlex.quote(word) for word in argv]
     return " ".join(words)
+
+
+def load_call_log(base: Path) -> list[dict]:
+    """Every aws, kubectl, and OpenSearch call the replay answered or missed, with the recorded entry that answered it."""
+    path = base / CALL_LOG_NAME
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.is_file() else []
 
 
 def load_log(base: Path) -> list[dict]:
@@ -113,6 +133,7 @@ class ReplayCase:
     def _env(self) -> dict[str, str]:
         env = {key: value for key, value in os.environ.items() if not key.startswith("AI_TRIAGE_")}
         env[FIXTURE_ENV] = str(self.scenario)
+        env[LOG_ENV] = str(self.base / CALL_LOG_NAME)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         return env
 
@@ -143,14 +164,23 @@ class ReplayCase:
         self.script("findings check", "findings.py", "check", "--case-dir", str(self.case_dir))
         self.script("timeline", "timeline.py", "--case-dir", str(self.case_dir))
 
-    def judge(self, judge: FakeJudge, apply_labels: bool = False) -> dict:
-        """Copy the canned report, judge it in this process, and (as the skill's agent does) write the labels the
-        judgments allow into report.json."""
-        shutil.copyfile(self.scenario / "report.json", self.case_dir / "report.json")
+    def judge(self, judge: FakeJudge, apply_labels: bool = False, draft: dict | None = None) -> dict:
+        """Copy the canned report (or write `draft` instead), judge it in this process, and (as the skill's agent
+        does) write the labels the judgments allow into report.json."""
+        if draft is None:
+            shutil.copyfile(self.scenario / "report.json", self.case_dir / "report.json")
+        else:
+            (self.case_dir / "report.json").write_text(json.dumps(draft, indent=2) + "\n")
         config = load_config(self.skill_dir / "config" / "triage-config.yaml")
         questions = load_questions(default_questions_path(self.skill_dir))
         incident = json.loads((self.scenario / "incident.json").read_text())
         summary = run_judgments(self.case_dir, config, judge, questions, random.Random(incident["number"]))
+        # judge.py run needs TypeSafe, so the judging runs in this process; the command the skill would run is logged
+        # in its own form, so that the guard test checks it too.
+        self.log.append({"step": "judge run", "returncode": 0, "stdout": "", "stderr": "", "in_process": True,
+                         "argv": [str(self.python), str(self.skill_dir / "scripts" / "judge.py"), "run",
+                                  "--case-dir", str(self.case_dir)]})
+        (self.base / LOG_NAME).write_text(json.dumps(self.log))
         if apply_labels:
             apply_judged_labels(self.case_dir)
         return summary
@@ -165,6 +195,19 @@ class ReplayCase:
         self.script("publish audit", "publish.py", "audit", "--case-dir", case)
         self.script("publish confluence", "publish.py", "confluence", "--case-dir", case)
         self.script("publish slack-message", "publish.py", "slack-message", "--case-dir", case)
+
+
+def distractor_draft(scenario: Path) -> dict:
+    """The canned report with the distractor named as the top cause: C2 is promoted, the findings that argued
+    against it now support it, and both actions address it."""
+    report = json.loads((scenario / "report.json").read_text())
+    distractor = next(cause for cause in report["causes"] if cause["id"] != report["summary"]["top_cause"])
+    report["summary"]["top_cause"] = distractor["id"]
+    distractor["label"] = "confirmed"
+    distractor["supporting"], distractor["contradicting"] = distractor["contradicting"], []
+    for action in report["actions"]:
+        action["cause"] = distractor["id"]
+    return report
 
 
 def apply_judged_labels(case_dir: Path) -> None:
