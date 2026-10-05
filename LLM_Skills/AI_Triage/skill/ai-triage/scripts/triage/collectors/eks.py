@@ -14,6 +14,7 @@ MAX_NODEGROUPS = 10
 MAX_ADDONS = 20
 MAX_UPDATES = "20"
 MAX_WORKLOADS = 10
+MAX_RESOURCE_CONTAINERS = 3
 MAX_CONTAINERS_PER_POD = 2
 LOG_HEAD_LINES = 20
 LOG_ERROR_LINES = 30
@@ -155,6 +156,34 @@ def _restarts(pod: dict) -> int:
     return sum(c.get("restartCount", 0) for c in _container_statuses(pod) + _init_statuses(pod))
 
 
+def _resources(container: dict) -> dict:
+    """Requests and limits of one container from its spec; an absent value is stated as "none"."""
+    resources = container.get("resources") or {}
+    limits, requests = resources.get("limits") or {}, resources.get("requests") or {}
+    return {
+        "name": container.get("name"),
+        "memory_limit": limits.get("memory", "none"), "memory_request": requests.get("memory", "none"),
+        "cpu_limit": limits.get("cpu", "none"), "cpu_request": requests.get("cpu", "none"),
+    }
+
+
+def _resources_text(entries: list[dict]) -> str:
+    return "; ".join(
+        f"container {e['name']}: memory limit {e['memory_limit']}, request {e['memory_request']}; "
+        f"cpu limit {e['cpu_limit']}, request {e['cpu_request']}"
+        for e in entries[:MAX_RESOURCE_CONTAINERS]
+    )
+
+
+def _was_killed_or_restarted(pod: dict) -> bool:
+    if _restarts(pod) > 0:
+        return True
+    return any(
+        "terminated" in (c.get("state") or {}) or "terminated" in (c.get("lastState") or {})
+        for c in _container_statuses(pod)
+    )
+
+
 def _pod_fact(ctx: CollectContext, namespace: str, pod: dict) -> None:
     name = pod["metadata"]["name"]
     status = pod.get("status") or {}
@@ -168,10 +197,20 @@ def _pod_fact(ctx: CollectContext, namespace: str, pod: dict) -> None:
         if condition.get("status") == "False" and condition.get("message"):
             phrases.append(f"condition {condition.get('type')} false ({condition.get('reason')})")
             messages.append(condition["message"])
+    data: dict = {}
+    if _was_killed_or_restarted(pod):
+        # The limit goes in the same fact as the termination reason, so an OOMKilled container and its limit are together.
+        failing = {c.get("name") for c in _container_statuses(pod) if c.get("restartCount") or "terminated" in (c.get("lastState") or {})}
+        entries = [_resources(c) for c in (pod.get("spec") or {}).get("containers") or []]
+        entries.sort(key=lambda e: e["name"] not in failing)
+        if entries:
+            phrases.append(f"resources: {_resources_text(entries)}")
+            data["containers"] = entries
     detail = f"; {'; '.join(phrases)}" if phrases else ""
     ctx.evidence.add(
         kind=CURRENT, resource=f"pod/{namespace}/{name}", command=ctx.last_command,
         summary=f"Pod {name} is {status.get('phase')} and not ready, {_restarts(pod)} restarts{detail}",
+        data=data,
         excerpt="; ".join(messages),
     )
 
@@ -238,15 +277,17 @@ def _add_workload(ctx: CollectContext, cluster: str, namespace: str, workload: s
         desired = spec.get("replicas", status.get("desiredNumberScheduled", 0))
         ready = status.get("readyReplicas", status.get("numberReady", 0))
         updated = status.get("updatedReplicas", status.get("updatedNumberScheduled", 0))
+        entries = [_resources(c) for c in ((spec.get("template") or {}).get("spec") or {}).get("containers") or []]
+        resources = f"; resources: {_resources_text(entries)}" if entries else ""
         ctx.evidence.add(
             kind=CURRENT, resource=f"{workload}", command=ctx.last_command,
             summary=(
                 f"Workload {workload}: desired {desired}, ready {ready}, updated {updated}; "
-                f"conditions {_conditions_text(status.get('conditions') or [])}"
+                f"conditions {_conditions_text(status.get('conditions') or [])}{resources}"
             ),
             # Kubernetes objects have no ARN; kind, name and namespace identify the owner to act on.
             data={
-                "desired": desired, "ready": ready, "updated": updated,
+                "desired": desired, "ready": ready, "updated": updated, "containers": entries,
                 "workload": {
                     "kind": reply.get("kind") or workload.split("/", 1)[0].capitalize(),
                     "name": workload.split("/", 1)[1], "namespace": namespace,

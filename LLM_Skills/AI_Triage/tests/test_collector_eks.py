@@ -54,11 +54,13 @@ def container(name="app", ready=True, restarts=0, state=None, last=None):
 
 
 def pod(name="payments-api-abc", phase="Running", ready=True, restarts=0, waiting=None, terminated=None,
-        containers=None):
+        containers=None, resources=None):
     state = {"waiting": waiting} if waiting else None
     statuses = containers if containers is not None else [
         container(ready=ready, restarts=restarts, state=state, last=terminated)]
-    return {"metadata": {"name": name}, "status": {"phase": phase, "containerStatuses": statuses}}
+    spec_containers = [{"name": c["name"], "resources": (resources or {}).get(c["name"], {})} for c in statuses]
+    return {"metadata": {"name": name}, "spec": {"containers": spec_containers},
+            "status": {"phase": phase, "containerStatuses": statuses}}
 
 
 def event(reason="BackOff", message="Back-off restarting failed container", when=IN_WINDOW, kind="Warning",
@@ -648,3 +650,53 @@ def test_workload_fact_names_the_owning_kubernetes_object(config_data, tmp_path)
     fact = with_text(ctx, "Workload deployment/payments-api")[0]
     assert fact.data["workload"] == {"kind": "Deployment", "name": "payments-api", "namespace": "web"}
     assert fact.data["desired"] == 3
+
+
+def workload_with(containers):
+    body = deployment()
+    body["spec"]["template"] = {"spec": {"containers": containers}}
+    return body
+
+
+def workload_fact(config_data, tmp_path, containers):
+    ctx, _, _ = run(config_data, tmp_path, kube=kube_answers(**{"get deployment/payments-api": workload_with(containers)}),
+                    targets={"namespace": "web", "workloads": "deployment/payments-api"})
+    return with_text(ctx, "Workload deployment/payments-api")[0]
+
+
+def test_workload_fact_states_requests_and_limits_per_container(config_data, tmp_path):
+    fact = workload_fact(config_data, tmp_path, [
+        {"name": "api", "resources": {"limits": {"memory": "256Mi"}, "requests": {"memory": "128Mi", "cpu": "100m"}}}])
+    assert "container api: memory limit 256Mi, request 128Mi; cpu limit none, request 100m" in fact.summary
+    assert fact.data["containers"] == [{"name": "api", "memory_limit": "256Mi", "memory_request": "128Mi",
+                                        "cpu_limit": "none", "cpu_request": "100m"}]
+
+
+def test_container_without_any_limit_says_so(config_data, tmp_path):
+    fact = workload_fact(config_data, tmp_path, [{"name": "api"}])
+    assert "container api: memory limit none, request none; cpu limit none, request none" in fact.summary
+
+
+def test_summary_names_three_containers_and_data_holds_all(config_data, tmp_path):
+    fact = workload_fact(config_data, tmp_path, [{"name": n} for n in ("a", "b", "c", "d")])
+    assert "container c:" in fact.summary and "container d:" not in fact.summary
+    assert [c["name"] for c in fact.data["containers"]] == ["a", "b", "c", "d"]
+
+
+def test_killed_pod_fact_has_the_reason_and_the_limit_together(config_data, tmp_path):
+    killed = pod(restarts=3, ready=False, waiting={"reason": "CrashLoopBackOff"},
+                 terminated={"reason": "OOMKilled", "exitCode": 137},
+                 resources={"app": {"limits": {"memory": "256Mi"}, "requests": {"memory": "128Mi"}}})
+    ctx, aws, fake_kube = run(config_data, tmp_path, kube=kube_answers(**{"get pods": {"items": [killed]}}),
+                              targets={"namespace": "web"})
+    fact = with_text(ctx, "Pod payments-api-abc is")[0]
+    assert "OOMKilled" in fact.summary and "memory limit 256Mi" in fact.summary
+    assert fact.data["containers"][0]["memory_limit"] == "256Mi"
+    assert_read_only(ctx, aws, fake_kube)
+
+
+def test_pod_that_never_restarted_does_not_get_a_resources_sentence(config_data, tmp_path):
+    waiting = pod(phase="Pending", containers=[container(ready=False, state={"waiting": {"reason": "ImagePullBackOff"}})])
+    ctx, _, _ = run(config_data, tmp_path, kube=kube_answers(**{"get pods": {"items": [waiting]}}),
+                    targets={"namespace": "web"})
+    assert "limit" not in with_text(ctx, "Pod payments-api-abc is")[0].summary
