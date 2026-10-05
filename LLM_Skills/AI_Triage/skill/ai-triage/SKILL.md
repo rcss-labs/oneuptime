@@ -59,9 +59,11 @@ Do the steps in order. Work without stopping to ask, except where a step says to
    None: `run discover --hostname <host>`, save its output to
    `~/.ai-triage/intake/<number>-discovery.json`, then
    `run case target --case-dir <case> --discovery <that file>`.
-4. **Collect.** `run case plan --case-dir <case>` prints the collection commands.
-   Run every one as printed. Then open the playbook of each resource in the target
-   (table below) and run the further collectors it names.
+4. **Collect.** `run case collect --case-dir <case>` runs the whole collection plan
+   and prints, per collector, the evidence file it wrote and its counts of facts
+   and errors (`run case plan ...` only prints the plan). Read the errors: a source
+   that could not be read is not a healthy source. Then open the playbook of each
+   resource in the target (table below) and run the further collectors it names.
 5. **Analysts.** Dispatch the analysts in parallel, with the model set to Sonnet,
    each with `prompts/analyst-common.md`, its domain prompt, and the case folder:
    changes and logs always; compute, data, and edge when the case has evidence in
