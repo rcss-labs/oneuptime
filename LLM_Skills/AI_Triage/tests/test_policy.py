@@ -36,7 +36,7 @@ def test_shipped_policy_covers_the_documented_areas(policy):
         "elasticfilesystem:DescribeMountTargets",
         "config:GetResourceConfigHistory",
         "iam:SimulatePrincipalPolicy",
-        "ssm:GetParameter",
+        "ssm:DescribeParameters",
         "secretsmanager:DescribeSecret",
     ):
         assert action in allowed
@@ -231,3 +231,19 @@ def test_approved_list_and_shipped_policy_are_the_same_set(policy):
     shipped = {a.lower() for s in policy["Statement"] if s["Effect"] == "Allow" for a in s["Action"]}
     assert shipped == set(APPROVED_ALLOW_ACTIONS)
     assert all(action == action.lower() for action in APPROVED_ALLOW_ACTIONS)
+
+
+UNUSED_ACTIONS = (
+    "ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "codebuild:BatchGetBuilds",
+    "pi:DescribeDimensionKeys", "pi:GetDimensionKeyDetails", "logs:GetLogRecord", "logs:GetLogGroupFields",
+    "config:BatchGetResourceConfig", "tag:GetTagKeys", "tag:GetTagValues", "cloudwatch:DescribeAlarmsForMetric",
+    "health:DescribeAffectedEntities", "servicequotas:GetServiceQuota", "cloudformation:DescribeStackResources",
+    "codepipeline:GetPipelineExecution", "codepipeline:ListActionExecutions", "wafv2:GetRuleGroup",
+)
+
+
+@pytest.mark.parametrize("action", UNUSED_ACTIONS)
+def test_actions_that_no_code_or_playbook_uses_are_not_granted(policy, action):
+    allowed = {a.lower() for s in policy["Statement"] if s["Effect"] == "Allow" for a in s["Action"]}
+    assert action.lower() not in allowed
+    assert action.lower() not in APPROVED_ALLOW_ACTIONS

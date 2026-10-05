@@ -6,11 +6,9 @@
       "Effect": "Allow",
       "Action": [
         "logs:GetLogEvents", "logs:FilterLogEvents", "logs:StartQuery", "logs:StopQuery",
-        "logs:GetQueryResults", "logs:GetLogRecord", "logs:GetLogGroupFields",
-        "cloudwatch:DescribeAlarms", "cloudwatch:DescribeAlarmHistory", "cloudwatch:DescribeAlarmsForMetric",
-        "health:DescribeEvents", "health:DescribeEventDetails", "health:DescribeAffectedEntities",
-        "tag:GetResources", "tag:GetTagKeys", "tag:GetTagValues",
-        "servicequotas:ListServiceQuotas", "servicequotas:GetServiceQuota"
+        "logs:GetQueryResults", "cloudwatch:DescribeAlarms", "cloudwatch:DescribeAlarmHistory",
+        "health:DescribeEvents", "health:DescribeEventDetails", "tag:GetResources",
+        "servicequotas:ListServiceQuotas"
       ],
       "Resource": "*"
     },
@@ -18,12 +16,13 @@
       "Sid": "TriageCompute",
       "Effect": "Allow",
       "Action": [
-        "ecr:DescribeImages", "ecr:DescribeImageScanFindings",
-        "ec2:GetConsoleOutput",
-        "application-autoscaling:DescribeScalableTargets", "application-autoscaling:DescribeScalingActivities",
-        "application-autoscaling:DescribeScalingPolicies",
-        "lambda:GetFunctionConfiguration", "lambda:GetFunctionConcurrency", "lambda:GetFunctionEventInvokeConfig",
-        "lambda:GetEventSourceMapping", "lambda:GetFunctionUrlConfig", "lambda:GetAlias", "lambda:GetAccountSettings"
+        "ecr:DescribeImages", "ecr:DescribeImageScanFindings", "ec2:GetConsoleOutput",
+        "application-autoscaling:DescribeScalableTargets",
+        "application-autoscaling:DescribeScalingActivities",
+        "application-autoscaling:DescribeScalingPolicies", "lambda:GetFunctionConfiguration",
+        "lambda:GetFunctionConcurrency", "lambda:GetFunctionEventInvokeConfig",
+        "lambda:GetEventSourceMapping", "lambda:GetFunctionUrlConfig", "lambda:GetAlias",
+        "lambda:GetAccountSettings"
       ],
       "Resource": "*"
     },
@@ -31,15 +30,13 @@
       "Sid": "TriageDataStores",
       "Effect": "Allow",
       "Action": [
-        "rds:DownloadDBLogFilePortion",
-        "pi:GetResourceMetrics", "pi:DescribeDimensionKeys", "pi:GetDimensionKeyDetails", "pi:GetResourceMetadata",
-        "pi:ListAvailableResourceDimensions", "pi:ListAvailableResourceMetrics",
-        "es:DescribeDomain", "es:DescribeDomains", "es:DescribeDomainConfig", "es:DescribeDomainHealth",
+        "rds:DownloadDBLogFilePortion", "pi:GetResourceMetrics", "pi:GetResourceMetadata",
+        "pi:ListAvailableResourceDimensions", "pi:ListAvailableResourceMetrics", "es:DescribeDomain",
+        "es:DescribeDomains", "es:DescribeDomainConfig", "es:DescribeDomainHealth",
         "es:DescribeDomainNodes", "es:DescribeDomainChangeProgress", "es:ListTags",
         "elasticfilesystem:DescribeMountTargets", "elasticfilesystem:DescribeMountTargetSecurityGroups",
         "elasticfilesystem:DescribeAccessPoints", "elasticfilesystem:DescribeFileSystemPolicy",
-        "elasticfilesystem:DescribeLifecycleConfiguration",
-        "sns:GetTopicAttributes"
+        "elasticfilesystem:DescribeLifecycleConfiguration", "sns:GetTopicAttributes"
       ],
       "Resource": "*"
     },
@@ -49,18 +46,21 @@
       "Action": [
         "elasticloadbalancing:DescribeRules", "elasticloadbalancing:DescribeTargetGroupAttributes",
         "elasticloadbalancing:DescribeListenerCertificates", "elasticloadbalancing:DescribeTags",
-        "acm:DescribeCertificate",
-        "cloudfront:GetDistribution", "cloudfront:GetDistributionConfig",
-        "wafv2:GetWebACL", "wafv2:GetWebACLForResource", "wafv2:GetRuleGroup", "wafv2:GetSampledRequests"
+        "acm:DescribeCertificate", "cloudfront:GetDistribution", "cloudfront:GetDistributionConfig",
+        "wafv2:GetWebACL", "wafv2:GetWebACLForResource", "wafv2:GetSampledRequests"
       ],
       "Resource": "*"
     },
     {
       "Sid": "TriageApiGatewayRead",
       "Effect": "Allow",
-      "Action": ["apigateway:GET"],
+      "Action": [
+        "apigateway:GET"
+      ],
       "Resource": [
-        "arn:aws:apigateway:*::/restapis/*", "arn:aws:apigateway:*::/apis/*", "arn:aws:apigateway:*::/account",
+        "arn:aws:apigateway:*::/restapis/*",
+        "arn:aws:apigateway:*::/apis/*",
+        "arn:aws:apigateway:*::/account",
         "arn:aws:apigateway:*::/domainnames/*"
       ]
     },
@@ -68,11 +68,8 @@
       "Sid": "TriageChangesAndConfig",
       "Effect": "Allow",
       "Action": [
-        "cloudformation:DescribeStackEvents", "cloudformation:DescribeStackResources",
-        "codepipeline:GetPipelineState", "codepipeline:GetPipelineExecution", "codepipeline:ListPipelineExecutions",
-        "codepipeline:ListActionExecutions", "codebuild:BatchGetBuilds",
-        "config:GetResourceConfigHistory", "config:BatchGetResourceConfig",
-        "ssm:DescribeParameters", "ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"
+        "cloudformation:DescribeStackEvents", "codepipeline:GetPipelineState",
+        "codepipeline:ListPipelineExecutions", "config:GetResourceConfigHistory", "ssm:DescribeParameters"
       ],
       "Resource": "*"
     },
@@ -80,8 +77,8 @@
       "Sid": "TriageAccessDiagnosis",
       "Effect": "Allow",
       "Action": [
-        "iam:GetRole", "iam:GetRolePolicy", "iam:GetPolicy", "iam:GetPolicyVersion", "iam:SimulatePrincipalPolicy",
-        "kms:DescribeKey", "kms:GetKeyPolicy",
+        "iam:GetRole", "iam:GetRolePolicy", "iam:GetPolicy", "iam:GetPolicyVersion",
+        "iam:SimulatePrincipalPolicy", "kms:DescribeKey", "kms:GetKeyPolicy",
         "secretsmanager:DescribeSecret", "secretsmanager:ListSecrets"
       ],
       "Resource": "*"
@@ -90,12 +87,9 @@
       "Sid": "DenySecretsAndInteractiveAccess",
       "Effect": "Deny",
       "Action": [
-        "secretsmanager:GetSecretValue", "secretsmanager:BatchGetSecretValue",
-        "kms:Decrypt",
-        "ssm:StartSession", "ssm:SendCommand",
-        "ecs:ExecuteCommand",
-        "ec2:GetPasswordData", "ec2-instance-connect:*",
-        "rds-data:*", "rds-db:connect"
+        "secretsmanager:GetSecretValue", "secretsmanager:BatchGetSecretValue", "kms:Decrypt",
+        "ssm:StartSession", "ssm:SendCommand", "ecs:ExecuteCommand", "ec2:GetPasswordData",
+        "ec2-instance-connect:*", "rds-data:*", "rds-db:connect"
       ],
       "Resource": "*"
     }

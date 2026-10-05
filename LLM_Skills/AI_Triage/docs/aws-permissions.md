@@ -61,40 +61,43 @@ the common resource paths.
 
 | Area | Actions | Why triage needs it | Sensitivity |
 |---|---|---|---|
-| CloudWatch Logs | `logs:GetLogEvents`, `FilterLogEvents`, `StartQuery`, `StopQuery`, `GetQueryResults`, `GetLogRecord`, `GetLogGroupFields` | Application and platform errors | High: log content |
-| CloudWatch alarms | `cloudwatch:DescribeAlarms`, `DescribeAlarmHistory`, `DescribeAlarmsForMetric` | What fired and when | Low |
-| AWS Health | `health:DescribeEvents`, `DescribeEventDetails`, `DescribeAffectedEntities` | AWS-side incidents | Low |
-| Tagging | `tag:GetResources`, `GetTagKeys`, `GetTagValues` | Finding resources by tag | Low |
-| Service Quotas | `servicequotas:ListServiceQuotas`, `GetServiceQuota` | Limit exhaustion | Low |
+| CloudWatch Logs | `logs:GetLogEvents`, `FilterLogEvents`, `StartQuery`, `StopQuery`, `GetQueryResults` | Application and platform errors | High: log content |
+| CloudWatch alarms | `cloudwatch:DescribeAlarms`, `DescribeAlarmHistory` | What fired and when | Low |
+| AWS Health | `health:DescribeEvents`, `DescribeEventDetails` | AWS-side incidents | Low |
+| Tagging | `tag:GetResources` | Finding resources by tag | Low |
+| Service Quotas | `servicequotas:ListServiceQuotas` | Limit exhaustion | Low |
 | ECR | `ecr:DescribeImages`, `DescribeImageScanFindings` | Which image is deployed and when it was pushed | Low |
 | EC2 | `ec2:GetConsoleOutput` | Boot failures | Medium |
 | Application Auto Scaling | `application-autoscaling:DescribeScalableTargets`, `DescribeScalingActivities`, `DescribeScalingPolicies` | Service scaling history | Low |
 | Lambda | `lambda:GetFunctionConfiguration`, `GetFunctionConcurrency`, `GetFunctionEventInvokeConfig`, `GetEventSourceMapping`, `GetFunctionUrlConfig`, `GetAlias`, `GetAccountSettings` | Settings, limits, event sources | Medium: environment values |
 | RDS | `rds:DownloadDBLogFilePortion` | Database error and slow query logs | High: logs may hold query text |
-| Performance Insights | `pi:GetResourceMetrics`, `DescribeDimensionKeys`, `GetDimensionKeyDetails`, `GetResourceMetadata`, `ListAvailableResourceDimensions`, `ListAvailableResourceMetrics` | Database load and top queries | Medium: query text |
+| Performance Insights | `pi:GetResourceMetrics`, `GetResourceMetadata`, `ListAvailableResourceDimensions`, `ListAvailableResourceMetrics` | Database load and top queries | Medium: query text |
 | OpenSearch domains | `es:DescribeDomain`, `DescribeDomains`, `DescribeDomainConfig`, `DescribeDomainHealth`, `DescribeDomainNodes`, `DescribeDomainChangeProgress`, `ListTags` | Domain state and configuration changes | Low |
 | EFS | `elasticfilesystem:DescribeMountTargets`, `DescribeMountTargetSecurityGroups`, `DescribeAccessPoints`, `DescribeFileSystemPolicy`, `DescribeLifecycleConfiguration` | Mount and access failures | Low |
 | SNS | `sns:GetTopicAttributes` | Delivery policy and failures | Low |
 | Load balancing | `elasticloadbalancing:DescribeRules`, `DescribeTargetGroupAttributes`, `DescribeListenerCertificates`, `DescribeTags` | Routing and health check settings | Low |
 | ACM | `acm:DescribeCertificate` | Certificate expiry | Low |
 | CloudFront | `cloudfront:GetDistribution`, `GetDistributionConfig` | Origins and behaviors | Medium: custom origin headers |
-| WAF | `wafv2:GetWebACL`, `GetWebACLForResource`, `GetRuleGroup`, `GetSampledRequests` | Which rule blocked traffic | High: sampled requests |
+| WAF | `wafv2:GetWebACL`, `GetWebACLForResource`, `GetSampledRequests` | Which rule blocked traffic | High: sampled requests |
 | API Gateway | `apigateway:GET` on REST and HTTP APIs, account settings, domain names | Stages, integrations, throttling | Low |
-| CloudFormation | `cloudformation:DescribeStackEvents`, `DescribeStackResources` | What a stack update changed | Low |
-| CodePipeline, CodeBuild | `codepipeline:GetPipelineState`, `GetPipelineExecution`, `ListPipelineExecutions`, `ListActionExecutions`, `codebuild:BatchGetBuilds` | Correlate releases with the incident | Medium: build environment variables |
-| AWS Config | `config:GetResourceConfigHistory`, `BatchGetResourceConfig` | What changed on one resource, and when | Medium: configuration values |
-| Parameter Store | `ssm:DescribeParameters`, `GetParameter`, `GetParameters`, `GetParametersByPath` | Configuration the application points at | Medium: plain values |
+| CloudFormation | `cloudformation:DescribeStackEvents` | What a stack update changed | Low |
+| CodePipeline | `codepipeline:GetPipelineState`, `ListPipelineExecutions` | Correlate releases with the incident | Low |
+| AWS Config | `config:GetResourceConfigHistory` | What changed on one resource, and when | Medium: configuration values |
+| Parameter Store | `ssm:DescribeParameters` | Which parameters exist (names and metadata only) | Low |
 | IAM | `iam:GetRole`, `GetRolePolicy`, `GetPolicy`, `GetPolicyVersion`, `SimulatePrincipalPolicy` | Diagnose access-denied incidents; power the verify script | Low |
 | KMS | `kms:DescribeKey`, `GetKeyPolicy` | Key state and key access | Low |
 | Secrets Manager | `secretsmanager:DescribeSecret`, `ListSecrets` | Rotation status only | Low |
 
+Actions that no collector or playbook uses are deliberately not granted (Parameter Store values,
+CodeBuild builds, Performance Insights dimension keys, `logs:GetLogRecord`, and similar). Add one together
+with the code that needs it.
+
 ### Sensitive data decisions
 
 - **API Gateway** usage plans and API keys are not readable, because they expose key values.
-- **CodeBuild and CloudFront** build environment variables and custom origin headers are readable; collectors do not store those values.
+- **CloudFront** custom origin headers are readable; collectors do not store those values. CodeBuild is not granted.
 - **Log content** is readable for every log group. Triage is not possible without it.
-- **Parameter Store** plain values are readable. Encrypted values are not, because
-  decryption is not granted.
+- **Parameter Store** parameter values are not readable, only names and metadata.
 - **Secrets Manager** exposes metadata only. Secret values are explicitly denied.
 - **ECS task definitions and Lambda configuration** may contain plaintext
   environment values. The skill's collectors redact secret-looking values before
