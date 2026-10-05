@@ -61,14 +61,15 @@ def _add_role_policies(ctx: CollectContext, name: str) -> None:
     inline = ctx.aws("iam", "list-role-policies", ["--role-name", name, "--max-items", MAX_POLICIES])
     if attached is None and inline is None:
         return
-    attached_names = [p.get("PolicyName", "") for p in (attached or {}).get("AttachedPolicies", [])]
-    inline_names = (inline or {}).get("PolicyNames", [])
+    unread = "could not be read (see errors)"
+    attached_text = (
+        ", ".join(p.get("PolicyName", "") for p in attached.get("AttachedPolicies", [])) or "none"
+        if attached is not None else unread
+    )
+    inline_text = ", ".join(inline.get("PolicyNames", [])) or "none" if inline is not None else unread
     ctx.evidence.add(
         kind=CURRENT, resource=f"role/{name}", command=f"{command}; {ctx.last_command}",
-        summary=(
-            f"Role {name} policies: attached {', '.join(attached_names) or 'none'}; "
-            f"inline {', '.join(inline_names) or 'none'}"
-        ),
+        summary=f"Role {name} policies: attached: {attached_text}; inline: {inline_text}",
     )
 
 

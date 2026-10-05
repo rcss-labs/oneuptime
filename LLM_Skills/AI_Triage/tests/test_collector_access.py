@@ -70,6 +70,24 @@ def test_role_facts(config_data, tmp_path):
         assert aws.called("iam", operation)[0][aws.called("iam", operation)[0].index("--max-items") + 1] == "20"
 
 
+def test_failed_attached_listing_is_not_reported_as_none(config_data, tmp_path):
+    answers = role_answers(**{"iam list-attached-role-policies": access_denied("ListAttachedRolePolicies")})
+    ctx, _, _ = run(config_data, tmp_path, answers, {"role": "checkout-task"})
+    fact = by_summary(ctx, "policies")[0]
+    assert "attached: could not be read (see errors)" in fact.summary
+    assert "inline: inline-queue" in fact.summary
+    assert "attached none" not in fact.summary
+    assert [e["code"] for e in ctx.evidence.errors] == ["AccessDeniedException"]
+
+
+def test_failed_inline_listing_is_not_reported_as_none(config_data, tmp_path):
+    answers = role_answers(**{"iam list-role-policies": access_denied("ListRolePolicies")})
+    ctx, _, _ = run(config_data, tmp_path, answers, {"role": "checkout-task"})
+    fact = by_summary(ctx, "policies")[0]
+    assert "inline: could not be read (see errors)" in fact.summary
+    assert "ReadOrders" in fact.summary and "inline: none" not in fact.summary
+
+
 def test_role_never_used(config_data, tmp_path):
     ctx, _, _ = run(config_data, tmp_path, role_answers(**{"iam get-role": role_reply()}), {"role": "checkout-task"})
     assert "never been used" in by_summary(ctx, "Role checkout-task")[0].summary
