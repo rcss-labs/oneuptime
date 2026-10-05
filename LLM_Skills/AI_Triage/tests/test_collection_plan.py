@@ -662,3 +662,63 @@ def test_the_default_launch_uses_the_same_interpreter(monkeypatch):
     module._launch(["/skill/.venv/bin/python", "/skill/scripts/collect.py", "rds"], 300)
     assert seen["argv"] == [sys.executable, "/skill/scripts/collect.py", "rds"]
     assert seen["timeout"] == 300 and "env" not in seen
+
+
+# change lookups for every resource type
+
+def changes_names(commands):
+    return targets_of(one(commands, "changes"))["resource_names"].split(",")
+
+
+def test_an_eks_cluster_is_looked_up_by_name_and_the_namespace_is_not(config):
+    resources = {"eks": {"cluster": "platform-prod", "namespace": "payments", "workloads": ["deployment/payments-api"]}}
+    names = changes_names(plan(resources, config))
+    assert names == ["platform-prod"]
+
+
+@pytest.mark.parametrize("resources, expected", [
+    ({"auto_scaling_group": "asg-1"}, ["asg-1"]),
+    ({"ec2_instances": ["i-1", "i-2"]}, ["i-1", "i-2"]),
+    ({"api_gateway": "api123"}, ["api123"]),
+    ({"cloudfront_distribution": "E1ABC"}, ["E1ABC"]),
+    ({"efs": "fs-0123"}, ["fs-0123"]),
+    ({"sns_topics": ["t1"]}, ["t1"]),
+    ({"sqs_queues": ["q1"]}, ["q1"]),
+    ({"lambda_functions": ["f1"]}, ["f1"]),
+    ({"dynamodb_tables": ["tbl"]}, ["tbl"]),
+    ({"load_balancer": "lb"}, ["lb"]),
+    ({"rds": "db"}, ["db"]),
+    ({"elasticache": "cache"}, ["cache"]),
+    ({"ecs_service": "c/svc"}, ["svc"]),
+    ({"log_groups": ["/g"]}, []),
+    ({"opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-x-*"}}, []),
+])
+def test_every_resource_type_contributes_its_name(config, resources, expected):
+    commands = plan(resources, config)
+    if expected:
+        assert changes_names(commands) == expected
+    else:
+        assert "resource_names" not in targets_of(one(commands, "changes"))
+
+
+def test_with_every_resource_type_the_names_stay_within_the_cap_and_the_note_lists_what_was_left_out(config):
+    commands = plan(FULL_RESOURCES, config)
+    changes = one(commands, "changes")
+    names = changes_names(commands)
+    assert len(names) == 10 and "platform-prod" in names and "s" in names
+    left_out = changes.reason.split("left out: ")[1].split(", ")
+    assert left_out and not set(left_out) & set(names)
+    assert len(names) + len(left_out) == len(set(_all_names(FULL_RESOURCES)))
+
+
+def _all_names(resources):
+    names = [resources["ecs_service"].split("/")[1], resources["eks"]["cluster"], resources["load_balancer"],
+             resources["rds"], resources["elasticache"], resources["auto_scaling_group"]]
+    for key in ("lambda_functions", "dynamodb_tables", "sqs_queues", "sns_topics", "ec2_instances"):
+        names += resources[key]
+    names += [resources["api_gateway"], resources["cloudfront_distribution"], resources["efs"]]
+    return names
+
+
+def test_the_note_says_nothing_about_left_out_names_when_all_fit(config):
+    assert "left out" not in one(plan({"rds": "db"}, config), "changes").reason

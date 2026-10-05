@@ -277,16 +277,25 @@ def _plan_messaging(p: _Planner) -> None:
 
 
 def _resource_names(resources: dict) -> list[str]:
+    """Every resource name worth a CloudTrail lookup, most specific first, without duplicates."""
     names: list[str] = []
+
+    def add_text(value: Any) -> None:
+        if _is_text(value):
+            names.append(value)
+
     parts = _split_ecs(resources.get("ecs_service"))
     if parts:
         names.append(parts[1])
-    for key in ("load_balancer", "rds", "elasticache"):
-        if _is_text(resources.get(key)):
-            names.append(resources[key])
-    for key in ("lambda_functions", "dynamodb_tables", "sqs_queues"):
+    if isinstance(resources.get("eks"), dict):
+        add_text(resources["eks"].get("cluster"))  # the namespace is not an AWS resource
+    for key in ("load_balancer", "rds", "elasticache", "auto_scaling_group"):
+        add_text(resources.get(key))
+    for key in ("lambda_functions", "dynamodb_tables", "sqs_queues", "sns_topics", "ec2_instances"):
         names += _text_list(resources.get(key)) or []
-    return list(dict.fromkeys(names))[:MAX_RESOURCE_NAMES]
+    for key in ("api_gateway", "cloudfront_distribution", "efs"):
+        add_text(resources.get(key))
+    return list(dict.fromkeys(names))
 
 
 def plan_collection(case: dict, config: TriageConfig, skill_dir: Path) -> list[PlannedCommand]:
@@ -319,10 +328,14 @@ def plan_collection(case: dict, config: TriageConfig, skill_dir: Path) -> list[P
         if key not in handlers and key not in ("sqs_queues", "sns_topics"):
             p.skip(key, "unknown resource key")
     changes = {"incident_start": case["incident_start"]}
-    names = _resource_names(p.resources)
+    every_name = _resource_names(p.resources)
+    names, left_out = every_name[:MAX_RESOURCE_NAMES], every_name[MAX_RESOURCE_NAMES:]
     if names:
         changes = {"resource_names": ",".join(names), **changes}
-    p.collect("changes", changes, "deployments and configuration changes before the incident")
+    reason = "deployments and configuration changes before the incident"
+    if left_out:
+        reason += f"; {len(left_out)} resource names left out: {', '.join(left_out)}"
+    p.collect("changes", changes, reason)
     p.collect("platform", {}, "known AWS service events")
     return p.commands
 
