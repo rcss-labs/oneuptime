@@ -163,6 +163,53 @@ def test_key_pending_deletion(config_data, tmp_path):
     assert "pending deletion" in derived[0].summary and "2026-10-20T00:00:00Z" in derived[0].summary
 
 
+def key_derived(config_data, tmp_path, **overrides):
+    ctx, _, _ = run(config_data, tmp_path, {"kms describe-key": key_reply(**overrides)}, {"kms_key": "1234abcd"})
+    return [f.summary for f in ctx.evidence.facts if f.kind == "derived"]
+
+
+def test_key_pending_import(config_data, tmp_path):
+    (text,) = key_derived(config_data, tmp_path, KeyState="PendingImport", Enabled=False, Origin="EXTERNAL")
+    assert "key material" in text and "calls that use it fail" in text and "disabled" not in text
+
+
+def test_key_pending_replica_deletion(config_data, tmp_path):
+    (text,) = key_derived(config_data, tmp_path, KeyState="PendingReplicaDeletion", Enabled=False,
+                          DeletionDate="2026-10-20T00:00:00+00:00")
+    assert "pending replica deletion" in text and "2026-10-20T00:00:00Z" in text and "disabled" not in text
+
+
+def test_key_unavailable_while_enabled(config_data, tmp_path):
+    (text,) = key_derived(config_data, tmp_path, KeyState="Unavailable", Enabled=True)
+    assert "custom key store cannot be reached" in text and "calls that use it fail" in text
+
+
+def test_key_unavailable_when_not_enabled_is_not_called_disabled(config_data, tmp_path):
+    (text,) = key_derived(config_data, tmp_path, KeyState="Unavailable", Enabled=False)
+    assert "cannot be reached" in text and "disabled" not in text
+
+
+def test_key_creating_and_updating(config_data, tmp_path):
+    (creating,) = key_derived(config_data, tmp_path, KeyState="Creating", Enabled=False)
+    (updating,) = key_derived(config_data, tmp_path, KeyState="Updating", Enabled=True)
+    assert "being created" in creating and "fail" not in creating and "disabled" not in creating
+    assert "being updated" in updating and "fail" not in updating
+
+
+def test_unknown_key_state_is_quoted_without_a_claim(config_data, tmp_path):
+    (text,) = key_derived(config_data, tmp_path, KeyState="SomethingNew", Enabled=False)
+    assert "SomethingNew" in text and "fail" not in text and "disabled" not in text
+
+
+def test_enabled_state_has_no_derived_fact_even_if_flag_is_odd(config_data, tmp_path):
+    assert key_derived(config_data, tmp_path, KeyState="Enabled", Enabled=True) == []
+
+
+def test_disabled_key_says_fails_until_enabled(config_data, tmp_path):
+    (text,) = key_derived(config_data, tmp_path, KeyState="Disabled", Enabled=False)
+    assert "disabled" in text and "until it is enabled" in text
+
+
 def secret_reply(**overrides):
     body = {"Name": "orders/db", "RotationEnabled": True, "RotationRules": {"AutomaticallyAfterDays": 30},
             "LastRotatedDate": "2026-09-20T00:00:00+00:00", "LastChangedDate": "2026-09-20T00:00:00+00:00",

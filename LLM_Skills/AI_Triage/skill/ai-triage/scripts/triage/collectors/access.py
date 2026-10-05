@@ -14,7 +14,6 @@ from triage.evidence import CURRENT, DERIVED
 from triage.window import format_time
 
 MAX_POLICIES = "20"
-RISKY_KEY_STATES = ("Disabled", "PendingDeletion", "PendingReplicaDeletion")
 
 
 def _when(text: Any) -> str:
@@ -108,18 +107,31 @@ def _add_key(ctx: CollectContext, key: str) -> None:
             f"origin {meta.get('Origin')}{deletion}"
         ),
     )
+    claim = _key_state_claim(meta)
+    if claim:
+        ctx.evidence.add(
+            kind=DERIVED, resource=resource, command=ctx.last_command,
+            summary=f"Key {meta.get('KeyId')} {claim}",
+        )
+
+
+def _key_state_claim(meta: dict) -> str | None:
+    """What the key state means for callers, worded from KeyState; None for a usable key."""
     state = meta.get("KeyState")
-    if state == "PendingDeletion" or state == "PendingReplicaDeletion":
-        ctx.evidence.add(
-            kind=DERIVED, resource=resource, command=ctx.last_command,
-            summary=f"Key {meta.get('KeyId')} is pending deletion (deletion date {_when(meta.get('DeletionDate'))}); "
-                    "calls that use it will fail",
-        )
-    elif state in RISKY_KEY_STATES or meta.get("Enabled") is False:
-        ctx.evidence.add(
-            kind=DERIVED, resource=resource, command=ctx.last_command,
-            summary=f"Key {meta.get('KeyId')} is disabled; calls that use it will fail",
-        )
+    deletion = _when(meta.get("DeletionDate"))
+    claims = {
+        "Enabled": None,
+        "Disabled": "is disabled; calls that use it fail until it is enabled",
+        "PendingDeletion": f"is pending deletion (deletion date {deletion}); calls that use it fail",
+        "PendingReplicaDeletion": f"is a replica key in state pending replica deletion (deletion date {deletion})",
+        "PendingImport": "is waiting for key material to be imported; calls that use it fail",
+        "Unavailable": "is unavailable: the key or its custom key store cannot be reached; calls that use it fail",
+        "Creating": "is still being created",
+        "Updating": "is being updated",
+    }
+    if state is None:
+        return None
+    return claims[state] if state in claims else f"has state {state}"
 
 
 def _rotation_overdue(ctx: CollectContext, secret: dict) -> str | None:
