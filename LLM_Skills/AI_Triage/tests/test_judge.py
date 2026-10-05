@@ -874,7 +874,7 @@ def test_a_draft_that_the_report_would_refuse_is_refused_before_any_call(tmp_pat
 
 def test_labels_and_judgments_do_not_stop_a_draft_from_being_judged(tmp_path, config):
     case_dir = build_case(tmp_path, config, labels=("confirmed", "confirmed"))
-    edit_report(case_dir, lambda r: r["coverage"].update(typesafe="whatever the engineer typed"))
+    edit_report(case_dir, lambda r: r["coverage"].update(typesafe="unavailable: typed before judging"))
     assert run(case_dir, config, FakeJudge(make_responder()))["status"] == "complete"
 
 
