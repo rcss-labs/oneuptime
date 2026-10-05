@@ -161,6 +161,8 @@ Run the check again after you change any findings file; judging and validation r
 
 `judge.py run` reads the draft first; `report.py validate` and `render` check all of it. The column "Filled" says when you set the field:
 before = write it before judging; after = set it from `judgments/summary.json` once judging is done.
+Before judging write placeholders in the fields marked after, because `judge.py run` refuses a draft without them: every `label` `candidate`, `status` `unresolved`, `summary.top_cause` `null`,
+`coverage.typesafe` empty text. The judging step replaces them, and with TypeSafe unavailable your draft label is what it caps, so never write a stronger one.
 
 | Field | Required | Allowed values | Filled |
 | --- | --- | --- | --- |

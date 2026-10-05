@@ -416,3 +416,69 @@ def test_quoted_findings_messages_are_really_given_for_the_case_they_describe(bu
         assert any(expected in reason for item in result["rejected"] for reason in item["reasons"]), expected
     (case_dir / "findings" / f"{analyst}.json").write_text(json.dumps(examples["findings"]))
     check_findings(case_dir)
+
+
+# --- intake from OneUptime, the first values of the after-judging fields, the analyst prompt ---------------
+
+INTAKE = SKILL_SRC / "reference" / "intake.md"
+ANALYST_PROMPT = SKILL_SRC / "prompts" / "analyst-common.md"
+INTAKE_SECTIONS = ("What this mapping is", "The calls, in order", "Field by field", "A worked example",
+                   "When a call returns another shape")
+INTAKE_TOOLS = ("list_incidents", "get_incident", "list_incident_state_timelines", "get_incident_state",
+                "get_incident_severity", "get_monitor", "get_label", "list_incident_internal_notes",
+                "list_incident_public_notes")
+
+
+def intake_text() -> str:
+    return INTAKE.read_text()
+
+
+def test_intake_reference_has_its_sections_in_order():
+    titles = [title for title in sections(intake_text())]
+    assert [title for title in titles if title.startswith(INTAKE_SECTIONS)] == list(titles)
+    assert len(titles) == len(INTAKE_SECTIONS)
+    for title, expected in zip(titles, INTAKE_SECTIONS):
+        assert title.startswith(expected)
+
+
+def test_intake_reference_says_it_never_ran_against_a_live_oneuptime():
+    first = " ".join(section(intake_text(), "What this mapping is").split())
+    assert "has not run against a live OneUptime" in first
+    assert "open_questions" in " ".join(section(intake_text(), "When a call returns another shape").split())
+
+
+def test_intake_reference_names_every_field_case_init_reads():
+    incident = json.loads((REPLAY_DIR / SCENARIO / "incident.json").read_text())
+    named = set(inline_code(section(intake_text(), "Field by field")))
+    missing = [name for name in parse_incident(incident) if name not in named]
+    assert missing == []
+
+
+def test_intake_reference_names_the_tools_and_the_configured_url():
+    text = intake_text()
+    assert [tool for tool in INTAKE_TOOLS if f"`{tool}`" not in text] == []
+    assert "`oneuptime.url`" in text
+
+
+def test_intake_worked_example_is_accepted_by_case_init():
+    blocks = re.findall(r"```json\n(.*?)\n```", section(intake_text(), "A worked example"), flags=re.DOTALL)
+    incident = json.loads(blocks[-1])
+    parsed = parse_incident(incident)
+    assert parsed["monitors"][0]["target"].startswith("https://") and all(isinstance(x, str) for x in parsed["labels"])
+    assert parsed["resolved_at"] and parsed["state"] and parsed["severity"] and parsed["url"]
+    assert "example.com" in parsed["url"]
+
+
+def test_after_judging_fields_say_what_to_write_first():
+    text = " ".join(section(reference_text(), "report.json").split())
+    assert "Before judging write" in text
+    for word in ("`candidate`", "`unresolved`", "judging step replaces"):
+        assert word in text.split("Before judging write", 1)[1][:600]
+
+
+def test_analyst_prompt_and_template_use_the_same_request_fields():
+    request = json.loads(FINDINGS_EXAMPLE.read_text())["requests"][0]
+    assert set(request) == {"what", "why"}
+    prompt = ANALYST_PROMPT.read_text()
+    assert "`what`" in prompt and "`why`" in prompt
+    assert "~/.claude/skills/ai-triage/reference/formats.md" in prompt

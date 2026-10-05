@@ -63,9 +63,8 @@
   ],
   "requests": [
     {
-      "collector": "edge",
-      "targets": {"listener": "HTTPS 443"},
-      "reason": "Other certificates on the listener would show whether a second one is about to expire"
+      "what": "The other certificates of the HTTPS listener of checkout-prod, with their expiry dates",
+      "why": "They would show whether a second certificate is about to expire"
     }
   ]
 }

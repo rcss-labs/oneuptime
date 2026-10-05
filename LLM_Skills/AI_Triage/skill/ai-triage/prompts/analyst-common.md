@@ -31,8 +31,8 @@ analysts' findings, tests hypotheses, and writes the report.
 ## What a finding is
 
 One claim, tied to the fact or facts that show it, with the words that show it
-quoted exactly. Write it in the format given in `reference/formats.md` of the skill
-(section on the findings file). The rules that the check enforces:
+quoted exactly. Write it in the format given in
+`~/.claude/skills/ai-triage/reference/formats.md` (section 3, the findings file; each finding has `id`, `claim`, `fact_ids`, `excerpt`, `provenance`, `confidence`, and `time` when you know it). The rules that the check enforces:
 
 - Cite each fact as `<evidence file name without .json>:<fact id>`.
 - The excerpt is copied character for character from one string of a cited fact
