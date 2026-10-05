@@ -7,6 +7,7 @@ import yaml
 
 from conftest import SKILL_SRC
 from triage.case import load_case, save_case
+from triage.report import input_hashes, write_render_marker
 
 COMMAND = SKILL_SRC / "scripts" / "publish.py"
 AWS_KEY = "AKIA" + "ABCDEFGHIJKLMNOP"
@@ -28,6 +29,11 @@ REPORT = {
 }
 
 
+def resign(case_dir):
+    """Record the files as they are in render.json, with the report code's own marker writer."""
+    write_render_marker(case_dir, input_hashes(case_dir))
+
+
 @pytest.fixture
 def skill_dir(tmp_path, config_data):
     config_data["cases_dir"] = str(tmp_path / "cases")
@@ -45,6 +51,7 @@ def case_dir(tmp_path):
     (run / "report.md").write_text("# Report\n")
     (run / "report.json").write_text(json.dumps(REPORT))
     (run / "work-order.json").write_text("{}")
+    resign(run)
     return run
 
 
@@ -70,6 +77,7 @@ def test_audit_clean(skill_dir, case_dir):
 
 def test_audit_prints_one_line_per_hit_and_never_the_value(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nkey " + AWS_KEY + "\n")
+    resign(case_dir)
     result = run(skill_dir, "audit", "--case-dir", str(case_dir))
     assert result.returncode == 1
     lines = result.stdout.strip().splitlines()
@@ -79,12 +87,14 @@ def test_audit_prints_one_line_per_hit_and_never_the_value(skill_dir, case_dir):
 
 def test_audit_without_a_report_exits_one(skill_dir, case_dir):
     (case_dir / "report.md").unlink()
+    resign(case_dir)
     result = run(skill_dir, "audit", "--case-dir", str(case_dir))
     assert result.returncode == 1 and "report.md" in result.stderr
 
 
 def test_confluence_with_a_secret_exits_one_and_prints_no_request(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nkey " + AWS_KEY + "\n")
+    resign(case_dir)
     result = run(skill_dir, "confluence", "--case-dir", str(case_dir))
     assert result.returncode == 1 and result.stdout == ""
     assert "report.md:2:5" in result.stderr and AWS_KEY not in result.stderr
@@ -125,6 +135,7 @@ def test_slack_message_prints_writes_and_audits(skill_dir, case_dir):
 
 def test_slack_message_prints_nothing_when_the_audit_is_not_clean(skill_dir, case_dir):
     (case_dir / "work-order.json").write_text('{"note": "' + AWS_KEY + '"}')
+    resign(case_dir)
     result = run(skill_dir, "slack-message", "--case-dir", str(case_dir))
     assert result.returncode == 1 and result.stdout == ""
     assert "work-order.json:1:" in result.stderr
@@ -133,6 +144,7 @@ def test_slack_message_prints_nothing_when_the_audit_is_not_clean(skill_dir, cas
 
 def test_slack_message_without_report_json_exits_one(skill_dir, case_dir):
     (case_dir / "report.json").unlink()
+    resign(case_dir)
     assert run(skill_dir, "slack-message", "--case-dir", str(case_dir)).returncode == 1
 
 
@@ -181,6 +193,7 @@ PLANTED = {"report.md": "a\nvalue " + HIGH_ENTROPY + "\n"}
 
 def test_no_output_or_audit_json_holds_either_half_of_a_planted_token(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    resign(case_dir)
     outputs = []
     for args in (("audit",), ("confluence",), ("slack-message",)):
         result = run(skill_dir, *args, "--case-dir", str(case_dir))
@@ -194,6 +207,7 @@ def test_no_output_or_audit_json_holds_either_half_of_a_planted_token(skill_dir,
 
 def test_both_refusals_print_the_set_digest(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    resign(case_dir)
     slack = run(skill_dir, "slack-message", "--case-dir", str(case_dir))
     digest = _set_digest(case_dir, ("report.md", "work-order.json", "slack-message.md"))
     assert slack.returncode == 1 and digest in slack.stderr
@@ -205,6 +219,7 @@ def test_both_refusals_print_the_set_digest(skill_dir, case_dir):
 
 def test_confluence_proceeds_with_the_set_digest(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    resign(case_dir)
     refused = run(skill_dir, "confluence", "--case-dir", str(case_dir))
     digest = refused.stderr.strip().split()[-1]
     result = run(skill_dir, "confluence", "--case-dir", str(case_dir), f"--accept-hits={digest}")
@@ -215,12 +230,14 @@ def test_confluence_proceeds_with_the_set_digest(skill_dir, case_dir):
 
 def test_the_confluence_request_alias_works_and_a_wrong_flag_refuses(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    resign(case_dir)
     result = run(skill_dir, "confluence-request", "--case-dir", str(case_dir), "--accept-hits=" + "0" * 64)
     assert result.returncode == 1 and result.stdout == ""
 
 
 def test_slack_message_proceeds_with_the_set_digest_and_prints_the_audited_bytes(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    resign(case_dir)
     refused = run(skill_dir, "slack-message", "--case-dir", str(case_dir), "--accept-hits=" + "0" * 64)
     assert refused.returncode == 1 and refused.stdout == ""
     digest = _set_digest(case_dir, ("report.md", "work-order.json", "slack-message.md"))
@@ -234,6 +251,7 @@ def test_slack_message_proceeds_with_the_set_digest_and_prints_the_audited_bytes
 @pytest.mark.parametrize("subcommand", ["confluence", "slack-message"])
 def test_abbreviated_override_flags_are_errors(skill_dir, case_dir, flag, subcommand):
     (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    resign(case_dir)
     result = run(skill_dir, subcommand, "--case-dir", str(case_dir), f"{flag}={'0' * 64}")
     assert result.returncode == 2 and "unrecognized" in result.stderr
     assert result.stdout == ""
@@ -246,14 +264,17 @@ def test_an_abbreviated_case_dir_is_an_error_too(skill_dir, case_dir):
 
 def test_a_malformed_accept_value_says_why(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    resign(case_dir)
     result = run(skill_dir, "confluence", "--case-dir", str(case_dir), "--accept-hits=" + "A" * 64)
     assert result.returncode == 1 and "64 lower-case hex" in result.stderr
 
 
 def test_a_configured_account_id_passes_in_the_report_but_not_an_unconfigured_one(skill_dir, case_dir):
     (case_dir / "report.md").write_text("- Account: prod (" + "1" * 12 + ")\n")
+    resign(case_dir)
     assert run(skill_dir, "audit", "--case-dir", str(case_dir)).returncode == 0
     (case_dir / "report.md").write_text("- Account: other (" + "333" * 4 + ")\n")
+    resign(case_dir)
     assert run(skill_dir, "audit", "--case-dir", str(case_dir)).returncode == 1
 
 
@@ -268,6 +289,7 @@ def _digests_printed_by_audit(stderr):
 
 def test_audit_prints_one_labelled_digest_per_command_and_each_is_accepted_only_by_its_command(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    resign(case_dir)
     audit = run(skill_dir, "audit", "--case-dir", str(case_dir))
     assert audit.returncode == 1
     digests = _digests_printed_by_audit(audit.stderr)
@@ -291,6 +313,7 @@ def test_audit_prints_one_labelled_digest_per_command_and_each_is_accepted_only_
 
 def test_the_slack_digest_follows_the_confluence_url_given_to_audit(skill_dir, case_dir):
     (case_dir / "report.md").write_text("a\nvalue " + HIGH_ENTROPY + "\n")
+    resign(case_dir)
     url = "https://wiki.example.com/pages/9"
     audit = run(skill_dir, "audit", "--case-dir", str(case_dir), "--confluence-url", url)
     digest = _digests_printed_by_audit(audit.stderr)["slack-message"]
@@ -303,9 +326,11 @@ def test_audit_without_a_readable_config_still_audits_with_no_allowed_account_id
     empty = tmp_path / "empty-skill"
     empty.mkdir()
     (case_dir / "report.md").write_text("- Account: prod (" + "1" * 12 + ")\n")
+    resign(case_dir)
     result = run(empty, "audit", "--case-dir", str(case_dir))
     assert result.returncode == 1 and "report.md:1:" in result.stdout
     assert "no readable config" in result.stderr
     (case_dir / "report.md").write_text("# Report\n")
+    resign(case_dir)
     clean = run(empty, "audit", "--case-dir", str(case_dir))
     assert clean.returncode == 0 and "no readable config" in clean.stderr

@@ -26,6 +26,7 @@ from triage.publish import (
     record_slack,
     slack_message,
 )
+from triage.report import render_is_current
 from triage.window import WindowError, parse_time
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -68,6 +69,17 @@ def _now(args: argparse.Namespace) -> datetime:
     return parse_time(args.now) if args.now else datetime.now(timezone.utc)
 
 
+def _render_is_current(case_dir: Path) -> bool:
+    """False, after saying why on stderr, when the report is not what was rendered from its inputs."""
+    reasons = render_is_current(case_dir)
+    if not reasons:
+        return True
+    for reason in reasons:
+        print(reason, file=sys.stderr)
+    print("the report must be validated and rendered again before anything is published", file=sys.stderr)
+    return False
+
+
 def _print_audit(result: dict, stream) -> None:
     if result["clean"]:
         print("clean", file=stream)
@@ -91,6 +103,8 @@ def _account_ids(args: argparse.Namespace) -> frozenset[str]:
 
 
 def _audit(args: argparse.Namespace) -> int:
+    if not _render_is_current(args.case_dir):
+        return 1
     try:
         account_ids = _account_ids(args)
     except ConfigError:
@@ -105,6 +119,8 @@ def _audit(args: argparse.Namespace) -> int:
 
 
 def _confluence(args: argparse.Namespace) -> int:
+    if not _render_is_current(args.case_dir):
+        return 1
     config = load_config(default_config_path(args.skill_dir))
     request = confluence_request(args.case_dir, config, args.accept_hits)
     _note_accepted(load_audit(args.case_dir))
@@ -113,6 +129,8 @@ def _confluence(args: argparse.Namespace) -> int:
 
 
 def _slack_message(args: argparse.Namespace) -> int:
+    if not _render_is_current(args.case_dir):
+        return 1
     account_ids = _account_ids(args)
     slack_message(args.case_dir, args.confluence_url)
     result = audit_case(args.case_dir, args.accept_hits, account_ids)
