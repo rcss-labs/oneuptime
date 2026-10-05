@@ -13,8 +13,6 @@ from triage.guard_paths import (
 )
 from triage.verdict import ASK, DENY, PASS
 
-RUN_FILES = ["findings/checked.json", "audit.json", "case.json", "case.md", "report.md", "work-order.json",
-             "slack-message.md", "timeline.md"]
 
 
 @pytest.fixture
@@ -60,7 +58,7 @@ def test_anything_under_the_skill_folder_is_denied(layout, relative):
     [("evidence/ecs.json", "collect.py"), ("evidence/new/deep.json", "collect.py"), ("judgments/q1.json", "judge.py"),
      ("findings/checked.json", "findings.py"), ("audit.json", "publish.py"), ("case.json", "case.py"),
      ("case.md", "case.py"), ("report.md", "report.py"), ("work-order.json", "report.py"),
-     ("slack-message.md", "publish.py"), ("timeline.md", "timeline.py"), ("summary.json.stale", "judge.py"),
+     ("slack-message.md", "publish.py"), ("summary.json.stale", "judge.py"),
      ("findings/old.stale", "judge.py")],
 )
 def test_protected_run_files_are_denied_and_the_reason_names_the_script(layout, relative, script):
@@ -208,3 +206,30 @@ def test_script_owned_names_are_protected_at_any_depth_under_the_cases_root(layo
 @pytest.mark.parametrize("relative", ["x/report.json", "a/b/findings/alice.json", "INC-1/notes.md", "x/.publish-state.json"])
 def test_other_names_under_the_cases_root_pass(layout, relative):
     assert verdict(layout, str(layout["cases"] / relative)).kind == PASS
+
+
+
+# ---- code-quality follow-up: timeline.md is gone; names are normalised -----------
+
+
+def test_timeline_md_is_no_longer_protected(layout):
+    # nothing writes timeline.md; the script-owned timeline is timeline.json
+    assert verdict(layout, str(layout["run"] / "timeline.md")).kind == PASS
+
+
+def test_a_decomposed_accent_in_the_cases_root_still_matches(tmp_path, monkeypatch):
+    import unicodedata
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    composed = tmp_path / unicodedata.normalize("NFC", "Café") / "cases"
+    roots = protected_roots(str(tmp_path / "skill"), str(composed))
+    decomposed = str(composed).replace(unicodedata.normalize("NFC", "é"), unicodedata.normalize("NFD", "é"))
+    assert decomposed != str(composed)
+    target = f"{decomposed}/INC-1/20261004-101500/case.json"
+    assert decide_file_tool("Write", {"file_path": target}, "/", roots).kind == DENY
+
+
+@pytest.mark.parametrize("name", ["\uff43ase.json", "\uff41udit.json", "\uff45vidence/x.json", "x.\uff53tale"])
+def test_a_compatibility_form_of_a_protected_name_is_protected(layout, name):
+    # fullwidth letters: a different file on APFS, but the guard treats them as the protected name
+    assert verdict(layout, str(layout["run"] / name)).kind == DENY

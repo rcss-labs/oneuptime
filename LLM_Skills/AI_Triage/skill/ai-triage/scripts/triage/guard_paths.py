@@ -5,8 +5,9 @@ installed skill folder and on the files of a run folder that the scripts own.
 A hand edit there could turn a candidate cause into a confirmed one or mark an
 unaudited report as audited. Paths are made absolute against the hook's cwd,
 `~` is expanded, and symbolic links and `..` are resolved before the check.
-Names are compared without regard to letter case or Unicode normalization,
-because macOS file systems usually ignore both. A hard link made beforehand
+Names are compared without regard to letter case and after NFKC normalization:
+macOS file systems usually ignore case and decomposed accents, and compatibility
+forms (a fullwidth letter) are treated as the plain name out of caution. A hard link made beforehand
 to a protected file is not detected: it is a separate path to the same file.
 
 protected_write_tripwire is the Bash side, and it is a tripwire, not a
@@ -47,7 +48,6 @@ RUN_FILES = {
     ("report.md",): "report.py",
     ("work-order.json",): "report.py",
     ("slack-message.md",): "publish.py slack-message",
-    ("timeline.md",): "timeline.py",
 }
 STALE_SUFFIX = ".stale"
 STALE_WRITER = "judge.py"
@@ -74,7 +74,9 @@ class ProtectedRoots:
 
 
 def _comparable(path: str) -> str:
-    return unicodedata.normalize("NFC", path).casefold()
+    # NFKC: a decomposed accent (APFS treats it as the same name) and a compatibility form such as a
+    # fullwidth letter (a different file, refused anyway out of caution) both compare as the plain name.
+    return unicodedata.normalize("NFKC", path).casefold()
 
 
 def _resolved_root(path: str) -> str | None:
