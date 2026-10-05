@@ -9,7 +9,7 @@ from pathlib import Path
 from triage.config import TriageConfig
 from triage.guard_aws import check_aws
 from triage.guard_kubectl import check_kubectl
-from triage.guard_paths import protected_write_tripwire
+from triage.guard_paths import protected_write_tripwire, redirect_targets
 from triage.shell_parse import Segment, Unparseable, split_command
 from triage.verdict import ALLOW, ASK, DENY, PASS, Verdict, strictest
 
@@ -264,7 +264,7 @@ def decide(command: str, context: GuardContext | None, context_error: str = "", 
     except Unparseable:
         return verdict  # never allowed, so it needs no tripwire
     skill_dir, cases_dir = (context.skill_dir, context.cases_dir) if context else ("", "")
-    tripwire = protected_write_tripwire(segments, skill_dir, cases_dir, cwd)
+    tripwire = protected_write_tripwire(segments, skill_dir, cases_dir, cwd, redirect_targets(command))
     return strictest([verdict, Verdict(ASK, tripwire)]) if tripwire else verdict
 
 

@@ -669,8 +669,6 @@ def test_quoted_text_and_option_values_never_trip_the_tripwire(command, monkeypa
 @pytest.mark.parametrize(
     "command",
     [
-        f"echo x > {CASE_RUN}/case.json",
-        f"echo x >> {CASE_RUN}/audit.json",
         "sed -i '' s/a/b/ ~/.claude/skills/ai-triage/scripts/triage/guard.py",
         f"cat {SKILL}/SKILL.md",
         f"rm /tmp/{CASE_RUN.split('/')[-1]}/case.json",
@@ -699,3 +697,36 @@ def test_an_own_script_with_skill_dir_asks(args):
 def test_own_scripts_without_skill_dir_keep_their_answer():
     assert kind(f"{PY} {SCRIPT}/map_suggest.py propose --case-dir c --service-name s") == ALLOW
     assert kind(f"{PY} {SCRIPT}/preflight.py --json") == ALLOW
+
+
+
+# ---- final review fixes, item 2: redirect targets reach the tripwire -------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo x > "$HOME/.ai-triage/cases/1234/20261004-101500/judgments/summary.json"',
+        f"cat /tmp/a > {CASE_RUN}/audit.json",
+        'echo x > "$HOME/.claude/skills/ai-triage/config/triage-config.yaml"',
+        f"echo x >> {SKILL}/x",
+        f"echo x>{CASE_RUN}/case.json",
+        f"echo x &> {CASE_RUN}/report.md",
+        f"echo x 2> {CASE_RUN}/timeline.json",
+        f"aws ecs list-clusters {AWS_OK} > {CASE_RUN}/evidence/x.json",
+        "echo x > /home/eng/.ai-triage/cases/.publish-state.json",
+    ],
+)
+def test_a_redirect_onto_a_protected_path_asks(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    verdict = decide(command, CONTEXT)
+    assert verdict.kind == ASK and "protected" in verdict.reason
+
+
+def test_redirects_elsewhere_keep_their_answer(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert kind("echo x > /tmp/out") == PASS
+    assert kind(f"aws ecs list-clusters {AWS_OK} 2>/dev/null") == ALLOW
+    assert kind(f"aws ecs list-clusters {AWS_OK} 2>&1 | head -3") == ALLOW
+    assert decide("echo x > case.json", CONTEXT, cwd=CASE_RUN).kind == ASK
+    assert decide("echo x > case.json", CONTEXT, cwd="/home/eng/project").kind == PASS

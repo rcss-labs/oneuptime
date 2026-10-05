@@ -77,7 +77,6 @@ def test_other_run_files_pass(layout, relative):
 
 def test_paths_outside_both_roots_pass(layout):
     assert verdict(layout, str(layout["tmp"] / "project" / "case.json")).kind == PASS
-    assert verdict(layout, str(layout["cases"] / "INC-1" / "case.json")).kind == PASS  # not inside a run folder
     assert verdict(layout, str(layout["home"] / ".claude" / "skills" / "other" / "x")).kind == PASS
 
 
@@ -172,10 +171,40 @@ def test_protected_roots_are_resolved(layout):
 def test_incident_and_render_records_are_protected(layout, relative, script):
     result = verdict(layout, str(layout["run"] / relative))
     assert result.kind == DENY and script in result.reason
-    assert verdict(layout, str(layout["run"] / "findings" / relative)).kind == PASS
+    # final review fixes: script-owned names count at any depth under the cases root
+    assert verdict(layout, str(layout["run"] / "findings" / relative)).kind == DENY
 
 
 def test_the_docstring_names_the_hard_link_gap():
     import triage.guard_paths
 
     assert "hard link" in triage.guard_paths.__doc__
+
+
+
+# ---- final review fixes, item 2: more script-owned files, at any depth ----------
+
+
+def test_the_publish_state_under_the_cases_root_is_protected(layout):
+    result = verdict(layout, str(layout["cases"] / ".publish-state.json"))
+    assert result.kind == DENY and "publish.py" in result.reason
+
+
+def test_timeline_json_is_protected(layout):
+    result = verdict(layout, str(layout["run"] / "timeline.json"))
+    assert result.kind == DENY and "timeline.py" in result.reason
+
+
+@pytest.mark.parametrize(
+    "relative",
+    ["INC-1/case.json", "x/judgments/summary.json", "a/b/c/judgments/summary.json", "INC-1/20261004-101500/sub/case.json",
+     "case.json", "a/evidence/x.json", "a/b/c/d/findings/checked.json", "x/audit.json", "x/y/summary.json.stale"],
+)
+def test_script_owned_names_are_protected_at_any_depth_under_the_cases_root(layout, relative):
+    # a copy of a run outside the run layout must not be editable by hand either (final review C1)
+    assert verdict(layout, str(layout["cases"] / relative)).kind == DENY
+
+
+@pytest.mark.parametrize("relative", ["x/report.json", "a/b/findings/alice.json", "INC-1/notes.md", "x/.publish-state.json"])
+def test_other_names_under_the_cases_root_pass(layout, relative):
+    assert verdict(layout, str(layout["cases"] / relative)).kind == PASS
