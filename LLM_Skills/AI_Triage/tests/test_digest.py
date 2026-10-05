@@ -165,3 +165,12 @@ def test_a_wrongly_typed_draft_never_raises(bad):
 def test_non_ascii_text_digests_the_same_way_every_time():
     text = {**CAUSE, "statement": "Speicher überschritten"}
     assert cause_digest(text, FINDINGS) == cause_digest(copy.deepcopy(text), FINDINGS)
+
+
+def test_changing_the_asked_text_of_a_cited_finding_changes_the_cause_digest():
+    asked = copy.deepcopy(FINDINGS)
+    asked["compute-1"]["asked"] = {"ecs:ecs-0001": ["query=level:INFO"]}
+    changed = copy.deepcopy(asked)
+    changed["compute-1"]["asked"]["ecs:ecs-0001"].append("filter=service=checkout")
+    assert cause_digest(CAUSE, asked) != cause_digest(CAUSE, FINDINGS)
+    assert cause_digest(CAUSE, changed) != cause_digest(CAUSE, asked)

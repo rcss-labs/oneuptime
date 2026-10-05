@@ -185,3 +185,9 @@ def test_build_choice_refuses_the_fallback_name_as_an_option(cause_rank):
 def test_build_choice_refuses_an_order_that_does_not_match_the_options(cause_rank):
     with pytest.raises(QuestionError):
         build_choice(cause_rank, {"C1": "a", "C2": "b"}, ["C1"])
+
+
+def test_evidence_relation_tells_the_judge_how_to_read_the_asked_text():
+    instructions = valid_document()["questions"]["evidence_relation"]["instructions"]
+    assert instructions == ("How does `evidence` relate to `claim`? Each evidence item states under asked what was "
+                            "requested from the source; a count or a match means only what that request can show.")

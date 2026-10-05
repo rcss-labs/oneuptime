@@ -242,14 +242,14 @@ def test_a_bare_fact_id_shared_by_two_evidence_files_is_judged_from_the_cited_fi
     assert first_path.stem != second_path.stem
     judge = FakeJudge(make_responder())
     judge_findings(session_for(tmp_path, config, judge), QUESTIONS, valid_findings(tmp_path), load_facts(tmp_path), ["compute-9"], limit=40)
-    assert judge.calls[0][0]["evidence"] == [{"summary": "Container exited with code 137 in Frankfurt", "excerpt": ""}]
+    assert judge.calls[0][0]["evidence"] == [{"summary": "Container exited with code 137 in Frankfurt", "excerpt": "", "asked": ""}]
 
 
 def test_a_finding_whose_facts_are_gone_falls_back_to_its_stored_summaries(tmp_path, config):
     finding = {"claim": "c", "fact_ids": ["gone:ecs-0001"], "fact_summaries": {"gone:ecs-0001": "Stored summary"}}
     judge = FakeJudge(make_responder())
     judge_findings(session_for(tmp_path, config, judge), QUESTIONS, {"f-1": finding}, {}, ["f-1"], limit=40)
-    assert judge.calls[0][0]["evidence"] == [{"summary": "Stored summary", "excerpt": ""}]
+    assert judge.calls[0][0]["evidence"] == [{"summary": "Stored summary", "excerpt": "", "asked": ""}]
 
 
 def test_findings_are_asked_one_request_each_with_only_their_own_facts(tmp_path, config):
@@ -259,8 +259,8 @@ def test_findings_are_asked_one_request_each_with_only_their_own_facts(tmp_path,
     from triage.findings import load_facts, valid_findings
     result = judge_findings(session, QUESTIONS, valid_findings(case_dir), load_facts(case_dir), ["compute-1", "compute-2"], limit=40)
     assert [call[0] for call in judge.calls] == [
-        {"claim": CLAIM_1, "evidence": [{"summary": "Essential container exited with code 137", "excerpt": ""}]},
-        {"claim": CLAIM_2, "evidence": [{"summary": "Service has 0 running tasks", "excerpt": "desired 2, running 0"}]},
+        {"claim": CLAIM_1, "evidence": [{"summary": "Essential container exited with code 137", "excerpt": "", "asked": ""}]},
+        {"claim": CLAIM_2, "evidence": [{"summary": "Service has 0 running tasks", "excerpt": "desired 2, running 0", "asked": ""}]},
     ]
     assert all(list(call[1]) == ["evidence_relation"] for call in judge.calls)
     assert all(call[1]["evidence_relation"] == QUESTIONS["evidence_relation"] for call in judge.calls)
@@ -678,6 +678,102 @@ def test_a_finding_id_outside_the_report_pattern_is_refused(tmp_path, config):
         run(case_dir, config, FakeJudge(make_responder()))
 
 
+# asked text in the evidence items
+
+def finding_with(asked, fact_ids=("ev:x-0001",), summary="4000 documents matched in the window"):
+    finding = {"claim": "checkout logged 4000 OutOfMemoryError errors", "fact_ids": list(fact_ids)}
+    if asked is not None:
+        finding["asked"] = asked
+    facts = {fact_id: {"summary": summary, "excerpt": ""} for fact_id in fact_ids}
+    return finding, facts
+
+
+def evidence_sent(tmp_path, config, finding, facts):
+    judge = FakeJudge(make_responder())
+    judge_findings(session_for(tmp_path, config, judge), QUESTIONS, {"f-1": finding}, facts, ["f-1"], limit=40)
+    return judge.calls[0][0]["evidence"]
+
+
+def test_the_state_carries_what_was_asked_of_the_source(tmp_path, config):
+    finding, facts = finding_with({"ev:x-0001": ["query=level:INFO", "filter=service=checkout"]})
+    assert evidence_sent(tmp_path, config, finding, facts) == [{
+        "summary": "4000 documents matched in the window", "excerpt": "",
+        "asked": "query=level:INFO; filter=service=checkout"}]
+
+
+def test_a_finding_without_an_asked_field_still_works(tmp_path, config):
+    finding, facts = finding_with(None)
+    assert evidence_sent(tmp_path, config, finding, facts)[0]["asked"] == ""
+    for odd in ("text", 5, {"ev:x-0001": "text"}, {"ev:x-0001": [1, None]}):
+        finding, facts = finding_with(odd)
+        assert evidence_sent(tmp_path, config, finding, facts)[0]["asked"] == ""
+
+
+def test_the_asked_text_is_redacted_and_then_cut_to_300_characters(tmp_path, config):
+    account_id = config.accounts["prod-main"].account_id
+    finding, facts = finding_with({"ev:x-0001": [f"target={account_id}", "x" * 200, "y" * 200]})
+    asked = evidence_sent(tmp_path, config, finding, facts)[0]["asked"]
+    assert len(asked) == 300 and account_id not in asked and asked.startswith("target=prod-main; ")
+
+
+def test_the_fallback_summaries_carry_asked_too(tmp_path, config):
+    finding = {"claim": "c", "fact_ids": ["gone:a-1"], "fact_summaries": {"gone:a-1": "Stored"}, "asked": {"gone:a-1": ["index=app-logs"]}}
+    assert evidence_sent(tmp_path, config, finding, {}) == [{"summary": "Stored", "excerpt": "", "asked": "index=app-logs"}]
+
+
+def test_twenty_asked_strings_on_ten_facts_stay_inside_the_state_limit(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    ids = [f"gone:ecs-{number:04d}" for number in range(10)]
+    edit_checked(case_dir, lambda c: c["valid"][0].update(
+        fact_ids=ids, fact_summaries={fact_id: "short summary" for fact_id in ids},
+        asked={fact_id: [f"name{n}=" + "v" * 190 for n in range(20)] for fact_id in ids}))
+    judge = FakeJudge(make_responder())
+    assert run(case_dir, config, judge)["status"] == "complete"
+    assert all(len(json.dumps(state)) <= 8000 for state, _ in judge.calls)
+    sent = [state for state, questions in judge.calls if state.get("claim") == CLAIM_1][0]
+    assert len(sent["evidence"]) == 10 and all(len(item["asked"]) == 300 for item in sent["evidence"])
+
+
+def test_asked_text_counts_in_the_measurement_before_the_first_call(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    ids = [f"gone:ecs-{number:04d}" for number in range(10)]
+    edit_checked(case_dir, lambda c: c["valid"][0].update(
+        fact_ids=ids, fact_summaries={fact_id: huge(600) for fact_id in ids},
+        asked={fact_id: ["q=" + "v" * 190, "r=" + "w" * 190] for fact_id in ids}))
+    judge = FakeJudge(make_responder())
+    with pytest.raises(DraftRuleError, match="compute-1"):
+        run(case_dir, config, judge)
+    assert judge.calls == []
+
+
+# findings named by the draft must exist
+
+def test_a_finding_the_draft_names_that_does_not_exist_is_refused_before_any_call(tmp_path, config):
+    changes = [
+        lambda r: r["causes"][0].update(contradicting=["compute-3", "compute-99"]),
+        lambda r: r["causes"][1].update(supporting=["compute-98"]),
+        lambda r: r["actions"][0].update(finding_ids=["compute-1", "compute-97"]),
+        lambda r: r["causes"][0].update(supporting=["compute 1\n## x"]),
+        lambda r: r["actions"][0].update(finding_ids="compute-1"),
+    ]
+    for number, change in enumerate(changes):
+        case_dir = tmp_path / str(number)
+        case_dir.mkdir()
+        build_case(case_dir, config)
+        edit_report(case_dir, change)
+        judge = FakeJudge(make_responder())
+        with pytest.raises(DraftRuleError):
+            run(case_dir, config, judge)
+        assert judge.calls == [] and list((case_dir / "judgments").glob("0*.json")) == []
+
+
+def test_the_error_names_the_missing_finding(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    edit_report(case_dir, lambda r: r["causes"][0].update(contradicting=["compute-99"]))
+    with pytest.raises(DraftRuleError, match="compute-99"):
+        run(case_dir, config, FakeJudge(make_responder()))
+
+
 # everything is measured before the first call
 
 def huge(value):
@@ -938,16 +1034,6 @@ def test_an_unjudged_contradicting_finding_fails_the_no_contradiction_gate(tmp_p
     cause = summary["causes"]["C1"]
     assert cause["gates"]["no_contradiction"] is False and cause["label"] == "candidate"
     assert any("compute-3" in reason and "not judged" in reason for reason in cause["reasons"])
-
-
-def test_a_contradicting_finding_that_is_not_a_valid_finding_fails_the_gate(tmp_path, config):
-    case_dir = build_case(tmp_path, config)
-    report = json.loads((case_dir / "report.json").read_text())
-    report["causes"][0]["contradicting"] = ["compute-3", "compute-99"]
-    (case_dir / "report.json").write_text(json.dumps(report))
-    cause = run(case_dir, config, FakeJudge(make_responder()))["causes"]["C1"]
-    assert cause["gates"]["no_contradiction"] is False
-    assert any("compute-99" in reason and "not judged" in reason for reason in cause["reasons"])
 
 
 # unavailable

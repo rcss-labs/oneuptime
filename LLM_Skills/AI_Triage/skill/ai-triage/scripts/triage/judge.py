@@ -31,6 +31,7 @@ UNAVAILABLE_ACTION_NOTE = "TypeSafe was unavailable; no action can be recommende
 _ACCOUNT_NUMBER_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
 _DASHED_ACCOUNT_RE = re.compile(r"(?<![\d-])(\d{4})-(\d{4})-(\d{4})(?![\d-])")
 MAX_ADHOC_QUESTION_CHARS = 2000
+MAX_ASKED_CHARS = 300
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")  # the same pattern the report uses for ids
 _ADHOC_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 MAX_STATE_CHARS = 8000
@@ -128,8 +129,13 @@ class JudgeSession:
         """A run-time choice question with its option texts prepared. Its instructions stay as written."""
         return {**question, "criteria": self.prepare(question["criteria"])}
 
-    def ask(self, kind: str, subject: str, state: Any, questions: dict[str, dict]) -> JudgeReply:
+    def prepare_for(self, kind: str, state: Any) -> Any:
+        """The state as it is sent for this kind of request."""
         prepared = prepare_state(state, self.config, self.redactor)
+        return _cut_asked(prepared) if kind == "finding" else prepared
+
+    def ask(self, kind: str, subject: str, state: Any, questions: dict[str, dict]) -> JudgeReply:
+        prepared = self.prepare_for(kind, state)
         size = len(json.dumps(_json_safe(prepared)))
         if size > MAX_STATE_CHARS:
             raise JudgmentError([f"the state for {kind} {subject} is {size} characters, over the limit of {MAX_STATE_CHARS}; send less"])
@@ -142,12 +148,30 @@ class JudgeSession:
 
 # --- the four kinds of request ----------------------------------------------------------
 
+def _asked_text(finding: dict, fact_id: str) -> str:
+    """What was requested from the source for one fact, as one string; empty when the finding has no asked field."""
+    asked = finding.get("asked")
+    listed = asked.get(fact_id) if isinstance(asked, dict) else None
+    return "; ".join(item for item in listed if isinstance(item, str)) if isinstance(listed, list) else ""
+
+
 def _evidence_of(finding: dict, facts: dict[str, dict]) -> list[dict]:
-    cited = [facts[fact_id] for fact_id in finding.get("fact_ids", []) if fact_id in facts]
+    cited = [(fact_id, facts[fact_id]) for fact_id in finding.get("fact_ids", []) if fact_id in facts]
     if not cited:
         summaries = finding.get("fact_summaries")
-        return [{"summary": summary, "excerpt": ""} for summary in (summaries.values() if isinstance(summaries, dict) else [])]
-    return [{"summary": fact.get("summary", ""), "excerpt": fact.get("excerpt", "")} for fact in cited]
+        summaries = summaries if isinstance(summaries, dict) else {}
+        return [{"summary": summary, "excerpt": "", "asked": _asked_text(finding, fact_id)} for fact_id, summary in summaries.items()]
+    return [{"summary": fact.get("summary", ""), "excerpt": fact.get("excerpt", ""), "asked": _asked_text(finding, fact_id)}
+            for fact_id, fact in cited]
+
+
+def _cut_asked(prepared_state: Any) -> Any:
+    """Cut each asked text to its limit, after redaction."""
+    evidence = prepared_state.get("evidence") if isinstance(prepared_state, dict) else None
+    for item in evidence if isinstance(evidence, list) else []:
+        if isinstance(item, dict) and isinstance(item.get("asked"), str):
+            item["asked"] = item["asked"][:MAX_ASKED_CHARS]
+    return prepared_state
 
 
 def _finding_state(finding: dict, facts: dict[str, dict]) -> dict:
@@ -566,6 +590,30 @@ def write_summary(case_dir: Path, summary: dict) -> Path:
     return path
 
 
+def _check_cited_findings(report: dict, findings: dict[str, dict]) -> None:
+    """Every finding id the draft names must be well formed and exist in checked.json."""
+    errors = []
+
+    def check(where: str, ids: Any) -> None:
+        if not isinstance(ids, list):
+            errors.append(f"{where} must be a list of finding ids")
+            return
+        for finding_id in ids:
+            if not isinstance(finding_id, str) or not ID_RE.fullmatch(finding_id):
+                errors.append(f"{where} names {str(finding_id)[:40]!r}, which is not a finding id")
+            elif finding_id not in findings:
+                errors.append(f"{where} names finding {finding_id}, which is not in findings/checked.json")
+
+    for cause in report["causes"]:
+        for name in ("supporting", "contradicting"):
+            check(f"cause {cause['id']} {name}", cause.get(name, []))
+    for action in report.get("actions", []):
+        if "finding_ids" in action:
+            check(f"action {action['id']} finding_ids", action["finding_ids"])
+    if errors:
+        raise DraftRuleError(errors)
+
+
 def _check_citation_counts(causes: list[dict], findings: dict[str, dict]) -> None:
     """A finding that cites too many facts cannot be judged in one small state."""
     errors = []
@@ -642,15 +690,15 @@ def check_state_sizes(
     causes, symptoms = report["causes"], report["symptoms"]
     scope = report["summary"].get("scope", "")
     statements = {cause["id"]: cause["statement"] for cause in causes}
-    states = [(f"finding {finding_id}", _finding_state(findings[finding_id], facts)) for finding_id in ordered_ids if finding_id in findings]
-    states += [(f"cause {cause['id']}", _cause_state(cause, symptoms, scope)) for cause in causes]
+    states = [("finding", f"finding {finding_id}", _finding_state(findings[finding_id], facts)) for finding_id in ordered_ids if finding_id in findings]
+    states += [("cause", f"cause {cause['id']}", _cause_state(cause, symptoms, scope)) for cause in causes]
     claims = {cause["id"]: {"statement": cause["statement"], "supporting_evidence": [
         findings[finding_id]["claim"] for finding_id in cause.get("supporting", []) if finding_id in findings]} for cause in causes}
-    states.append(("the ranking", _ranking_state(symptoms, claims, list(claims))))
-    states += [(f"action {action['id']}", _action_state(action, statements)) for action in report.get("actions", [])]
+    states.append(("ranking", "the ranking", _ranking_state(symptoms, claims, list(claims))))
+    states += [("action", f"action {action['id']}", _action_state(action, statements)) for action in report.get("actions", [])]
     errors = []
-    for name, state in states:
-        size = len(json.dumps(_json_safe(session.prepare(state))))
+    for kind, name, state in states:
+        size = len(json.dumps(_json_safe(session.prepare_for(kind, state))))
         if size > MAX_STATE_CHARS:
             errors.append(f"the state for {name} is {size} characters, over the limit of {MAX_STATE_CHARS}; shorten it")
     if errors:
@@ -666,6 +714,7 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
     report = load_report_draft(case_dir, _reserved_ids(questions))
     findings = load_checked_findings(case_dir)
     _check_findings_shape(findings)
+    _check_cited_findings(report, findings)
     incident_start = parse_time(case["incident_start"])
     _check_citation_counts(report["causes"], findings)
     facts = load_facts(case_dir)
