@@ -19,6 +19,14 @@ MAX_RESOURCE_NAMES = 10
 MAX_EVENTS_PER_NAME = 40
 LOOKUP_ITEMS = "50"
 LOOKUP_GRACE_MINUTES = 5
+GLOBAL_REGION = "us-east-1"
+# One lookup per source (lookup-events takes one attribute per call). sts.amazonaws.com and
+# route53domains.amazonaws.com are left out to stay near five calls: STS write events are mostly
+# session creation, not changes.
+GLOBAL_EVENT_SOURCES = (
+    "iam.amazonaws.com", "cloudfront.amazonaws.com", "route53.amazonaws.com",
+    "wafv2.amazonaws.com", "organizations.amazonaws.com",
+)
 STACK_ITEMS = "50"
 PIPELINE_ITEMS = "10"
 CONFIG_LIMIT = "10"
@@ -47,17 +55,25 @@ def _lookup_end(ctx: CollectContext, incident_start: str | None) -> datetime:
 
 def _add_cloudtrail(
     ctx: CollectContext, lookup: str, name: str, incident_start: str | None, label: str | None = None,
+    global_source: str | None = None,
 ) -> None:
+    """One CloudTrail lookup. With global_source set it runs in us-east-1 and keeps only that event source."""
     label = label or name
+    region = GLOBAL_REGION if global_source else None
     start, end = ctx.window.start, _lookup_end(ctx, incident_start)
     reply = ctx.aws(
         "cloudtrail", "lookup-events",
         ["--lookup-attributes", lookup, "--start-time", format_time(start), "--end-time", format_time(end),
          "--max-items", LOOKUP_ITEMS],
+        region=region,
     )
     if reply is None:
         return
-    writes = [e for e in reply.get("Events", []) if str(e.get("ReadOnly")).lower() == "false"]
+    writes = [
+        e for e in reply.get("Events", [])
+        if str(e.get("ReadOnly")).lower() == "false" and (global_source is None or e.get("EventSource") == global_source)
+    ]
+    recorded = f", recorded in {GLOBAL_REGION}" if global_source else ""
     in_period = newest_in_window(Window(start, end), writes, lambda e: e.get("EventTime"), len(writes))
     shown = in_period[:MAX_EVENTS_PER_NAME]
     for item in shown:
@@ -67,7 +83,7 @@ def _add_cloudtrail(
             kind=INCIDENT_TIME, resource=resource, time=item.get("EventTime"), command=ctx.last_command,
             summary=(
                 f"{item.get('EventName')} ({item.get('EventSource')}) by {item.get('Username') or 'unknown user'} "
-                f"on {resource}{_gap(incident_start, item.get('EventTime'))}"
+                f"on {resource}{recorded}{_gap(incident_start, item.get('EventTime'))}"
             ),
         )
     returned = len(reply.get("Events", []))
@@ -79,7 +95,7 @@ def _add_cloudtrail(
             f"No change was found among the {returned} newest events for {label} {period}; older events were not read"
         )
         ctx.evidence.add(kind=DERIVED, resource=name, command=ctx.last_command, summary=summary)
-    elif not shown:
+    elif not shown and not global_source:
         ctx.evidence.add(
             kind=DERIVED, resource=name, command=ctx.last_command,
             summary=f"No change was recorded for {label} {period}",
@@ -88,6 +104,17 @@ def _add_cloudtrail(
         ctx.evidence.add(
             kind=DERIVED, resource=name, command=ctx.last_command,
             summary=f"{len(in_period) - len(shown)} older changes for {label} {period} were not shown",
+        )
+
+
+def _add_global_services(ctx: CollectContext, incident_start: str | None) -> None:
+    """Global services record their events in us-east-1, so look there when the collection is elsewhere."""
+    if ctx.region == GLOBAL_REGION:
+        return
+    for source in GLOBAL_EVENT_SOURCES:
+        _add_cloudtrail(
+            ctx, f"AttributeKey=EventSource,AttributeValue={source}", source, incident_start,
+            label=f"global service {source}", global_source=source,
         )
 
 
@@ -201,6 +228,7 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
     else:
         _add_cloudtrail(ctx, "AttributeKey=ReadOnly,AttributeValue=false", "account", incident_start,
                         label="any resource")
+    _add_global_services(ctx, incident_start)
     if targets.get("stack"):
         _add_stack_events(ctx, targets["stack"], incident_start)
     if targets.get("pipeline"):

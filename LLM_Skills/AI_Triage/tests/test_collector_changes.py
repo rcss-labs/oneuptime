@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from fakes import SSO_EXPIRED_ERROR, FakeAws, access_denied
@@ -20,10 +22,35 @@ def event(name, when="2026-10-04T10:46:00+00:00", read_only="false", user="alice
     }
 
 
-def run(config_data, tmp_path, answers, targets):
-    ctx, aws, kube = make_context(config_data, tmp_path, answers, collector="changes")
+class RegionAws(FakeAws):
+    """Answers CloudTrail lookups made in us-east-1 from by_source (event source -> reply or error tuple)."""
+
+    def __init__(self, answers, by_source):
+        super().__init__(answers)
+        self.by_source = by_source
+
+    def __call__(self, argv, timeout):
+        if argv[1:3] == ["cloudtrail", "lookup-events"] and argv[argv.index("--region") + 1] == "us-east-1":
+            self.calls.append(argv)
+            attribute = argv[argv.index("--lookup-attributes") + 1]
+            source = attribute.split("AttributeValue=")[1]
+            answer = self.by_source.get(source, {"Events": []})
+            if isinstance(answer, tuple):
+                return answer[0], "", answer[1]
+            return 0, json.dumps(answer), ""
+        return super().__call__(argv, timeout)
+
+
+def run(config_data, tmp_path, answers, targets, global_events=None, region="eu-west-1"):
+    ctx, aws, kube = make_context(config_data, tmp_path, answers, collector="changes", region=region)
+    if region != "us-east-1":
+        aws = ctx.runner = RegionAws(answers, global_events or {})
     COLLECTOR.run(ctx, dict(targets))
     return ctx, aws, kube
+
+
+def regional_lookups(aws):
+    return [c for c in aws.called("cloudtrail", "lookup-events") if c[c.index("--region") + 1] != "us-east-1"]
 
 
 def by_summary(ctx, text):
@@ -47,7 +74,7 @@ def test_cloudtrail_event_fact_says_who_what_and_how_long_before(config_data, tm
     assert "4 minutes before the incident started" in fact.summary
     assert "alice@example.com" not in ctx.evidence.to_json()
     assert "hunter2" not in ctx.evidence.to_json()
-    call = aws.called("cloudtrail", "lookup-events")[0]
+    call = regional_lookups(aws)[0]
     assert call[call.index("--lookup-attributes") + 1] == "AttributeKey=ResourceName,AttributeValue=checkout-api"
     assert call[call.index("--start-time") + 1] == "2026-10-04T10:00:00Z"
     assert call[call.index("--end-time") + 1] == "2026-10-04T10:55:00Z"
@@ -99,20 +126,20 @@ def test_account_wide_facts_say_any_resource(config_data, tmp_path):
 
 def test_incident_a_minute_before_the_window_looks_at_the_whole_window(config_data, tmp_path):
     _, aws, _ = run(config_data, tmp_path, {}, {"resource_names": "x", "incident_start": "2026-10-04T09:56:00Z"})
-    call = aws.called("cloudtrail", "lookup-events")[0]
+    call = regional_lookups(aws)[0]
     assert call[call.index("--end-time") + 1] == "2026-10-04T12:00:00Z"
 
 
 def test_one_call_per_resource_name_at_most_ten(config_data, tmp_path):
     names = ",".join(f"res-{n}" for n in range(14))
     ctx, aws, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}}, {"resource_names": names})
-    assert len(aws.called("cloudtrail", "lookup-events")) == 10
+    assert len(regional_lookups(aws)) == 10
 
 
 def test_without_names_one_call_for_writes(config_data, tmp_path):
     answers = {"cloudtrail lookup-events": {"Events": [event("PutRolePolicy", source="iam.amazonaws.com")]}}
     ctx, aws, kube = run(config_data, tmp_path, answers, {})
-    calls = aws.called("cloudtrail", "lookup-events")
+    calls = regional_lookups(aws)
     assert len(calls) == 1
     assert calls[0][calls[0].index("--lookup-attributes") + 1] == "AttributeKey=ReadOnly,AttributeValue=false"
     assert len(ctx.evidence.facts) == 1
@@ -270,7 +297,7 @@ def test_failed_lookup_is_not_reported_as_nothing_changed(config_data, tmp_path)
 def test_lookup_ends_five_minutes_after_the_incident_start(config_data, tmp_path):
     ctx, aws, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}},
                       {"resource_names": "x", "incident_start": INCIDENT})
-    call = aws.called("cloudtrail", "lookup-events")[0]
+    call = regional_lookups(aws)[0]
     assert call[call.index("--start-time") + 1] == "2026-10-04T10:00:00Z"
     assert call[call.index("--end-time") + 1] == "2026-10-04T10:55:00Z"
     assert fact_summaries(ctx) == [
@@ -280,13 +307,13 @@ def test_lookup_ends_five_minutes_after_the_incident_start(config_data, tmp_path
 
 def test_account_wide_lookup_also_ends_after_the_incident_start(config_data, tmp_path):
     _, aws, _ = run(config_data, tmp_path, {}, {"incident_start": INCIDENT})
-    call = aws.called("cloudtrail", "lookup-events")[0]
+    call = regional_lookups(aws)[0]
     assert call[call.index("--end-time") + 1] == "2026-10-04T10:55:00Z"
 
 
 def test_incident_start_after_the_window_keeps_the_window_end(config_data, tmp_path):
     _, aws, _ = run(config_data, tmp_path, {}, {"resource_names": "x", "incident_start": "2026-10-04T11:58:00Z"})
-    call = aws.called("cloudtrail", "lookup-events")[0]
+    call = regional_lookups(aws)[0]
     assert call[call.index("--end-time") + 1] == "2026-10-04T12:00:00Z"
 
 
@@ -317,7 +344,7 @@ def test_cut_list_count_is_the_number_returned(config_data, tmp_path):
 
 def test_incident_before_the_window_looks_at_the_whole_window(config_data, tmp_path):
     ctx, aws, _ = run(config_data, tmp_path, {}, {"resource_names": "x", "incident_start": "2026-10-04T09:00:00Z"})
-    call = aws.called("cloudtrail", "lookup-events")[0]
+    call = regional_lookups(aws)[0]
     assert call[call.index("--start-time") + 1] == "2026-10-04T10:00:00Z"
     assert call[call.index("--end-time") + 1] == "2026-10-04T12:00:00Z"
 
@@ -333,3 +360,65 @@ def test_incident_start_without_a_timezone_is_an_error(config_data, tmp_path):
     ctx, aws, _ = run(config_data, tmp_path, answers, {"resource_names": "x", "incident_start": "2026-10-04T10:50:00"})
     assert ctx.evidence.errors[0]["code"] == "InvalidTarget"
     assert "incident started" not in ctx.evidence.facts[0].summary
+
+
+GLOBAL_SOURCES = ["iam.amazonaws.com", "cloudfront.amazonaws.com", "route53.amazonaws.com",
+                  "wafv2.amazonaws.com", "organizations.amazonaws.com"]
+
+
+def test_global_service_events_in_us_east_1_become_facts(config_data, tmp_path):
+    global_events = {
+        "route53.amazonaws.com": {"Events": [event("ChangeResourceRecordSets", when="2026-10-04T10:45:00+00:00",
+                                                   source="route53.amazonaws.com", resource="shop.example.com")]},
+        "iam.amazonaws.com": {"Events": [event("PutRolePolicy", when="2026-10-04T10:45:00+00:00",
+                                               source="iam.amazonaws.com", resource="checkout-task")]},
+    }
+    ctx, aws, kube = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}},
+                         {"resource_names": "checkout-api", "incident_start": INCIDENT}, global_events)
+    facts = [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+    assert len(facts) == 2
+    route53 = next(f for f in facts if "ChangeResourceRecordSets" in f.summary)
+    assert "recorded in us-east-1" in route53.summary and "5 minutes before the incident started" in route53.summary
+    assert route53.time == "2026-10-04T10:45:00Z"
+    assert any("PutRolePolicy" in f.summary and "recorded in us-east-1" in f.summary for f in facts)
+    assert_read_only(ctx, aws, kube)
+
+
+def test_non_global_events_in_us_east_1_are_ignored(config_data, tmp_path):
+    global_events = {"iam.amazonaws.com": {"Events": [
+        event("PutBucketPolicy", source="s3.amazonaws.com"), event("RunInstances", source="ec2.amazonaws.com"),
+        event("DescribeRoles", source="iam.amazonaws.com", read_only="true")]}}
+    ctx, _, _ = run(config_data, tmp_path, {}, {"resource_names": "x"}, global_events)
+    assert not [f for f in ctx.evidence.facts if f.kind == "incident_time"]
+
+
+def test_one_lookup_per_global_source_in_us_east_1_over_the_same_period(config_data, tmp_path):
+    ctx, aws, _ = run(config_data, tmp_path, {}, {"resource_names": "x", "incident_start": INCIDENT})
+    calls = [c for c in aws.called("cloudtrail", "lookup-events") if c[c.index("--region") + 1] == "us-east-1"]
+    assert [c[c.index("--lookup-attributes") + 1] for c in calls] == [
+        f"AttributeKey=EventSource,AttributeValue={source}" for source in GLOBAL_SOURCES]
+    assert all(c[c.index("--start-time") + 1] == "2026-10-04T10:00:00Z" for c in calls)
+    assert all(c[c.index("--end-time") + 1] == "2026-10-04T10:55:00Z" for c in calls)
+    assert all(c[c.index("--max-items") + 1] == "50" for c in calls)
+
+
+def test_failed_global_lookup_is_an_error_and_regional_facts_remain(config_data, tmp_path):
+    answers = {"cloudtrail lookup-events": {"Events": [event("UpdateService")]}}
+    ctx, _, _ = run(config_data, tmp_path, answers, {"resource_names": "checkout-api"},
+                    {"iam.amazonaws.com": access_denied("LookupEvents")})
+    assert [e["code"] for e in ctx.evidence.errors] == ["AccessDeniedException"]
+    assert "us-east-1" in ctx.evidence.errors[0]["command"]
+    assert any("UpdateService" in f.summary for f in ctx.evidence.facts)
+
+
+def test_cut_global_lookup_says_older_events_were_not_read(config_data, tmp_path):
+    reads = [event(f"Get{n}", source="iam.amazonaws.com", read_only="true") for n in range(50)]
+    ctx, _, _ = run(config_data, tmp_path, {}, {"resource_names": "x"},
+                    {"iam.amazonaws.com": {"Events": reads, "NextToken": "t"}})
+    assert any("older events were not read" in s and "iam.amazonaws.com" in s for s in fact_summaries(ctx))
+
+
+def test_in_us_east_1_there_is_no_extra_lookup(config_data, tmp_path):
+    answers = {"cloudtrail lookup-events": {"Events": []}}
+    ctx, aws, _ = run(config_data, tmp_path, answers, {"resource_names": "x"}, region="us-east-1")
+    assert len(aws.called("cloudtrail", "lookup-events")) == 1
