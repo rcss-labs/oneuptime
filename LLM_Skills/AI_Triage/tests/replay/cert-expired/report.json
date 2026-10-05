@@ -1,0 +1,152 @@
+{
+  "status": "cause_found",
+  "summary": {
+    "what_broke": "Clients cannot connect to the checkout API over HTTPS because the certificate on the load balancer expired.",
+    "impact": "Callers of checkout.example.com get certificate errors since 12:00; the application itself is healthy.",
+    "scope": "Every HTTPS client of checkout.example.com is affected; the service, its targets, and its logs are normal.",
+    "top_cause": "C1"
+  },
+  "symptoms": [
+    "Clients report certificate errors when calling checkout.example.com",
+    "The application shows no errors and all targets are healthy"
+  ],
+  "causes": [
+    {
+      "id": "C1",
+      "label": "confirmed",
+      "statement": "The certificate on the HTTPS listener of the load balancer checkout-prod expired at 12:00:00, so clients reject the TLS connection",
+      "supporting": [
+        "edge-1",
+        "edge-2",
+        "edge-3",
+        "edge-4",
+        "compute-1",
+        "logs-1"
+      ],
+      "contradicting": []
+    },
+    {
+      "id": "C2",
+      "label": "candidate",
+      "statement": "The routine deployment of checkout-api:41 broke the service",
+      "supporting": [],
+      "contradicting": [
+        "compute-1",
+        "compute-2"
+      ]
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "H1",
+      "statement": "The certificate of the listener has expired",
+      "prediction": "The certificate status is EXPIRED and its end time is at the impact start",
+      "test": "Read the certificate behind the HTTPS listener",
+      "result": "confirmed",
+      "finding_ids": [
+        "edge-1",
+        "edge-2"
+      ],
+      "cause": "C1"
+    },
+    {
+      "id": "H2",
+      "statement": "The deployment of checkout-api:41 broke the service",
+      "prediction": "Errors start with the deployment",
+      "test": "Compare the deployment time and the service state with the impact start",
+      "result": "rejected",
+      "finding_ids": [
+        "compute-1",
+        "compute-2"
+      ],
+      "cause": "C2"
+    }
+  ],
+  "actions": [
+    {
+      "id": "A1",
+      "type": "mitigation",
+      "label": "recommended",
+      "cause": "C1",
+      "title": "Replace the expired certificate on the HTTPS listener",
+      "target": {
+        "account_alias": "prod-main",
+        "account_id": "111111111111",
+        "region": "eu-west-1",
+        "service": "checkout-api",
+        "resource_id": "checkout-prod",
+        "arn": "arn:aws:elasticloadbalancing:eu-west-1:111111111111:loadbalancer/app/checkout-prod/50dc6c495c0c9188"
+      },
+      "current_state": "The HTTPS listener of checkout-prod uses an ACM certificate with status EXPIRED",
+      "required_state": "The listener uses a valid certificate for checkout.example.com",
+      "change": "Request or import a valid certificate for checkout.example.com in ACM and attach it to the HTTPS listener of checkout-prod",
+      "rationale": "Clients reject the expired certificate; nothing else in the service is unhealthy",
+      "finding_ids": [
+        "edge-1",
+        "edge-2"
+      ],
+      "risk": "A wrong certificate would break HTTPS for every client",
+      "blast_radius": "the HTTPS listener of checkout-prod",
+      "preconditions": [
+        "The engineer approves the change",
+        "The domain of checkout.example.com can be validated"
+      ],
+      "verification": [
+        "A TLS client connecting to checkout.example.com sees a valid certificate",
+        "The health check of checkout.example.com passes"
+      ],
+      "rollback": [
+        "Attach the previous certificate to the listener again"
+      ]
+    },
+    {
+      "id": "A2",
+      "type": "permanent_fix",
+      "label": "candidate",
+      "cause": "C1",
+      "title": "Renew certificates automatically and alarm before they expire",
+      "target": {
+        "account_alias": "prod-main",
+        "account_id": "111111111111",
+        "region": "eu-west-1",
+        "service": "checkout-api",
+        "resource_id": "checkout-prod",
+        "arn": "arn:aws:elasticloadbalancing:eu-west-1:111111111111:loadbalancer/app/checkout-prod/50dc6c495c0c9188"
+      },
+      "current_state": "The certificate expired without any warning",
+      "required_state": "ACM renews the certificate, and an alarm fires 30 days before any certificate expires",
+      "change": "Use an ACM certificate with DNS validation and add a certificate expiry alarm",
+      "rationale": "The failure was predictable from the certificate end date",
+      "finding_ids": [
+        "edge-1"
+      ],
+      "risk": "Validation records must stay in place",
+      "blast_radius": "certificate management of checkout.example.com",
+      "preconditions": [],
+      "verification": [
+        "The alarm exists",
+        "ACM shows the certificate as eligible for renewal"
+      ],
+      "rollback": [
+        "Remove the alarm"
+      ]
+    }
+  ],
+  "open_questions": [
+    "Why was the certificate not renewed, and who owned its renewal?"
+  ],
+  "coverage": {
+    "not_checked": [
+      {
+        "what": "Certificates on other listeners or services",
+        "why": "Only the certificates of checkout-prod were read"
+      }
+    ],
+    "typesafe": "available"
+  },
+  "map_changes": [],
+  "run": {
+    "engineer": "replay",
+    "duration_minutes": 5
+  }
+}

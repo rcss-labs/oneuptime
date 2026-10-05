@@ -1,0 +1,31 @@
+{
+  "number": "INC-1043",
+  "title": "Checkout API certificate errors",
+  "url": "https://oneuptime.example.com/incident/inc-1043",
+  "description": "Clients report TLS certificate errors when calling the checkout API.",
+  "severity": "Critical",
+  "state": "Ongoing",
+  "declared_at": "2026-10-04T12:03:00Z",
+  "impact_started_at": "2026-10-04T12:00:05Z",
+  "monitors": [
+    {
+      "name": "Checkout API",
+      "type": "API",
+      "target": "https://checkout.example.com/health"
+    }
+  ],
+  "labels": [
+    "checkout"
+  ],
+  "hostnames": [
+    "checkout.example.com"
+  ],
+  "timeline": [
+    {
+      "time": "2026-10-04T12:03:00Z",
+      "text": "Incident declared by the on-call engineer"
+    }
+  ],
+  "notes": [],
+  "observed_at": "2026-10-04T12:30:00Z"
+}

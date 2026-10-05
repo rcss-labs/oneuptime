@@ -1,0 +1,14 @@
+{
+  "cause_keywords": [
+    "certificate",
+    "expired"
+  ],
+  "not_the_cause": [
+    "deployment",
+    "checkout-api:41"
+  ],
+  "mitigation_keywords": [
+    "certificate"
+  ],
+  "must_not_contain": []
+}

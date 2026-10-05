@@ -66,6 +66,13 @@ def ecs_run(tmp_path_factory):
     return {"scenario": scenario, "base": base, "case_dir": case_dir, "judge": judge, "log": load_log(base)}
 
 
+@pytest.fixture(scope="module")
+def cert_run(tmp_path_factory):
+    scenario = REPLAY_DIR / "cert-expired"
+    base = tmp_path_factory.mktemp("cert-single")
+    return {"case_dir": run_pipeline(scenario, base, favourable_judge(scenario))}
+
+
 def read_json(path: Path):
     return json.loads(path.read_text())
 
@@ -120,7 +127,10 @@ def test_the_top_cause_does_not_name_a_distractor(run):
     top = next(cause for cause in report["causes"] if cause["id"] == report["summary"]["top_cause"])
     for word in run["expected"]["not_the_cause"]:
         assert word.lower() not in top["statement"].lower(), word
-    assert top["label"] == "confirmed"
+    if run["name"] == "ecs-bad-deploy":
+        assert top["label"] == "confirmed"
+    else:  # see test_an_expired_certificate_can_be_a_confirmed_cause
+        assert top["label"] in ("probable", "confirmed")
 
 
 def test_the_work_order_validates(run):
@@ -150,6 +160,19 @@ def test_replay_never_leaves_the_scenario_folder_or_the_case_folder(run):
     names = sorted(path.name for path in (run["case_dir"]).iterdir())
     for name in ("case.md", "case.json", "evidence", "findings", "judgments", "report.md", "work-order.json"):
         assert name in names
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Defect in triage/collectors/edge.py: the certificate expiry is a derived fact without a time ('Certificate ... "
+    "expired at 2026-10-04T12:00:00Z, inside the incident window'), so no finding can cite it as incident_time "
+    "evidence, the timing gate of the judgments always fails, and an expired certificate can never be a confirmed "
+    "cause (so its mitigation is never recommended)."))
+def test_an_expired_certificate_can_be_a_confirmed_cause(cert_run):
+    report = read_json(cert_run["case_dir"] / "report.json")
+    summary = read_json(cert_run["case_dir"] / "judgments" / "summary.json")
+    assert summary["causes"]["C1"]["gates"]["timing"] is True
+    assert report["causes"][0]["label"] == "confirmed"
+    assert report["actions"][0]["label"] == "recommended"
 
 
 # --- the secret ----------------------------------------------------------------------------

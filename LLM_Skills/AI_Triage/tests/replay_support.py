@@ -29,7 +29,7 @@ from triage.questions import default_questions_path, load_questions
 TESTS_DIR = Path(__file__).resolve().parent
 REPLAY_DIR = TESTS_DIR / "replay"
 SKILL_SOURCE = TESTS_DIR.parent / "skill" / "ai-triage"
-SCENARIOS = ("ecs-bad-deploy",)
+SCENARIOS = ("ecs-bad-deploy", "cert-expired")
 SKILL_PARTS = ("scripts", "judgments", "templates", "VERSION")
 LOG_NAME = "pipeline-commands.json"
 COMMAND_TIMEOUT_SECONDS = 120

@@ -1,0 +1,18 @@
+{
+  "analyst": "logs",
+  "findings": [
+    {
+      "id": "logs-1",
+      "claim": "The application logged no error line in the window.",
+      "fact_ids": [
+        "logs-prod-main-eu-west-1:logs-0001"
+      ],
+      "excerpt": "No log lines matched the pattern in the window",
+      "provenance": "inferred",
+      "confidence": "high"
+    }
+  ],
+  "checked": [
+    "CloudWatch Logs Insights over the application log group"
+  ]
+}

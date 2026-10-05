@@ -1,0 +1,52 @@
+{
+  "analyst": "edge",
+  "findings": [
+    {
+      "id": "edge-1",
+      "claim": "The ACM certificate on the HTTPS listener of the load balancer checkout-prod is expired; it was valid until 12:00:00.",
+      "fact_ids": [
+        "edge-prod-main-eu-west-1:edge-0007"
+      ],
+      "excerpt": "(checkout.example.com) is EXPIRED, valid until 2026-10-04T12:00:00Z",
+      "provenance": "current",
+      "confidence": "high"
+    },
+    {
+      "id": "edge-2",
+      "claim": "The certificate expired inside the incident window, five seconds before the impact started.",
+      "fact_ids": [
+        "edge-prod-main-eu-west-1:edge-0008"
+      ],
+      "excerpt": "expired at 2026-10-04T12:00:00Z, inside the incident window",
+      "provenance": "inferred",
+      "confidence": "high",
+      "time": "2026-10-04T12:00:00Z"
+    },
+    {
+      "id": "edge-3",
+      "claim": "All targets of the target group checkout-api-tg are healthy.",
+      "fact_ids": [
+        "edge-prod-main-eu-west-1:edge-0005"
+      ],
+      "excerpt": "has 3 healthy targets",
+      "provenance": "current",
+      "confidence": "high"
+    },
+    {
+      "id": "edge-4",
+      "claim": "checkout.example.com is an alias record pointing at the load balancer, so clients reach the expired certificate.",
+      "fact_ids": [
+        "edge-prod-main-eu-west-1:edge-0009"
+      ],
+      "excerpt": "has an A record pointing at checkout-prod-1357924680.eu-west-1.elb.example.com, this load balancer",
+      "provenance": "current",
+      "confidence": "high"
+    }
+  ],
+  "checked": [
+    "load balancer listeners and certificates",
+    "target health",
+    "DNS record",
+    "load balancer 5xx metrics"
+  ]
+}
