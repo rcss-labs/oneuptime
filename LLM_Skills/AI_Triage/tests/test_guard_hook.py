@@ -305,3 +305,45 @@ def test_bash_tripwire_uses_the_hook_cwd(skill_with_cases):
                           "cwd": str(run)})
     assert decision(guard_hook.evaluate(command, skill))["permissionDecision"] == "ask"
     assert guard_hook.evaluate(payload("rm case.json"), skill) == ""
+
+
+# ---- final review fixes, item 1: connector calls reach the guard -----------------
+
+
+def mcp_payload(tool, tool_input):
+    return json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input, "cwd": "/"})
+
+
+def test_mcp_tools_are_decided(skill_with_cases):
+    skill, _run = skill_with_cases
+    assert decision(guard_hook.evaluate(mcp_payload("mcp__oneuptime__update_incident", {}), skill))[
+        "permissionDecision"] == "deny"
+    assert decision(guard_hook.evaluate(mcp_payload("mcp__oneuptime__get_incident", {}), skill))[
+        "permissionDecision"] == "allow"
+    assert decision(guard_hook.evaluate(mcp_payload("mcp__slack__send_message", {"text": "x"}), skill))[
+        "permissionDecision"] == "ask"
+    assert guard_hook.evaluate(mcp_payload("mcp__github__create_issue", {}), skill) == ""
+
+
+def test_the_confluence_state_is_read_from_the_configured_cases_root(skill_with_cases):
+    import hashlib
+    from datetime import datetime, timezone
+
+    skill, run = skill_with_cases
+    cases = run.parent.parent
+    body = "report body"
+    state = {"confluence": {"body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                            "written_at": datetime.now(timezone.utc).isoformat()}}
+    (cases / ".publish-state.json").write_text(json.dumps(state))
+    out = guard_hook.evaluate(mcp_payload("mcp__atlassian__createConfluencePage", {"body": body}), skill)
+    assert decision(out)["permissionDecision"] == "allow"
+
+
+def test_a_configured_oneuptime_server_name_is_read_from_the_config(skill_with_cases):
+    skill, _run = skill_with_cases
+    config_path = skill / "config" / "triage-config.yaml"
+    data = yaml.safe_load(config_path.read_text())
+    data["oneuptime"]["mcp_server"] = "status-tool"
+    config_path.write_text(yaml.safe_dump(data))
+    out = guard_hook.evaluate(mcp_payload("mcp__status-tool__update_incident", {}), skill)
+    assert decision(out)["permissionDecision"] == "deny"

@@ -3,7 +3,8 @@
 
 Reads the hook input JSON on stdin and prints a permission decision, or
 nothing when the guard has no opinion. Bash commands go to the command guard;
-Write, Edit, MultiEdit and NotebookEdit go to the protected-files check. It
+Write, Edit, MultiEdit and NotebookEdit go to the protected-files check;
+connector tools (mcp__<server>__<tool>) go to the connector check. It
 never exits non-zero: an internal error becomes a deny for commands that touch
 aws or kubectl, and an ask for a file tool.
 """
@@ -13,12 +14,16 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
 from triage.config import ConfigError, default_config_path, load_config
 from triage.guard import context_from_config, decide
-from triage.guard_paths import FILE_TOOLS, decide_file_tool, protected_roots
+import yaml
+
+from triage.guard_mcp import decide_mcp
+from triage.guard_paths import DEFAULT_CASES_DIR, FILE_TOOLS, decide_file_tool, protected_roots
 from triage.verdict import ASK, DENY, PASS, Verdict
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -64,6 +69,28 @@ def _file_tool_verdict(tool: str, payload: dict, skill_dir: Path) -> Verdict:
         return Verdict(ASK, f"internal error while checking {tool} ({exc})")
 
 
+def _configured_oneuptime_server(skill_dir: Path) -> str | None:
+    """oneuptime.mcp_server from the raw config file, when it is set."""
+    try:
+        data = yaml.safe_load(default_config_path(skill_dir).read_text())
+        value = data["oneuptime"]["mcp_server"]
+    except (OSError, yaml.YAMLError, KeyError, TypeError):
+        return None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _mcp_verdict(tool: str, payload: dict, skill_dir: Path) -> Verdict:
+    try:
+        try:
+            cases_dir = str(load_config(default_config_path(skill_dir)).cases_dir)
+        except ConfigError:
+            cases_dir = os.path.expanduser(DEFAULT_CASES_DIR)
+        return decide_mcp(tool, payload.get("tool_input"), cases_dir, _configured_oneuptime_server(skill_dir),
+                          datetime.now(timezone.utc))
+    except Exception as exc:  # a connector call the guard cannot judge goes to the engineer
+        return Verdict(ASK, f"internal error while checking {tool} ({exc})")
+
+
 def evaluate(stdin_text: str, skill_dir: Path) -> str:
     try:
         try:
@@ -75,6 +102,8 @@ def evaluate(stdin_text: str, skill_dir: Path) -> str:
         tool = payload.get("tool_name")
         if isinstance(tool, str) and tool in FILE_TOOLS:
             return render(_file_tool_verdict(tool, payload, skill_dir))
+        if isinstance(tool, str) and tool.startswith("mcp__"):
+            return render(_mcp_verdict(tool, payload, skill_dir))
         if tool != "Bash":
             return ""
         tool_input = payload.get("tool_input")
