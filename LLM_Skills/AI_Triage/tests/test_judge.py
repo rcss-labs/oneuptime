@@ -82,11 +82,20 @@ def build_case(tmp_path, config, extra_facts=0, labels=("confirmed", "candidate"
               "target": {"account_alias": "prod-main", "account_id": account.account_id, "region": "eu-west-1",
                          "service": "checkout-api", "resource_id": "checkout/checkout-api", "arn": ""},
               "current_state": "memory 512", "required_state": "memory 1024", "change": "Set memory to 1024",
-              "rationale": "not sent", "finding_ids": ["compute-1"]}
+              "rationale": "not sent", "finding_ids": ["compute-1"], "risk": "A restart of the tasks",
+              "blast_radius": "The checkout service only", "preconditions": ["A free deployment slot"],
+              "verification": ["Check that the health check returns 200"], "rollback": ["Set memory back to 512"]}
     report = {
         "status": "cause_found",
-        "summary": {"what_broke": "", "impact": "", "scope": SCOPE, "top_cause": "C1"},
+        "summary": {"what_broke": "Checkout containers were killed", "impact": "Checkout returned 502", "scope": SCOPE,
+                    "top_cause": "C1"},
         "symptoms": list(SYMPTOMS),
+        "hypotheses": [{"id": "H1", "statement": "Memory limit", "prediction": "Exit code 137", "test": "Read the task events",
+                        "result": "confirmed", "finding_ids": ["compute-1"], "cause": "C1"}],
+        "open_questions": [],
+        "coverage": {"typesafe": "available", "not_checked": []},
+        "map_changes": [],
+        "run": {"engineer": "", "duration_minutes": 0},
         "causes": [
             {"id": "C1", "statement": STATEMENT_1, "label": labels[0], "supporting": ["compute-1"], "contradicting": ["compute-3"]},
             {"id": "C2", "statement": STATEMENT_2, "label": labels[1], "supporting": ["compute-2"], "contradicting": []},
@@ -826,6 +835,71 @@ def test_the_quoted_text_counts_against_the_state_limit_before_the_first_call(tm
     with pytest.raises(DraftRuleError, match="compute-1"):
         run(build(True), config, refused)
     assert refused.calls == []
+
+
+# the draft passes the report's own checks before any call
+
+REPORT_RULE_DRAFTS = [
+    ("preconditions as a string", lambda r: r["actions"][0].update(preconditions="A free slot")),
+    ("a missing required action field", lambda r: r["actions"][0].pop("rollback")),
+    ("an empty required action text", lambda r: r["actions"][0].update(title="  ")),
+    ("an unknown hypothesis result", lambda r: r["hypotheses"][0].update(result="maybe")),
+    ("a missing hypothesis field", lambda r: r["hypotheses"][0].pop("prediction")),
+    ("an unknown action type", lambda r: r["actions"][0].update(type="hotfix")),
+    ("no symptoms", lambda r: r.update(symptoms=[""])),
+    ("a missing open_questions", lambda r: r.pop("open_questions")),
+    ("a hypothesis naming no cause", lambda r: r["hypotheses"][0].update(cause="C9")),
+    ("an unknown account alias", lambda r: r["actions"][0]["target"].update(account_alias="nowhere")),
+    ("a missing coverage", lambda r: r.pop("coverage")),
+    ("a wrong run duration", lambda r: r["run"].update(duration_minutes="long")),
+    ("a bad status", lambda r: r.update(status="maybe")),
+]
+
+
+@pytest.mark.parametrize("name, change", REPORT_RULE_DRAFTS, ids=[name for name, _ in REPORT_RULE_DRAFTS])
+def test_a_draft_that_the_report_would_refuse_is_refused_before_any_call(tmp_path, config, name, change):
+    from triage.findings import valid_findings
+    from triage.report import validate_report
+    case_dir = build_case(tmp_path, config)
+    edit_report(case_dir, change)
+    judge = FakeJudge(make_responder())
+    with pytest.raises(DraftRuleError) as raised:
+        run(case_dir, config, judge)
+    assert judge.calls == [] and list((case_dir / "judgments").glob("*.json")) == []
+    report = json.loads((case_dir / "report.json").read_text())
+    case = json.loads((case_dir / "case.json").read_text())
+    own_words = validate_report(report, case, valid_findings(case_dir), config)
+    assert raised.value.errors and all(error in own_words for error in raised.value.errors)
+
+
+def test_labels_and_judgments_do_not_stop_a_draft_from_being_judged(tmp_path, config):
+    case_dir = build_case(tmp_path, config, labels=("confirmed", "confirmed"))
+    edit_report(case_dir, lambda r: r["coverage"].update(typesafe="whatever the engineer typed"))
+    assert run(case_dir, config, FakeJudge(make_responder()))["status"] == "complete"
+
+
+@pytest.mark.parametrize("change", [
+    lambda r: None,
+    lambda r: r["hypotheses"].append({"id": "H2", "statement": "s", "prediction": "p", "test": "t", "result": "rejected",
+                                       "finding_ids": [], "cause": None}),
+    lambda r: r.update(open_questions=["Who changed the memory limit?"]),
+    lambda r: r["actions"][1].update(preconditions=[]),
+])
+def test_a_draft_that_judging_accepts_is_not_refused_by_validate_for_a_reason_outside_labels(tmp_path, config, change):
+    from triage.findings import valid_findings
+    from triage.report import validate_report
+    case_dir = build_case(tmp_path, config, labels=("probable", "candidate"))
+
+    def lower_actions(report):
+        for action in report["actions"]:
+            action["label"] = "candidate"
+        change(report)
+
+    edit_report(case_dir, lower_actions)
+    run(case_dir, config, FakeJudge(make_responder()))
+    report = json.loads((case_dir / "report.json").read_text())
+    case = json.loads((case_dir / "case.json").read_text())
+    assert validate_report(report, case, valid_findings(case_dir), config) == []
 
 
 # findings named by the draft must exist

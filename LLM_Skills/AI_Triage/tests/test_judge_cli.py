@@ -421,3 +421,13 @@ def test_a_checked_json_of_the_wrong_shape_exits_2_with_one_line(command, skill_
     assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 2
     err = capsys.readouterr().err.strip()
     assert err.count("\n") == 0 and "findings check" in err and "Traceback" not in err and judge.calls == []
+
+
+def test_a_draft_with_a_wrong_field_exits_2_with_the_reports_wording_and_no_calls(command, skill_dir, case_dir, capsys):
+    report = json.loads((case_dir / "report.json").read_text())
+    report["actions"][0]["preconditions"] = "A free slot"
+    (case_dir / "report.json").write_text(json.dumps(report))
+    judge = FakeJudge(make_responder())
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 2
+    assert "actions[0].preconditions: must be a list of text" in capsys.readouterr().err
+    assert judge.calls == [] and list((case_dir / "judgments").glob("*.json")) == []

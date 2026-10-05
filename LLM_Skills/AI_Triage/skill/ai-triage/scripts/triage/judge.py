@@ -5,6 +5,7 @@ text, stores each request and answer, and composes labels from the stored answer
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -21,6 +22,7 @@ from triage.findings import _around, _collapse, _matched_string, load_facts
 from triage.judge_client import Judge, JudgeReply, JudgeUnavailable
 from triage.questions import REQUIRED_IDS, _check_question, build_choice
 from triage.redact import Redactor
+from triage.report import validate_report
 from triage.service_map import ServiceMap
 from triage.window import WindowError, parse_time
 
@@ -638,6 +640,30 @@ def _check_cited_findings(report: dict, findings: dict[str, dict]) -> None:
         raise DraftRuleError(errors)
 
 
+_TOP_CAUSE_LABEL_RULE = "the top cause must be labelled"
+
+
+def check_report_rules(report: dict, case: dict, findings: dict[str, dict], config: TriageConfig) -> None:
+    """Apply every check of the report's validation that does not depend on judgments, before any call.
+
+    report.py has no function for that part, so its own validate_report runs on a copy in which every label is
+    candidate and the coverage value is the one used when nothing is judged; the one remaining label rule (the top
+    cause of a cause_found report) is dropped. Everything else, in the report's own words, is a draft problem.
+    """
+    neutral = copy.deepcopy(report)
+    for kind in ("causes", "actions"):
+        for entry in neutral.get(kind) if isinstance(neutral.get(kind), list) else []:
+            if isinstance(entry, dict) and "label" in entry:
+                entry["label"] = "candidate"
+    coverage = neutral.get("coverage")
+    if isinstance(coverage, dict) and isinstance(coverage.get("typesafe"), str):
+        coverage["typesafe"] = "unavailable: not judged yet"
+    no_summary = {**case, "case_dir": str(Path(str(case.get("case_dir", ""))) / ".no-summary-yet")}
+    problems = [problem for problem in validate_report(neutral, no_summary, findings, config) if _TOP_CAUSE_LABEL_RULE not in problem]
+    if problems:
+        raise DraftRuleError(problems)
+
+
 def _check_citation_counts(causes: list[dict], findings: dict[str, dict]) -> None:
     """A finding that cites too many facts cannot be judged in one small state."""
     errors = []
@@ -739,6 +765,7 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
     findings = load_checked_findings(case_dir)
     _check_findings_shape(findings)
     _check_cited_findings(report, findings)
+    check_report_rules(report, case, findings, config)
     incident_start = parse_time(case["incident_start"])
     _check_citation_counts(report["causes"], findings)
     facts = load_facts(case_dir)
