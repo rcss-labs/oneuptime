@@ -25,6 +25,7 @@ OS_END = "2026-10-04T11:00:00Z"
 
 @pytest.fixture
 def skill_dir(tmp_path, config_data):
+    config_data["cases_dir"] = str(tmp_path / "cases")
     directory = tmp_path / "skill"
     (directory / "config").mkdir(parents=True)
     (directory / "config" / "triage-config.yaml").write_text(yaml.safe_dump(config_data))
@@ -33,8 +34,10 @@ def skill_dir(tmp_path, config_data):
 
 @pytest.fixture
 def case_dir(tmp_path):
-    directory = tmp_path / "case"
-    directory.mkdir()
+    """A run folder at <cases root>/<incident>/<run> with a case.json, the only place the tools write evidence."""
+    directory = tmp_path / "cases" / "INC-1" / "20261004-110000"
+    directory.mkdir(parents=True)
+    (directory / "case.json").write_text(json.dumps({"incident_start": "2026-10-04T10:42:00Z", "replay": False}))
     return directory
 
 
