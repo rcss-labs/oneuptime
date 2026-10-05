@@ -347,3 +347,70 @@ def test_a_configured_oneuptime_server_name_is_read_from_the_config(skill_with_c
     config_path.write_text(yaml.safe_dump(data))
     out = guard_hook.evaluate(mcp_payload("mcp__status-tool__update_incident", {}), skill)
     assert decision(out)["permissionDecision"] == "deny"
+
+
+# ---- final review fixes, item 4: the wrapper's fallback when the guard is broken -----
+
+
+@pytest.fixture
+def broken_guard(tmp_path):
+    """No Python environment, a temporary home, and a skill folder whose config names its own cases root."""
+    home = tmp_path / "home"
+    home.mkdir()
+    skill = tmp_path / "skill"
+    (skill / "config").mkdir(parents=True)
+    data = yaml.safe_load(EXAMPLE_CONFIG.read_text())
+    data["cases_dir"] = str(tmp_path / "cases")
+    (skill / "config" / "triage-config.yaml").write_text(yaml.safe_dump(data))
+    env = {"HOME": str(home), "AI_TRIAGE_SKILL_DIR": str(skill)}
+    return {"tmp": tmp_path, "home": home, "skill": skill, "cases": tmp_path / "cases", "env": env}
+
+
+def fallback(broken_guard, stdin):
+    for python in (broken_guard["tmp"] / "missing-python", _crashing_python(broken_guard["tmp"])):
+        result = run_wrapper(stdin, python, **broken_guard["env"])
+        assert result.returncode == 0
+        yield result.stdout
+
+
+def _crashing_python(folder):
+    crash = folder / "crash-python"
+    crash.write_text("#!/usr/bin/env bash\nexit 1\n")
+    crash.chmod(0o755)
+    return crash
+
+
+@pytest.mark.parametrize("tool, key", [("Write", "file_path"), ("Edit", "file_path"), ("MultiEdit", "file_path"),
+                                       ("NotebookEdit", "notebook_path")])
+def test_the_fallback_denies_file_tools_under_the_cases_root_and_the_skill_folder(broken_guard, tool, key):
+    targets = [
+        broken_guard["cases"] / "INC-1" / "20261004-101500" / "judgments" / "summary.json",
+        broken_guard["home"] / ".ai-triage" / "cases" / "x" / "case.json",
+        broken_guard["skill"] / "config" / "triage-config.yaml",
+        SKILL_SRC / "scripts" / "triage" / "guard.py",
+        broken_guard["home"] / ".claude" / "skills" / "ai-triage" / "SKILL.md",
+    ]
+    for target in targets:
+        for out in fallback(broken_guard, file_payload(tool, {key: str(target)})):
+            assert decision(out)["permissionDecision"] == "deny", target
+
+
+def test_the_fallback_stays_silent_for_other_file_paths(broken_guard):
+    for out in fallback(broken_guard, file_payload("Write", {"file_path": str(broken_guard["tmp"] / "project" / "a.md")})):
+        assert out == ""
+
+
+@pytest.mark.parametrize("command", ["python3 opensearch_query.py --cluster logs-prod health",
+                                     "curl -X DELETE https://opensearch.internal.example.com/app-logs-1",
+                                     "curl https://OPENSEARCH.internal.example.com/_cat/indices"])
+def test_the_fallback_denies_the_opensearch_tool_and_hosts(broken_guard, command):
+    for out in fallback(broken_guard, payload(command)):
+        assert decision(out)["permissionDecision"] == "deny"
+
+
+def test_the_fallback_denies_connector_writes_and_reads_of_the_three_services(broken_guard):
+    for tool in ("mcp__slack__send_message", "mcp__oneuptime__update_incident", "mcp__atlassian__createConfluencePage"):
+        for out in fallback(broken_guard, mcp_payload(tool, {})):
+            assert decision(out)["permissionDecision"] == "deny"
+    for out in fallback(broken_guard, mcp_payload("mcp__github__create_issue", {})):
+        assert out == ""
