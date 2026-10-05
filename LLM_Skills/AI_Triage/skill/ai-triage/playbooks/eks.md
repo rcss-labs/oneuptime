@@ -28,18 +28,27 @@ not. Take the account, region, window, and case folder from the plan's own lines
 | "Cluster C is <status>: ... health issues: ..." | the control plane is unhealthy, or a setting is wrong (`current`) | the issue code and message |
 | "Nodegroup G is DEGRADED ... health issues: ..." | nodes cannot join or launch; the issue code names why | `autoscaling` and `ec2` for the nodes |
 | "Add-on A is DEGRADED" or `CREATE_FAILED` | a core add-on (networking, DNS, storage) is broken; only non-active add-ons are listed | the issue message; `access.md` for its role |
-| "Update U (type) is Failed; errors: ..." | an upgrade started inside the window and stopped | the error code; the add-on and nodegroup facts |
+| "Update U (type) is Failed; errors: ..." | a cluster upgrade created inside the window that stopped | the error code; the add-on and nodegroup facts |
+| "Nodegroup G update U (ConfigUpdate or VersionUpdate) is Successful, created <time>, N minutes before the window start" | a node rollout (AMI or version); the time is its creation, there is no end time, so it may have finished later; updates up to a day before the window are listed | node health and pod restarts after that time |
 | "Pod P is Pending and not ready ... condition PodScheduled false" | nothing could place it: capacity, taints, or requests too large | the excerpt (scheduler message) and the warning events |
 | "container X waiting CrashLoopBackOff", restarts counted | the process starts and dies | the log fact of the previous instance |
-| "container X last terminated OOMKilled exit code 137" | memory limit reached | the memory limit of the workload |
+| "container X last terminated OOMKilled exit code 137 ... resources: container X: memory limit 256Mi, request 128Mi; cpu limit ..." | memory limit reached; the limit and request that the pod runs with are in the same fact ("none" means unset) | the workload fact's limits, and the ReplicaSet lead for the previous ones |
 | "waiting ImagePullBackOff" or `ErrImagePull` | image missing, tag moved, or no registry access | `ecr`; the pull message in the excerpt |
 | "Warning event FailedScheduling ... N times" | capacity or constraint problem; the count shows persistence | the message: insufficient cpu or memory, untolerated taint, volume zone |
-| "Workload W: desired N, ready fewer, updated M" | a rollout is stuck or pods are failing | rollout history and the pod facts |
+| "Workload W: desired N, ready fewer, updated M; ... resources: container X: memory limit ..., request ..." | a rollout is stuck or pods are failing; the resources are those of the template now (`current`) | rollout history, the pod facts, and the ReplicaSet lead |
 | "Log lines of container ... first strong error-looking line: ..." | the lines are in the fact's `data["lines"]`: first 20 and the distinct errors, repeats once | read them in order for the first failure |
 | "No log line ... falls inside the incident window" | the process was silent, or logs are not written to stdout | the pod state and previous instance |
 
 Cluster, nodegroup, add-on, pod, and workload lines are `current`. Update, warning
 event, and log facts carry times. At most three unhealthy pods get their logs read.
+The `data` of AWS facts holds the resource ARN; a workload fact holds its kind, name,
+and namespace, and the containers' limits and requests. A work order names those.
+
+Changes made inside the cluster (`kubectl set resources`, an edited ConfigMap, a
+scale) are not in CloudTrail, so `changes` shows nothing for them. Look at the
+ReplicaSet creation times and the `kubernetes.io/change-cause` annotation (lead
+below), and, when control-plane logging is on, the audit log: `run collect logs ...
+--target log_groups=/aws/eks/<cluster>/cluster --target pattern=<resource name>`.
 
 ## Common causes
 
@@ -67,11 +76,14 @@ event, and log facts carry times. At most three unhealthy pods get their logs re
 ## Compare with
 
 Pods of the same workload that are healthy, the previous revision, and the same
-workload in another environment.
+workload in another environment. The previous revision's limits and the time it was
+applied are read from the workload's ReplicaSets (first lead below): each one's
+creation time, revision number, and container resources.
 
 ## Follow a lead
 
 ```bash
+kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context <triage context> -n <namespace> get replicasets -l '<label>=<value>' -o json | jq -c '.items[] | {created:.metadata.creationTimestamp,revision:.metadata.annotations["deployment.kubernetes.io/revision"],cause:.metadata.annotations["kubernetes.io/change-cause"],replicas:.spec.replicas,containers:[.spec.template.spec.containers[] | {name:.name,resources:.resources}]}'
 kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context <triage context> -n <namespace> describe pod <pod>
 kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context <triage context> -n <namespace> logs <pod> --previous --tail 100
 kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context <triage context> -n <namespace> get events --sort-by .lastTimestamp
