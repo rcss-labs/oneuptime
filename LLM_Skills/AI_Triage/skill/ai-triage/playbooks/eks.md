@@ -1,0 +1,79 @@
+# EKS playbook
+
+## When to open
+
+The target has an `eks_cluster`, or evidence names a cluster, a node, a namespace, a
+pod, or a Kubernetes workload.
+
+## Collect
+
+The plan already runs `eks` for the mapped cluster. The collector reads pods, warning
+events, workloads, and logs only when it gets a `namespace`; add it when the plan did
+not. Take the account, region, window, and case folder from the plan's own lines.
+
+| When | Command |
+|---|---|
+| The namespace is known and pods are involved | `run collect eks ... --target cluster=<cluster> --target namespace=<namespace> --target workloads=deployment/<name>` |
+| A second namespace is involved | the same command with another `namespace` and `--suffix <namespace>` |
+| Nodes are unhealthy or missing | `run collect ec2 ... --target instance_ids=<node instance ids>` |
+| The nodegroup did not scale or replace nodes | `run collect autoscaling ... --target group=<Auto Scaling group of the nodegroup>` |
+| Pods cannot pull an image | `run collect ecr ... --target repository=<repository name>` |
+| Pods cannot reach a dependency | `run collect vpc ... --target security_group_ids=<node or pod groups>` |
+| The control plane logs are enabled | `run collect logs ... --target log_groups=/aws/eks/<cluster>/cluster` |
+
+## What the facts mean
+
+| Fact | Usually means | Read next |
+|---|---|---|
+| "Cluster C is <status>: ... health issues: ..." | the control plane is unhealthy, or a setting is wrong (`current`) | the issue code and message |
+| "Nodegroup G is DEGRADED ... health issues: ..." | nodes cannot join or launch; the issue code names why | `autoscaling` and `ec2` for the nodes |
+| "Add-on A is DEGRADED" or `CREATE_FAILED` | a core add-on (networking, DNS, storage) is broken; only non-active add-ons are listed | the issue message; `access.md` for its role |
+| "Update U (type) is Failed; errors: ..." | an upgrade started inside the window and stopped | the error code; the add-on and nodegroup facts |
+| "Pod P is Pending and not ready ... condition PodScheduled false" | nothing could place it: capacity, taints, or requests too large | the excerpt (scheduler message) and the warning events |
+| "container X waiting CrashLoopBackOff", restarts counted | the process starts and dies | the log fact of the previous instance |
+| "container X last terminated OOMKilled exit code 137" | memory limit reached | the memory limit of the workload |
+| "waiting ImagePullBackOff" or `ErrImagePull` | image missing, tag moved, or no registry access | `ecr`; the pull message in the excerpt |
+| "Warning event FailedScheduling ... N times" | capacity or constraint problem; the count shows persistence | the message: insufficient cpu or memory, untolerated taint, volume zone |
+| "Workload W: desired N, ready fewer, updated M" | a rollout is stuck or pods are failing | rollout history and the pod facts |
+| "Log lines of container ... first strong error-looking line: ..." | the lines are in the fact's `data["lines"]`: first 20 and the distinct errors, repeats once | read them in order for the first failure |
+| "No log line ... falls inside the incident window" | the process was silent, or logs are not written to stdout | the pod state and previous instance |
+
+Cluster, nodegroup, add-on, pod, and workload lines are `current`. Update, warning
+event, and log facts carry times. At most three unhealthy pods get their logs read.
+
+## Common causes
+
+1. **A new image or setting breaks the pods.** Evidence: a rollout newer than the
+   incident start, pods of the new revision crash, the log's first error names a
+   setting or a dependency, the old pods are fine. Work order: workload, both image
+   tags, the changed value; mitigation is a rollback to the previous revision;
+   permanent fix is the corrected setting in the source manifest.
+2. **Memory limit too low.** Evidence: `OOMKilled`, restarts that match the load
+   peak. Work order: the memory limit now and the observed use; a higher limit or a
+   leak fix, stated separately.
+3. **No capacity to schedule.** Evidence: `FailedScheduling` events, Pending pods,
+   a nodegroup at its maximum or with health issues. Work order: the nodegroup, its
+   min, max, and desired, and the resource that is short.
+4. **Image cannot be pulled.** Evidence: `ImagePullBackOff` and a missing tag or a
+   denied pull in the excerpt. Work order: image reference, the tag that exists, the
+   node role; read `ecr.md`.
+5. **A failed upgrade or add-on.** Evidence: an update with errors, a degraded
+   add-on, nodes on different versions. Work order: update id, error code, and the
+   add-on version; permanent fix is the upgrade order that was skipped.
+6. **A dependency fails and the pods report it.** Evidence: errors naming a
+   database or API in the logs, healthy until the incident start. The cause is in
+   that service's playbook.
+
+## Compare with
+
+Pods of the same workload that are healthy, the previous revision, and the same
+workload in another environment.
+
+## Follow a lead
+
+```bash
+kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context <triage context> -n <namespace> describe pod <pod>
+kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context <triage context> -n <namespace> logs <pod> --previous --tail 100
+kubectl --kubeconfig "$HOME/.claude/skills/ai-triage/config/kubeconfig" --context <triage context> -n <namespace> get events --sort-by .lastTimestamp
+aws eks describe-nodegroup --cluster-name <cluster> --nodegroup-name <nodegroup> --profile <triage profile> --region <region> --query 'nodegroup.{status:status,issues:health.issues,scaling:scalingConfig,ami:amiType,version:version}' 2>/dev/null
+```
