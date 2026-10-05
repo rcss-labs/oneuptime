@@ -52,19 +52,45 @@ READ_PROBES: tuple[Probe, ...] = (
     Probe("AWS Health", "health", "describe-events", ("--max-items", "1"), region="us-east-1", skip_on=("SubscriptionRequiredException",)),
 )
 
-# The simulator must answer "allowed" for each of these.
-SIMULATED_READS: tuple[str, ...] = (
-    "logs:GetLogEvents",
-    "logs:StartQuery",
-    "ecs:DescribeServices",
-    "ecr:DescribeImages",
-    "rds:DownloadDBLogFilePortion",
-    "es:DescribeDomain",
-    "lambda:GetFunctionConfiguration",
-    "cloudformation:DescribeStackEvents",
-    "config:GetResourceConfigHistory",
-    "cloudtrail:LookupEvents",
+# The simulator must answer "allowed" for each of these, listed under the collector that needs it.
+# Many of these rest on ViewOnlyAccess and not on the inline policy, so this list is how a first run
+# of verify_access.py finds out which are really granted.
+SIMULATED_READS_BY_COLLECTOR: dict[str, tuple[str, ...]] = {
+    "logs": ("logs:GetLogEvents", "logs:StartQuery", "logs:DescribeLogGroups", "logs:DescribeLogStreams"),
+    "ecs": ("ecs:DescribeServices", "ecs:DescribeTaskDefinition", "ecs:DescribeTasks", "ecs:ListTasks",
+            "ecs:ListServices", "ecs:ListClusters"),
+    "ecr": ("ecr:DescribeImages", "ecr:DescribeRepositories", "ecr:GetLifecyclePolicy"),
+    "rds": ("rds:DownloadDBLogFilePortion", "rds:DescribeDBInstances", "rds:DescribeDBClusters",
+            "rds:DescribeDBLogFiles", "rds:DescribeEvents", "rds:DescribePendingMaintenanceActions"),
+    "opensearch-domain": ("es:DescribeDomain", "es:ListDomainNames", "es:ListDomainMaintenances"),
+    "lambda": ("lambda:GetFunctionConfiguration", "lambda:ListEventSourceMappings", "lambda:ListAliases",
+               "lambda:ListVersionsByFunction"),
+    "changes": ("cloudformation:DescribeStackEvents", "config:GetResourceConfigHistory", "cloudtrail:LookupEvents"),
+    "messaging": ("sqs:GetQueueUrl", "sqs:GetQueueAttributes", "sqs:ListDeadLetterSourceQueues",
+                  "sns:ListSubscriptionsByTopic"),
+    "eks": ("eks:DescribeCluster", "eks:DescribeNodegroup", "eks:DescribeAddon", "eks:DescribeUpdate",
+            "eks:ListNodegroups", "eks:ListAddons", "eks:ListUpdates"),
+    "edge": ("acm:ListCertificates", "elasticloadbalancing:DescribeLoadBalancers",
+             "elasticloadbalancing:DescribeListeners", "elasticloadbalancing:DescribeTargetGroups",
+             "elasticloadbalancing:DescribeTargetHealth", "route53:ListHostedZones",
+             "route53:ListResourceRecordSets", "wafv2:ListWebACLs"),
+    "access": ("iam:ListRoles", "iam:ListAttachedRolePolicies", "iam:ListRolePolicies"),
+    "autoscaling": ("autoscaling:DescribeAutoScalingGroups", "autoscaling:DescribeScalingActivities",
+                    "autoscaling:DescribeInstanceRefreshes", "autoscaling:DescribePolicies",
+                    "autoscaling:DescribeScheduledActions"),
+    "ec2": ("ec2:DescribeInstances", "ec2:DescribeInstanceStatus"),
+    "vpc": ("ec2:DescribeNatGateways", "ec2:DescribeNetworkAcls", "ec2:DescribeRouteTables",
+            "ec2:DescribeSecurityGroups", "ec2:DescribeSubnets", "ec2:DescribeVpcEndpoints"),
+    "efs": ("elasticfilesystem:DescribeFileSystems",),
+    "elasticache": ("elasticache:DescribeCacheClusters", "elasticache:DescribeReplicationGroups",
+                    "elasticache:DescribeEvents"),
+    "dynamodb": ("dynamodb:DescribeTable", "dynamodb:ListTables"),
+    "metrics": ("cloudwatch:GetMetricData",),
+}
+SIMULATED_READS: tuple[str, ...] = tuple(
+    dict.fromkeys(action for actions in SIMULATED_READS_BY_COLLECTOR.values() for action in actions)
 )
+SIMULATOR_BATCH = 50  # actions per simulate-principal-policy call, to stay clear of any request limit
 # The simulator must not answer "allowed" for any of these writes and secret reads.
 SIMULATED_DENIED: tuple[str, ...] = (
     "ecs:UpdateService",
@@ -148,25 +174,30 @@ def run_simulation(account: Account, role_name: str, runner: Runner) -> list[Che
     if arn is None:
         return [CheckResult(account.alias, "Simulator", FAILED, "could not find the role behind the triage profile")]
     actions = SIMULATED_READS + SIMULATED_DENIED
-    simulation = run_aws(
-        "iam",
-        "simulate-principal-policy",
-        ("--policy-source-arn", arn, "--action-names", *actions),
-        profile=account.profile,
-        region=region,
-        runner=runner,
-    )
-    if not simulation.ok:
-        return [CheckResult(account.alias, "Simulator", FAILED, simulation.error_code or "failed")]
-    decisions = {
-        entry.get("EvalActionName"): entry.get("EvalDecision")
-        for entry in (simulation.data or {}).get("EvaluationResults", [])
-    }
+    decisions: dict[str, str] = {}
+    for start in range(0, len(actions), SIMULATOR_BATCH):
+        simulation = run_aws(
+            "iam",
+            "simulate-principal-policy",
+            ("--policy-source-arn", arn, "--action-names", *actions[start:start + SIMULATOR_BATCH]),
+            profile=account.profile,
+            region=region,
+            runner=runner,
+        )
+        if not simulation.ok:
+            return [CheckResult(account.alias, "Simulator", FAILED, simulation.error_code or "failed")]
+        decisions.update(
+            {entry.get("EvalActionName"): entry.get("EvalDecision") for entry in (simulation.data or {}).get("EvaluationResults", [])}
+        )
     results: list[CheckResult] = []
     for action in SIMULATED_READS:
         decision = decisions.get(action, "no answer")
         status = PASSED if decision == "allowed" else FAILED
         results.append(CheckResult(account.alias, f"Allowed: {action}", status, "" if status == PASSED else decision))
+    for collector, collector_actions in SIMULATED_READS_BY_COLLECTOR.items():
+        missing = [action for action in collector_actions if decisions.get(action, "no answer") != "allowed"]
+        if missing:
+            results.append(CheckResult(account.alias, f"Missing grants: {collector}", FAILED, ", ".join(missing)))
     for action in SIMULATED_DENIED:
         decision = decisions.get(action, "no answer")
         status = PASSED if decision in ("implicitDeny", "explicitDeny") else FAILED

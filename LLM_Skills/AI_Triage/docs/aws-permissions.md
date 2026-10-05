@@ -51,6 +51,12 @@ version 190. AWS changes these policies over time. Re-run
 
 ### What `ViewOnlyAccess` already provides
 
+**This list is unverified until your first `verify_access.py` run.** The contents of
+`ViewOnlyAccess` were not read when this document was written. Every read that rests on it
+(SQS queue attributes, the EKS describes, `acm:ListCertificates`, `cloudwatch:GetMetricData`,
+the VPC describes, and the rest) is asked of the IAM policy simulator by `verify_access.py`,
+which reports any that are not granted, grouped by the collector that needs them.
+
 ECS describe and list, EC2 describe, EKS describe and list, RDS describe including
 events, ElastiCache describe, load balancer basics and target health, CloudWatch
 metrics, CloudTrail event lookup, Route 53, EC2 Auto Scaling, VPC networking
@@ -287,12 +293,15 @@ authorising. The skill uses only the `get_`, `list_`, and `count_` tools.
 ~/.claude/skills/ai-triage/.venv/bin/python ~/.claude/skills/ai-triage/scripts/verify_access.py
 ```
 
-For every configured account this checks three things:
+For every configured account this checks four things:
 
 1. **Identity.** The profile signs in to the expected account with the triage
    permission set.
 2. **Reads.** One harmless list or describe call per permission area succeeds.
-3. **Writes are denied.** The IAM policy simulator is asked about a sample of
+3. **Reads are granted.** The IAM policy simulator is asked about every read the collectors
+   and playbooks use, including those that rest on `ViewOnlyAccess`. A missing grant is
+   listed as `Missing grants: <collector>`.
+4. **Writes are denied.** The IAM policy simulator is asked about a sample of
    write actions. Nothing is attempted against your resources.
 
 The simulator evaluates the role's own policies. It does not evaluate service
