@@ -15,6 +15,7 @@ from triage.publish import (
     audit_case,
     SPACE_ID_NOTE,
     publish_digests,
+    read_audited,
     publish_state_entry,
     slack_context,
     verify_confluence,
@@ -831,3 +832,31 @@ def test_verify_confluence_needs_the_audited_report(run_dir, config):
     readback = make_intake_file(config, "# changed\n")
     with pytest.raises(PublishError, match="audit"):
         verify_confluence(run_dir, readback, config)
+
+
+# read_audited
+
+def test_read_audited_returns_the_text_of_the_audited_bytes(run_dir):
+    result = audit_case(run_dir)
+    assert read_audited(run_dir, "report.md", result) == (run_dir / "report.md").read_text()
+
+
+def test_read_audited_refuses_a_file_changed_after_the_audit(run_dir):
+    result = audit_case(run_dir)
+    (run_dir / "report.md").write_text("# changed after the audit\n")
+    with pytest.raises(PublishError, match="changed since it was audited"):
+        read_audited(run_dir, "report.md", result)
+
+
+def test_read_audited_refuses_a_file_that_was_not_part_of_the_audit(run_dir):
+    result = audit_case(run_dir)
+    (run_dir / "slack-message.md").write_text("appeared after the audit\n")
+    with pytest.raises(PublishError, match="changed since it was audited"):
+        read_audited(run_dir, "slack-message.md", result)
+
+
+def test_read_audited_refuses_a_file_that_disappeared(run_dir):
+    result = audit_case(run_dir)
+    (run_dir / "work-order.json").unlink()
+    with pytest.raises(PublishError, match="changed since it was audited"):
+        read_audited(run_dir, "work-order.json", result)
