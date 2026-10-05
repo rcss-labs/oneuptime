@@ -17,7 +17,7 @@ from triage import compose
 from triage.case import load_case
 from triage.config import TriageConfig
 from triage.digest import JUDGED_ACTION_FIELDS, JUDGED_CAUSE_FIELDS, action_digest, case_identity, cause_digest, draft_digest
-from triage.findings import load_facts
+from triage.findings import _around, _collapse, _matched_string, load_facts
 from triage.judge_client import Judge, JudgeReply, JudgeUnavailable
 from triage.questions import REQUIRED_IDS, _check_question, build_choice
 from triage.redact import Redactor
@@ -32,6 +32,7 @@ _ACCOUNT_NUMBER_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
 _DASHED_ACCOUNT_RE = re.compile(r"(?<![\d-])(\d{4})-(\d{4})-(\d{4})(?![\d-])")
 MAX_ADHOC_QUESTION_CHARS = 2000
 MAX_ASKED_CHARS = 300
+MAX_QUOTED_CHARS = 500
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")  # the same pattern the report uses for ids
 _ADHOC_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 MAX_STATE_CHARS = 8000
@@ -155,22 +156,45 @@ def _asked_text(finding: dict, fact_id: str) -> str:
     return "; ".join(item for item in listed if isinstance(item, str)) if isinstance(listed, list) else ""
 
 
+def _quoted_owner(finding: dict, cited: list[tuple[str, dict]]) -> str | None:
+    """The cited fact that holds the finding's matched text, computed from the evidence as the findings check does.
+
+    checked.json stores one matched_text per finding and not the fact it came from, so the first cited fact whose
+    quotable string around the excerpt equals it is taken.
+    """
+    matched, excerpt = finding.get("matched_text"), finding.get("excerpt")
+    if not isinstance(matched, str) or not matched or not isinstance(excerpt, str):
+        return None
+    needle = _collapse(excerpt)
+    for fact_id, fact in cited:
+        text = _matched_string(fact, needle)
+        if text is not None and _around(text, needle) == matched:
+            return fact_id
+    return None
+
+
 def _evidence_of(finding: dict, facts: dict[str, dict]) -> list[dict]:
     cited = [(fact_id, facts[fact_id]) for fact_id in finding.get("fact_ids", []) if fact_id in facts]
+    matched = finding.get("matched_text") if isinstance(finding.get("matched_text"), str) else ""
     if not cited:
         summaries = finding.get("fact_summaries")
         summaries = summaries if isinstance(summaries, dict) else {}
-        return [{"summary": summary, "excerpt": "", "asked": _asked_text(finding, fact_id)} for fact_id, summary in summaries.items()]
-    return [{"summary": fact.get("summary", ""), "excerpt": fact.get("excerpt", ""), "asked": _asked_text(finding, fact_id)}
-            for fact_id, fact in cited]
+        # the facts are gone, so which one held the text cannot be recomputed: the first item carries it
+        return [{"summary": summary, "excerpt": "", "asked": _asked_text(finding, fact_id), "quoted": matched if position == 0 else ""}
+                for position, (fact_id, summary) in enumerate(summaries.items())]
+    owner = _quoted_owner(finding, cited)
+    return [{"summary": fact.get("summary", ""), "excerpt": fact.get("excerpt", ""), "asked": _asked_text(finding, fact_id),
+             "quoted": matched if fact_id == owner else ""} for fact_id, fact in cited]
 
 
 def _cut_asked(prepared_state: Any) -> Any:
-    """Cut each asked text to its limit, after redaction."""
+    """Cut each asked and quoted text to its limit, after redaction."""
     evidence = prepared_state.get("evidence") if isinstance(prepared_state, dict) else None
     for item in evidence if isinstance(evidence, list) else []:
         if isinstance(item, dict) and isinstance(item.get("asked"), str):
             item["asked"] = item["asked"][:MAX_ASKED_CHARS]
+        if isinstance(item, dict) and isinstance(item.get("quoted"), str):
+            item["quoted"] = item["quoted"][:MAX_QUOTED_CHARS]
     return prepared_state
 
 

@@ -242,14 +242,14 @@ def test_a_bare_fact_id_shared_by_two_evidence_files_is_judged_from_the_cited_fi
     assert first_path.stem != second_path.stem
     judge = FakeJudge(make_responder())
     judge_findings(session_for(tmp_path, config, judge), QUESTIONS, valid_findings(tmp_path), load_facts(tmp_path), ["compute-9"], limit=40)
-    assert judge.calls[0][0]["evidence"] == [{"summary": "Container exited with code 137 in Frankfurt", "excerpt": "", "asked": ""}]
+    assert judge.calls[0][0]["evidence"] == [{"summary": "Container exited with code 137 in Frankfurt", "excerpt": "", "asked": "", "quoted": "Container exited with code 137 in Frankfurt"}]
 
 
 def test_a_finding_whose_facts_are_gone_falls_back_to_its_stored_summaries(tmp_path, config):
     finding = {"claim": "c", "fact_ids": ["gone:ecs-0001"], "fact_summaries": {"gone:ecs-0001": "Stored summary"}}
     judge = FakeJudge(make_responder())
     judge_findings(session_for(tmp_path, config, judge), QUESTIONS, {"f-1": finding}, {}, ["f-1"], limit=40)
-    assert judge.calls[0][0]["evidence"] == [{"summary": "Stored summary", "excerpt": "", "asked": ""}]
+    assert judge.calls[0][0]["evidence"] == [{"summary": "Stored summary", "excerpt": "", "asked": "", "quoted": ""}]
 
 
 def test_findings_are_asked_one_request_each_with_only_their_own_facts(tmp_path, config):
@@ -259,8 +259,8 @@ def test_findings_are_asked_one_request_each_with_only_their_own_facts(tmp_path,
     from triage.findings import load_facts, valid_findings
     result = judge_findings(session, QUESTIONS, valid_findings(case_dir), load_facts(case_dir), ["compute-1", "compute-2"], limit=40)
     assert [call[0] for call in judge.calls] == [
-        {"claim": CLAIM_1, "evidence": [{"summary": "Essential container exited with code 137", "excerpt": "", "asked": ""}]},
-        {"claim": CLAIM_2, "evidence": [{"summary": "Service has 0 running tasks", "excerpt": "desired 2, running 0", "asked": ""}]},
+        {"claim": CLAIM_1, "evidence": [{"summary": "Essential container exited with code 137", "excerpt": "", "asked": "", "quoted": "Essential container exited with code 137"}]},
+        {"claim": CLAIM_2, "evidence": [{"summary": "Service has 0 running tasks", "excerpt": "desired 2, running 0", "asked": "", "quoted": "Service has 0 running tasks"}]},
     ]
     assert all(list(call[1]) == ["evidence_relation"] for call in judge.calls)
     assert all(call[1]["evidence_relation"] == QUESTIONS["evidence_relation"] for call in judge.calls)
@@ -698,7 +698,7 @@ def test_the_state_carries_what_was_asked_of_the_source(tmp_path, config):
     finding, facts = finding_with({"ev:x-0001": ["query=level:INFO", "filter=service=checkout"]})
     assert evidence_sent(tmp_path, config, finding, facts) == [{
         "summary": "4000 documents matched in the window", "excerpt": "",
-        "asked": "query=level:INFO; filter=service=checkout"}]
+        "asked": "query=level:INFO; filter=service=checkout", "quoted": ""}]
 
 
 def test_a_finding_without_an_asked_field_still_works(tmp_path, config):
@@ -718,7 +718,7 @@ def test_the_asked_text_is_redacted_and_then_cut_to_300_characters(tmp_path, con
 
 def test_the_fallback_summaries_carry_asked_too(tmp_path, config):
     finding = {"claim": "c", "fact_ids": ["gone:a-1"], "fact_summaries": {"gone:a-1": "Stored"}, "asked": {"gone:a-1": ["index=app-logs"]}}
-    assert evidence_sent(tmp_path, config, finding, {}) == [{"summary": "Stored", "excerpt": "", "asked": "index=app-logs"}]
+    assert evidence_sent(tmp_path, config, finding, {}) == [{"summary": "Stored", "excerpt": "", "asked": "index=app-logs", "quoted": ""}]
 
 
 def test_twenty_asked_strings_on_ten_facts_stay_inside_the_state_limit(tmp_path, config):
@@ -744,6 +744,88 @@ def test_asked_text_counts_in_the_measurement_before_the_first_call(tmp_path, co
     with pytest.raises(DraftRuleError, match="compute-1"):
         run(case_dir, config, judge)
     assert judge.calls == []
+
+
+# the quoted passage of the evidence
+
+DB_CHANGE = "DB_HOST changed from old-db.example.com to new-db.example.com"
+CHANGE_SUMMARY = "The task definition changed between revision 41 and 42: 1 change (1 environment value)"
+
+
+def quoting_finding(excerpt, matched, fact_ids):
+    return {"claim": "DB_HOST of the task definition changed", "fact_ids": list(fact_ids), "excerpt": excerpt, "matched_text": matched}
+
+
+def test_a_quote_that_lies_in_a_facts_data_is_sent_under_quoted(tmp_path, config):
+    facts = {"ev:x-0001": {"summary": CHANGE_SUMMARY, "excerpt": "", "data": {"changes": [DB_CHANGE, "MEMORY changed from 512 to 1024"]}}}
+    finding = quoting_finding(DB_CHANGE, DB_CHANGE, ["ev:x-0001"])
+    assert evidence_sent(tmp_path, config, finding, facts) == [
+        {"summary": CHANGE_SUMMARY, "excerpt": "", "asked": "", "quoted": DB_CHANGE}]
+
+
+def test_a_quote_that_lies_in_the_summary_is_sent_under_quoted_too(tmp_path, config):
+    facts = {"ev:x-0001": {"summary": CHANGE_SUMMARY, "excerpt": "", "data": {}}}
+    finding = quoting_finding("changed between revision 41 and 42", CHANGE_SUMMARY, ["ev:x-0001"])
+    assert evidence_sent(tmp_path, config, finding, facts)[0]["quoted"] == CHANGE_SUMMARY
+
+
+def test_a_finding_citing_two_facts_carries_the_quote_on_the_one_that_holds_it(tmp_path, config):
+    facts = {"ev:x-0001": {"summary": "Service has 2 running tasks", "excerpt": "", "data": {}},
+             "ev:x-0002": {"summary": CHANGE_SUMMARY, "excerpt": "", "data": {"changes": [DB_CHANGE]}}}
+    finding = quoting_finding(DB_CHANGE, DB_CHANGE, ["ev:x-0001", "ev:x-0002"])
+    first, second = evidence_sent(tmp_path, config, finding, facts)
+    assert first["quoted"] == "" and second["quoted"] == DB_CHANGE
+
+
+def test_a_finding_without_matched_text_has_empty_quoted(tmp_path, config):
+    facts = {"ev:x-0001": {"summary": CHANGE_SUMMARY, "excerpt": "", "data": {"changes": [DB_CHANGE]}}}
+    finding = quoting_finding(DB_CHANGE, "", ["ev:x-0001"])
+    del finding["matched_text"]
+    assert evidence_sent(tmp_path, config, finding, facts)[0]["quoted"] == ""
+    finding["matched_text"] = 5
+    assert evidence_sent(tmp_path, config, finding, facts)[0]["quoted"] == ""
+
+
+def test_the_quoted_text_is_redacted_and_cut_to_500_characters(tmp_path, config):
+    account_id = config.accounts["prod-main"].account_id
+    text = f"role in {account_id} " + "q" * 600
+    facts = {"ev:x-0001": {"summary": "s", "excerpt": "", "data": {"note": text}}}
+    quoted = evidence_sent(tmp_path, config, quoting_finding(text[:200], text[:500], ["ev:x-0001"]), facts)[0]["quoted"]
+    assert account_id not in quoted and quoted.startswith("role in prod-main ") and len(quoted) <= 500
+
+
+def test_a_finding_checked_for_real_sends_its_matched_text_from_the_data(tmp_path, config):
+    from triage.findings import load_facts, valid_findings
+    evidence = Evidence("ecs", "prod-main", "eu-west-1", WINDOW)
+    evidence.add(kind=INCIDENT_TIME, resource="td", summary=CHANGE_SUMMARY, time="2026-10-04T10:41:00Z",
+                 data={"changes": [DB_CHANGE]})
+    path = evidence.write(tmp_path, "")
+    (tmp_path / "findings").mkdir()
+    (tmp_path / "findings" / "compute.json").write_text(json.dumps({"analyst": "compute", "findings": [{
+        "id": "compute-1", "claim": "DB_HOST changed", "fact_ids": [f"{path.stem}:ecs-0001"], "excerpt": DB_CHANGE,
+        "provenance": "incident_time", "confidence": "high", "time": None}]}))
+    assert check_findings(tmp_path)["rejected"] == []
+    judge = FakeJudge(make_responder())
+    judge_findings(session_for(tmp_path, config, judge), QUESTIONS, valid_findings(tmp_path), load_facts(tmp_path), ["compute-1"], limit=40)
+    assert judge.calls[0][0]["evidence"][0]["quoted"] == DB_CHANGE
+
+
+def test_the_quoted_text_counts_against_the_state_limit_before_the_first_call(tmp_path, config):
+    def build(matched):
+        case_dir = tmp_path / ("with" if matched else "without")
+        case_dir.mkdir()
+        build_case(case_dir, config)
+        ids = [f"gone:ecs-{number:04d}" for number in range(10)]
+        edit_checked(case_dir, lambda c: c["valid"][0].update(
+            fact_ids=ids, fact_summaries={fact_id: "w" * 700 for fact_id in ids}, matched_text="q" * 500 if matched else ""))
+        return case_dir
+
+    judge = FakeJudge(make_responder())
+    assert run(build(False), config, judge)["status"] == "complete"
+    refused = FakeJudge(make_responder())
+    with pytest.raises(DraftRuleError, match="compute-1"):
+        run(build(True), config, refused)
+    assert refused.calls == []
 
 
 # findings named by the draft must exist

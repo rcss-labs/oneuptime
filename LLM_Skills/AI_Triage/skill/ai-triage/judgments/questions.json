@@ -3,7 +3,7 @@
   "questions": {
     "evidence_relation": {
       "type": "choice",
-      "instructions": "How does `evidence` relate to `claim`? Each evidence item states under asked what was requested from the source; a count or a match means only what that request can show.",
+      "instructions": "How does `evidence` relate to `claim`? Each evidence item states under asked what was requested from the source; a count or a match means only what that request can show. Under quoted is the exact passage of the evidence that the claim cites.",
       "criteria": {
         "supports": "The evidence states or directly implies that the claim is true",
         "contradicts": "The evidence states or directly implies that the claim is false",
