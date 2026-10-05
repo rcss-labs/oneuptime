@@ -153,6 +153,9 @@ LOG_NAME_LIST_OPTIONS = frozenset({"--log-group-names", "--log-group-identifiers
 NEVER_EXEMPT_PREFIXES = ("~", "./", "../", "file://", "fileb://")
 LOCAL_PATH_PREFIXES = ("/users/", "/home/", "/tmp", "/private/", "/var/", "/etc/", "/opt/", "/volumes/", "./", "../",
                        "~", "file://", "fileb://")
+# Auto-prompt lets the person at a terminal edit the command before it runs. "--cli-a" is its shortest unique prefix.
+AUTO_PROMPT_OPTION = "--cli-auto-prompt"
+AUTO_PROMPT_SHORTEST = "--cli-a"
 LOCAL_READS = frozenset({("configure", "list"), ("configure", "list-profiles")})
 
 
@@ -245,9 +248,16 @@ def local_path_argument(args: Sequence[str]) -> str | None:
     return None
 
 
+def _is_auto_prompt(word: str) -> bool:
+    name = word.split("=", 1)[0]
+    return len(name) >= len(AUTO_PROMPT_SHORTEST) and AUTO_PROMPT_OPTION.startswith(name)
+
+
 def check_aws(argv: tuple[str, ...], env: tuple[str, ...], profiles: frozenset[str]) -> Verdict:
     if any(assignment.startswith("AWS_") for assignment in env):
         return Verdict(ASK, "AWS_* environment variables are set on the command line")
+    if any(_is_auto_prompt(word) for word in argv[1:]):
+        return Verdict(DENY, "--cli-auto-prompt lets the command be edited after the guard checked it")
     abbreviated = _abbreviated_option(argv)
     if abbreviated:
         return Verdict(ASK, f"option {abbreviated} could be an abbreviation the guard cannot check")

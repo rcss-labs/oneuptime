@@ -395,3 +395,17 @@ def test_a_log_group_under_home_given_with_dollar_home_is_denied(monkeypatch):
     monkeypatch.setenv("HOME", "/home/eng")
     context = GuardContext(frozenset({"triage-prod-main"}), "/k", frozenset(), frozenset(), "/s")
     assert decide(f'aws logs filter-log-events --log-group-name "$HOME/x" {OK}', context).kind == DENY
+
+
+# ---- round 5 minor follow-up, N1: --cli-auto-prompt ------------------------------
+
+
+@pytest.mark.parametrize("flag", ["--cli-auto-prompt", "--cli-auto-p", "--cli-a", "--cli-auto-prompt=on"])
+def test_cli_auto_prompt_is_denied(flag):
+    result = verdict(f"aws ecs list-clusters {OK} {flag}")
+    assert result.kind == DENY and "auto-prompt" in result.reason
+    assert verdict(f"aws {flag} ecs list-clusters {OK}").kind == DENY
+
+
+def test_turning_auto_prompt_off_is_still_allowed():
+    assert verdict(f"aws ecs list-clusters {OK} --no-cli-auto-prompt").kind == ALLOW
