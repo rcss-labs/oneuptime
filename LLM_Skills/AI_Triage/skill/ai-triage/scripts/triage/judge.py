@@ -17,12 +17,12 @@ from triage import compose
 from triage.case import load_case
 from triage.config import TriageConfig
 from triage.digest import JUDGED_ACTION_FIELDS, JUDGED_CAUSE_FIELDS, action_digest, case_identity, cause_digest, draft_digest
-from triage.findings import load_facts, valid_findings
+from triage.findings import load_facts
 from triage.judge_client import Judge, JudgeReply, JudgeUnavailable
 from triage.questions import REQUIRED_IDS, _check_question, build_choice
 from triage.redact import Redactor
 from triage.service_map import ServiceMap
-from triage.window import parse_time
+from triage.window import WindowError, parse_time
 
 SUMMARY_NAME = "summary.json"
 UNAVAILABLE_NOTE = "TypeSafe was unavailable; this label is Claude's own estimate, capped at probable"
@@ -31,6 +31,7 @@ UNAVAILABLE_ACTION_NOTE = "TypeSafe was unavailable; no action can be recommende
 _ACCOUNT_NUMBER_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
 _DASHED_ACCOUNT_RE = re.compile(r"(?<![\d-])(\d{4})-(\d{4})-(\d{4})(?![\d-])")
 MAX_ADHOC_QUESTION_CHARS = 2000
+ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")  # the same pattern the report uses for ids
 _ADHOC_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 MAX_STATE_CHARS = 8000
 MAX_FACTS_PER_FINDING = 10
@@ -208,9 +209,13 @@ def judge_causes(
 
 def rank_causes(
     session: JudgeSession, questions: dict[str, dict], causes: list[dict], symptoms: list[str],
-    findings: dict[str, dict], verdicts: dict[str, dict], rng: random.Random,
+    findings: dict[str, dict], verdicts: dict[str, dict], rng: random.Random, rank: dict | None = None,
 ) -> dict:
-    """Ask for the best supported cause twice, in a shuffled order and in its reverse."""
+    """Ask for the best supported cause twice, in a shuffled order and in its reverse.
+
+    `rank` may be passed in; each answer is added to it as it arrives, so a later failure keeps what is in hand.
+    """
+    rank = {"orders": [], "answers": [], "choices": []} if rank is None else rank
     candidates = {}
     for cause in causes:
         verified = [findings[finding_id]["claim"] for finding_id in cause.get("supporting", [])
@@ -220,15 +225,17 @@ def rank_causes(
     first = list(options)
     rng.shuffle(first)
     orders = [first, first[::-1]]
-    answers = []
+    rank["orders"] = orders
     for position, order in enumerate(orders, start=1):
         state = _ranking_state(symptoms, candidates, order)
         question = build_choice(questions["cause_rank"], options, first)
         if position == 2:  # the whole option list is reversed, so the fallback comes first
             question["criteria"] = dict(reversed(list(question["criteria"].items())))
         asked = {"cause_rank": session.prepare_options(question)}
-        answers.append(session.ask("ranking", f"order {position}", state, asked).answers["cause_rank"])
-    return {"orders": orders, "answers": answers, "choices": [answer["choice"] for answer in answers]}
+        answer = session.ask("ranking", f"order {position}", state, asked).answers["cause_rank"]
+        rank["answers"].append(answer)
+        rank["choices"].append(answer.get("choice") if isinstance(answer, dict) else None)
+    return rank
 
 
 def judge_actions(
@@ -338,6 +345,10 @@ def _draft_rule_errors(report: dict, reserved_ids: frozenset[str]) -> list[str]:
                 errors.append(f"report.json: duplicate {kind} id {entry['id']}")
             seen.add(entry["id"])
     cause_ids = {cause["id"] for cause in report["causes"]}
+    for kind, entries in (("cause", report["causes"]), ("action", report.get("actions", []))):
+        for entry in entries:
+            if not ID_RE.fullmatch(entry["id"]):
+                errors.append(f"report.json: the {kind} id {entry['id'][:40]!r} must match {ID_RE.pattern}")
     for action in report.get("actions", []):
         if not isinstance(action.get("cause"), str) or action["cause"] not in cause_ids:
             errors.append(f"report.json: action {action['id']} names a cause that does not exist")
@@ -421,13 +432,13 @@ def _finding_gates(cause: dict, verdicts: dict[str, dict], partial: bool = False
 
 def _stopped_summary(
     config: TriageConfig, report: dict, findings: dict[str, dict], reason: str, model: str | None,
-    verdicts: dict[str, dict], cause_answers: dict[str, dict], failed: bool,
+    verdicts: dict[str, dict], cause_answers: dict[str, dict], rank: dict, failed: bool,
 ) -> dict:
     """The summary of a run that stopped part-way: a failed run, or a service that became unavailable."""
     summary = _base_summary(config, f"failed: {reason}; {RUN_AGAIN}" if failed else f"unavailable: {reason}", model)
     summary["status"] = "failed" if failed else "unavailable"
     for cause in report["causes"]:
-        known_failures = _known_failures(cause, verdicts, cause_answers)
+        known_failures = _known_failures(cause, verdicts, cause_answers, rank, config.typesafe_thresholds)
         if failed:
             label, reasons = "candidate", [f"Judging failed ({reason}); {RUN_AGAIN}; this label is held at candidate"]
         else:
@@ -446,10 +457,19 @@ def _stopped_summary(
     return summary
 
 
-def _known_failures(cause: dict, verdicts: dict[str, dict], cause_answers: dict[str, dict]) -> list[str]:
+def _known_failures(
+    cause: dict, verdicts: dict[str, dict], cause_answers: dict[str, dict], rank: dict, thresholds: dict[str, float],
+) -> list[str]:
     """Why the answers already in hand rule a cause out; empty when they do not."""
     gates, reasons, _ = _finding_gates(cause, verdicts, partial=True)
     failures = list(reasons) if not all(gates.values()) else []
+    for position, (choice, answer) in enumerate(zip(rank["choices"], rank["answers"]), start=1):
+        if choice != cause["id"]:
+            failures.append(f"Ranking {position} picked {choice}, not this cause")
+            continue
+        picked = compose.probability(answer["probabilities"].get(cause["id"])) if isinstance(answer.get("probabilities"), dict) else None
+        if picked is None or not picked >= thresholds["cause_top_probability"]:
+            failures.append(f"Ranking {position} picked this cause with probability {compose.number(picked)}, below {compose.number(thresholds['cause_top_probability'])}")
     answers = cause_answers.get(cause["id"])
     if answers:
         fit = compose.symptom_fit_value(answers["symptom_fit"])
@@ -569,6 +589,45 @@ def retire_summary(case_dir: Path) -> None:
         os.replace(summary_path, summary_path.with_name(SUMMARY_NAME + ".stale"))
 
 
+def load_checked_findings(case_dir: Path) -> dict[str, dict]:
+    """The valid findings of findings/checked.json, with the shape and the times checked; {} when no check has run."""
+    path = Path(case_dir) / "findings" / "checked.json"
+    again = "run the findings check again"
+    if not path.is_file():
+        return {}
+    try:
+        checked = json.loads(path.read_text())
+    except (OSError, ValueError):
+        raise DraftRuleError([f"findings/checked.json cannot be read as JSON; {again}"]) from None
+    valid = checked.get("valid") if isinstance(checked, dict) else None
+    if not isinstance(valid, list):
+        raise DraftRuleError([f"findings/checked.json has no list of valid findings; {again}"])
+    findings: dict[str, dict] = {}
+    for entry in valid:
+        name = entry.get("id") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not ID_RE.fullmatch(name):
+            raise DraftRuleError([f"findings/checked.json holds a finding without a usable id; {again}"])
+        problem = _finding_problem(entry)
+        if problem:
+            raise DraftRuleError([f"finding {name} in findings/checked.json {problem}; {again}"])
+        findings[name] = entry
+    return findings
+
+
+def _finding_problem(entry: dict) -> str:
+    if not isinstance(entry.get("claim"), str):
+        return "has no claim"
+    fact_ids = entry.get("fact_ids", [])
+    if not isinstance(fact_ids, list) or not all(isinstance(fact_id, str) for fact_id in fact_ids):
+        return "has fact_ids that are not a list of ids"
+    if entry.get("time") is not None:
+        try:
+            parse_time(entry["time"])
+        except WindowError:
+            return f"has a time that cannot be parsed ({str(entry['time'])[:40]!r})"
+    return ""
+
+
 def _check_findings_shape(findings: dict[str, dict]) -> None:
     for finding_id, finding in findings.items():
         if not isinstance(finding.get("fact_summaries"), dict) or not all(
@@ -605,8 +664,9 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
     retire_summary(case_dir)
     case = load_case(case_dir)
     report = load_report_draft(case_dir, _reserved_ids(questions))
-    findings = valid_findings(case_dir)
+    findings = load_checked_findings(case_dir)
     _check_findings_shape(findings)
+    incident_start = parse_time(case["incident_start"])
     _check_citation_counts(report["causes"], findings)
     facts = load_facts(case_dir)
     session = JudgeSession(judge, JudgmentStore(case_dir), config, Redactor())
@@ -615,20 +675,21 @@ def run_judgments(case_dir: Path, config: TriageConfig, judge: Judge, questions:
     check_state_sizes(session, report, findings, facts, ordered_ids)
     verdicts: dict[str, dict] = {}
     cause_answers: dict[str, dict] = {}
+    rank_in_hand: dict = {"orders": [], "answers": [], "choices": []}
     try:
         judge_findings(session, questions, findings, facts, ordered_ids, compose.MAX_FINDINGS_JUDGED, verdicts)
         judge_causes(session, questions, causes, report["symptoms"], report["summary"].get("scope", ""), cause_answers)
-        rank = rank_causes(session, questions, causes, report["symptoms"], findings, verdicts, rng)
+        rank = rank_causes(session, questions, causes, report["symptoms"], findings, verdicts, rng, rank_in_hand)
         action_answers = judge_actions(session, questions, actions, causes)
     except JudgeUnavailable as unavailable:
         summary = _stopped_summary(config, report, findings, unavailable.reason, session.model, verdicts, cause_answers,
-                                   failed=_failed_run(unavailable.reason))
+                                   rank_in_hand, failed=_failed_run(unavailable.reason))
     except Exception as error:
         if not session.calls_made:
             raise
-        summary = _stopped_summary(config, report, findings, type(error).__name__, session.model, verdicts, cause_answers, failed=True)
+        summary = _stopped_summary(config, report, findings, type(error).__name__, session.model, verdicts, cause_answers, rank_in_hand, failed=True)
     else:
-        summary = _compose_summary(config, report, findings, parse_time(case["incident_start"]), session.model,
+        summary = _compose_summary(config, report, findings, incident_start, session.model,
                                    verdicts, cause_answers, rank, action_answers)
     summary["draft_digest"] = draft_digest(report, findings, case_identity(case))
     summary["adhoc"] = adhoc
@@ -671,6 +732,7 @@ def parse_adhoc(document: Any) -> tuple[str, str, Any, dict]:
 def run_adhoc(case_dir: Path, session: JudgeSession, config: TriageConfig, document: Any) -> dict:
     """Ask one question Claude wrote, store it, and list it in the summary."""
     question_id, reason, state, question = parse_adhoc(document)
+    _read_adhoc_summary(Path(case_dir) / "judgments" / SUMMARY_NAME)  # refuse before paying for the call
     try:
         reply = session.ask("adhoc", question_id, state, {question_id: session.prepare(question)})
     except JudgeUnavailable as unavailable:
@@ -681,17 +743,24 @@ def run_adhoc(case_dir: Path, session: JudgeSession, config: TriageConfig, docum
     return {"id": question_id, "answer": _json_safe(reply.answers[question_id])}
 
 
+def _read_adhoc_summary(path: Path) -> dict | None:
+    """The existing summary, None when there is none; refuses one that is not a JSON object."""
+    if not path.is_file():
+        return None
+    try:
+        summary = json.loads(path.read_text())
+    except ValueError as error:
+        raise JudgmentError([f"{path}: not valid JSON ({error})"]) from error
+    if not isinstance(summary, dict):
+        raise JudgmentError([f"{path}: must hold a JSON object"])
+    return summary
+
+
 def _record_adhoc(case_dir: Path, config: TriageConfig, entry: dict, typesafe: str, model: str | None) -> None:
     """Append the entry to the summary, creating a minimal one (judged false) when there is none."""
     path = Path(case_dir) / "judgments" / SUMMARY_NAME
-    if path.is_file():
-        try:
-            summary = json.loads(path.read_text())
-        except ValueError as error:
-            raise JudgmentError([f"{path}: not valid JSON ({error})"]) from error
-    else:
+    summary = _read_adhoc_summary(path)
+    if summary is None:
         summary = _base_summary(config, typesafe, model, judged=False)
-    if not isinstance(summary, dict):
-        raise JudgmentError([f"{path}: must hold a JSON object"])
     summary.setdefault("adhoc", []).append(entry)
     write_summary(case_dir, summary)

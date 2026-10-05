@@ -571,6 +571,113 @@ def test_a_contradiction_judged_as_not_holding_lets_the_cause_stay_confirmed(tmp
         assert cause["label"] == "confirmed"
 
 
+# the ranking answers in hand count when the service goes down later
+
+@pytest.mark.parametrize("call", [7, 8, 9])
+def test_a_ranking_answer_in_hand_keeps_a_ruled_out_cause_at_candidate(tmp_path, config, call):
+    case_dir = build_case(tmp_path, config, labels=("confirmed", "probable"))
+    outage = run(case_dir, config, failing_at(call, "timeout"))
+    assert outage["causes"]["C2"]["label"] == "candidate"
+    assert any("Ranking" in reason for reason in outage["causes"]["C2"]["reasons"])
+    other = tmp_path / "no-outage"
+    other.mkdir()
+    complete = run(build_case(other, config, labels=("confirmed", "probable")), config, FakeJudge(make_responder()))
+    assert complete["causes"]["C2"]["label"] == "candidate"
+
+
+def test_with_no_ranking_answer_in_hand_nothing_rules_the_cause_out(tmp_path, config):
+    summary = run(build_case(tmp_path, config, labels=("confirmed", "probable")), config, failing_at(6, "timeout"))
+    assert summary["causes"]["C2"]["label"] == "probable"
+
+
+def test_a_picked_cause_whose_ranking_probability_in_hand_misses_the_threshold_is_candidate(tmp_path, config):
+    responder = make_responder(rank=(("C1", 0.4), ("C1", 0.9)))
+    summary = run(build_case(tmp_path, config), config, failing_at(7, "timeout", responder))
+    assert summary["causes"]["C1"]["label"] == "candidate"
+
+
+def test_ranking_answers_are_kept_as_they_arrive(tmp_path, config):
+    causes = [{"id": "C1", "statement": STATEMENT_1, "supporting": []}, {"id": "C2", "statement": STATEMENT_2, "supporting": []}]
+    judge = FakeJudge()
+    base = make_responder()
+
+    def answer(state, questions):
+        if len(judge.calls) == 2:
+            raise JudgeUnavailable("timeout")
+        return base(state, questions)
+
+    judge.answers = answer
+    kept = {"orders": [], "answers": [], "choices": []}
+    with pytest.raises(JudgeUnavailable):
+        rank_causes(session_for(tmp_path, config, judge), QUESTIONS, causes, SYMPTOMS, {}, {}, random.Random(1), kept)
+    assert kept["choices"] == ["C1"] and len(kept["answers"]) == 1 and len(kept["orders"]) == 2
+
+
+# the draft and checked.json are validated before the first call
+
+def edit_checked(case_dir, change):
+    path = case_dir / "findings" / "checked.json"
+    checked = json.loads(path.read_text())
+    change(checked)
+    path.write_text(json.dumps(checked))
+
+
+@pytest.mark.parametrize("bad_time", ["garbage", 5, ["2026-10-04T10:41:00Z"]])
+def test_an_unparseable_finding_time_is_refused_before_any_call(tmp_path, config, bad_time):
+    case_dir = build_case(tmp_path, config)
+    edit_checked(case_dir, lambda c: c["valid"][0].update(time=bad_time))
+    judge = FakeJudge(make_responder())
+    with pytest.raises(DraftRuleError, match="compute-1"):
+        run(case_dir, config, judge)
+    assert judge.calls == [] and list((case_dir / "judgments").glob("0*.json")) == []
+
+
+@pytest.mark.parametrize("change", [
+    lambda c: c["valid"][0].pop("claim"),
+    lambda c: c["valid"][0].pop("id"),
+    lambda c: c["valid"].__setitem__(0, 5),
+    lambda c: c.__setitem__("valid", {"a": 1}),
+    lambda c: c.__setitem__("valid", None),
+    lambda c: c["valid"][0].update(fact_ids="ecs:ecs-0001"),
+    lambda c: c["valid"][0].update(id=7),
+])
+def test_a_checked_json_of_the_wrong_shape_is_one_line_never_a_traceback(tmp_path, config, change):
+    case_dir = build_case(tmp_path, config)
+    edit_checked(case_dir, change)
+    judge = FakeJudge(make_responder())
+    with pytest.raises(DraftRuleError) as raised:
+        run(case_dir, config, judge)
+    assert len(raised.value.errors) == 1 and "findings check" in raised.value.errors[0] and judge.calls == []
+
+
+def test_a_checked_json_that_is_not_json_is_refused(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    (case_dir / "findings" / "checked.json").write_text("{nope")
+    with pytest.raises(DraftRuleError, match="findings check"):
+        run(case_dir, config, FakeJudge(make_responder()))
+
+
+@pytest.mark.parametrize("bad_id", ["C2 bad\n## x", "-C", "C" * 129, "a b"])
+def test_a_cause_or_action_id_outside_the_report_pattern_is_refused_before_any_call(tmp_path, config, bad_id):
+    for kind in ("causes", "actions"):
+        case_dir = tmp_path / kind
+        case_dir.mkdir(exist_ok=True)
+        build_case(case_dir, config)
+        edit_report(case_dir, lambda r: r[kind][1].update(id=bad_id))
+        judge = FakeJudge(make_responder())
+        with pytest.raises(DraftRuleError):
+            run(case_dir, config, judge)
+        assert judge.calls == []
+
+
+def test_a_finding_id_outside_the_report_pattern_is_refused(tmp_path, config):
+    case_dir = build_case(tmp_path, config)
+    edit_checked(case_dir, lambda c: c["valid"][0].update(id="compute 1\n## x"))
+    edit_report(case_dir, lambda r: r["causes"][0].update(supporting=["compute 1\n## x"]))
+    with pytest.raises(DraftRuleError):
+        run(case_dir, config, FakeJudge(make_responder()))
+
+
 # everything is measured before the first call
 
 def huge(value):

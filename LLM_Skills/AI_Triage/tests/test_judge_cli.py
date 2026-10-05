@@ -402,3 +402,22 @@ def test_adhoc_with_a_summary_that_is_not_an_object_exits_1(command, skill_dir, 
     (case_dir / "judgments" / "summary.json").write_text(text)
     assert invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", adhoc_file(tmp_path), judge=adhoc_judge()) == 1
     assert "summary.json" in capsys.readouterr().err
+
+
+def test_adhoc_checks_the_summary_before_paying_for_the_call(command, skill_dir, case_dir, tmp_path):
+    (case_dir / "judgments").mkdir(exist_ok=True)
+    (case_dir / "judgments" / "summary.json").write_text("[1]")
+    judge = adhoc_judge()
+    assert invoke(command, skill_dir, "adhoc", "--case-dir", str(case_dir), "--question-file", adhoc_file(tmp_path), judge=judge) == 1
+    assert judge.calls == [] and not list((case_dir / "judgments").glob("0*.json"))
+
+
+def test_a_checked_json_of_the_wrong_shape_exits_2_with_one_line(command, skill_dir, case_dir, capsys):
+    path = case_dir / "findings" / "checked.json"
+    checked = json.loads(path.read_text())
+    checked["valid"][0].pop("claim")
+    path.write_text(json.dumps(checked))
+    judge = FakeJudge(make_responder())
+    assert invoke(command, skill_dir, "run", "--case-dir", str(case_dir), judge=judge) == 2
+    err = capsys.readouterr().err.strip()
+    assert err.count("\n") == 0 and "findings check" in err and "Traceback" not in err and judge.calls == []
