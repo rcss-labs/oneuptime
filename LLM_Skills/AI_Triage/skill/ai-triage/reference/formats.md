@@ -341,10 +341,10 @@ The summary stores a digest of each cause, each action, and the draft. Validatio
 | --- | --- |
 | `causes[].label`, `actions[].label`, and the keys `confidence` and `reasons` of a cause or action | Allowed. These are the only fields a cause or action digest leaves out. |
 | `status`, `summary.top_cause`, `coverage.typesafe` | Allowed; they must agree with the labels and the summary (section 5) |
-| `summary.what_broke`, `summary.impact`, `hypotheses`, `open_questions`, `coverage.not_checked`, `map_changes`, `run` | Allowed: no digest covers them |
+| `run` | Allowed: no digest covers it |
 | Any other field of a cause (including `supporting`, `contradicting`, `statement`, an extra key) | That cause counts as `candidate` |
 | Any other field of an action | That action counts as `candidate`; it cannot be `recommended` |
-| `symptoms`, `summary.scope`, adding or removing a cause or action | Every cause and action counts as `candidate` |
+| `symptoms`, `summary.scope`, `summary.what_broke`, `summary.impact`, `open_questions`, `coverage.not_checked`, `map_changes`, any field of a hypothesis, adding or removing a cause, action, or hypothesis | The draft digest changes: every cause and action counts as `candidate` |
 | A cited finding changed by a new findings check (its `checked.json` entry) | The causes that cite it count as `candidate` |
 | A cause edited | An action of that cause cannot be `recommended` |
 
@@ -410,9 +410,10 @@ If `report.json`, the summary, or `checked.json` changes after `report.py render
 8. `## 8. Proposed service map changes`: `map_changes`.
 9. `## 9. Run details`: engineer, duration, skill version, case folder, render time.
 
-`work-order.json` holds exactly these keys: `incident` (`number`, `title`, `url`), `generated_at`, `skill_version`, `cause`, `actions`, `open_questions`, `coverage_gaps`.
+`work-order.json` holds these keys: `incident` (`number`, `title`, `url`), `generated_at`, `skill_version`, `cause`, `causes`, `findings`, `actions`, `open_questions`, `coverage_gaps`, and `replay` (`true`, only in a case made from recordings).
 `cause` has `statement`, `label`, `finding_ids`: the top cause with its supporting findings, or label `unresolved` and the statement `No cause was established.`
-Each entry of `actions` has `id`, `type`, `label`, `title`, `target`, `current_state`, `required_state`, `change`, `rationale`, `finding_ids`, `risk`, `blast_radius`, `preconditions`, `verification`, `rollback`.
+`causes` lists each cause that an action names (`id`, `statement`, `label`, `finding_ids`); `findings` lists every finding the work order cites (`id`, `claim`, `quote`, `provenance`).
+Each entry of `actions` has `id`, `type`, `label`, `cause`, `title`, `target`, `current_state`, `required_state`, `change`, `rationale`, `finding_ids`, `risk`, `blast_radius`, `preconditions`, `verification`, `rollback`.
 `coverage_gaps` lists each `not_checked` entry as `<what>: <why>`, a TypeSafe note when it was not `available`, unreadable finding files, and evidence errors.
 
 The Slack message takes `status`, the top cause's `label` and `statement`, and the `title` and `label` of at most 3 actions from `report.json`; `publish.py slack-message` refuses with

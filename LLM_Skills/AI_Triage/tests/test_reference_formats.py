@@ -229,7 +229,10 @@ def test_example_report_renders_with_the_nine_sections(judged):
     assert len(headings) == len(report_module.REQUIRED_HEADINGS)
     assert all(heading.startswith(required) for heading, required in zip(headings, report_module.REQUIRED_HEADINGS))
     work_order = json.loads((case.case_dir / "work-order.json").read_text())
-    assert tuple(work_order) == report_module.WORK_ORDER_KEYS
+    keys = tuple(work_order)
+    optional = report_module.WORK_ORDER_OPTIONAL_KEYS
+    assert tuple(key for key in keys if key not in optional) == report_module.WORK_ORDER_KEYS
+    assert set(keys) - set(report_module.WORK_ORDER_KEYS) <= set(optional)
 
 
 # --- the field tables ------------------------------------------------------------------------
@@ -260,16 +263,46 @@ def test_findings_required_column_matches_what_the_check_requires(built, example
 
 
 def test_report_required_column_matches_what_validation_requires(judged, examples):
+    """Each field is removed before judging, so that validation answers about the field and not about the digest."""
     case_dir = judged["case"].case_dir
-    case = load_case(case_dir)
-    found, input_problems = check_case_inputs(case_dir)
-    assert input_problems == []
+    scenario = judged["base"] / "example-scenario"
+    incident = json.loads((REPLAY_DIR / SCENARIO / "incident.json").read_text())
+
+    def judge_and_validate(report: dict) -> list[str]:
+        (case_dir / "report.json").write_text(json.dumps(report))
+        run_judgments(case_dir, judged["config"], favourable_judge(scenario), judged["questions"],
+                      random.Random(incident["number"]))
+        found, input_problems = check_case_inputs(case_dir)
+        assert input_problems == []
+        return validate_report(report, load_case(case_dir), found, judged["config"])
+
     baseline = examples["report"]
-    assert validate_report(baseline, case, found, judged["config"]) == []
+    assert judge_and_validate(baseline) == []
     listed = field_rows(section(reference_text(), "report.json"))
     for path, required in sorted(listed.items()):
-        problems = validate_report(without(baseline, path), case, found, judged["config"])
+        changed = without(baseline, path)
+        if required:  # judging may refuse the draft; validation of the changed report is what is asked
+            found, _ = check_case_inputs(case_dir)
+            problems = validate_report(changed, load_case(case_dir), found, judged["config"])
+        else:
+            problems = judge_and_validate(changed)
         assert bool(problems) == required, f"{path}: the reference says required={required}; problems: {problems}"
+    judge_and_validate(baseline)
+    (case_dir / "report.json").write_text(json.dumps(baseline))
+
+
+def test_work_order_section_lists_every_key():
+    text = section(reference_text(), "report.md and work-order.json")
+    names = report_module.WORK_ORDER_KEYS + report_module.WORK_ORDER_OPTIONAL_KEYS + report_module.WORK_ORDER_ACTION_KEYS
+    assert [name for name in names if f"`{name}`" not in text] == []
+
+
+def test_edits_table_does_not_call_a_digested_field_free():
+    allowed = [cells[0] for _, rows in tables(section(reference_text(), "Edits after judging")) for cells in rows
+               if cells[1].startswith("Allowed")]
+    named = {name for cell in allowed for name in inline_code(cell)}
+    digested = {"summary.what_broke", "summary.impact", "hypotheses", "open_questions", "coverage.not_checked", "map_changes"}
+    assert named.isdisjoint(digested) and {"status", "summary.top_cause", "coverage.typesafe", "run"} <= named
 
 
 def test_incident_table_lists_the_fields_case_init_reads_and_which_it_requires():
