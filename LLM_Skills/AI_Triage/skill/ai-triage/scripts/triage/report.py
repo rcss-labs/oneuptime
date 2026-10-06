@@ -15,7 +15,7 @@ from typing import Any
 
 from triage.compose import LABEL_ORDER, cap_label, number
 from triage.config import TriageConfig
-from triage.digest import action_digest, case_identity, cause_digest, draft_digest
+from triage.digest import action_digest, case_identity, cause_digest, draft_digest, draft_text
 from triage.findings import evidence_documents, load_facts
 from triage.redact import Redactor, audit_text
 from triage.window import WindowError, format_time, parse_time
@@ -679,18 +679,32 @@ def _too_deep(value: Any) -> bool:
     return False
 
 
-def _check_label_words(report: dict, parts: dict, problems: list[str]) -> None:
-    """Free text that the draft digest covers may not state a label; labels are printed from the judgments."""
+# Keys whose values are ids or allowed values, not prose; a resource may be named "candidate-api".
+IDENTIFIER_KEYS = frozenset({"id", "cause", "supporting", "contradicting", "finding_ids", "target", "type"})
+
+
+def _free_text(value: Any, path: str):
+    """Yield (path, text) for every string under value, skipping identifier keys outside map_changes."""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if key in IDENTIFIER_KEYS and not path.startswith("map_changes"):
+                continue
+            yield from _free_text(item, f"{path}.{key}" if path else str(key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _free_text(item, f"{path}[{index}]")
+
+
+def _check_label_words(report: dict, problems: list[str]) -> None:
+    """Free text that the draft digest covers may not state a label; labels are printed from the judgments.
+
+    The walk is over draft_text, the same fields the draft digest covers, so every printed field the draft writes
+    is checked."""
     message = "labels are printed from the judgments; describe what happened without them"
-    texts: list[tuple[str, Any]] = []
-    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
-    texts += [(f"summary.{key}", summary.get(key)) for key in ("what_broke", "impact")]
-    questions = report.get("open_questions")
-    texts += [(f"open_questions[{i}]", item) for i, item in enumerate(questions if isinstance(questions, list) else [])]
-    texts += [(f"hypotheses[{i}].{key}", h.get(key)) for i, h in parts["hypotheses"] for key in ("statement", "prediction", "test")]
-    texts += [(f"actions[{i}].rationale", a.get("rationale")) for i, a in parts["actions"]]
-    for path, text in texts:
-        if isinstance(text, str) and LABEL_WORD_RE.search(text):
+    for path, text in _free_text(draft_text(report), ""):
+        if LABEL_WORD_RE.search(text):
             problems.append(f"{path}: {message}")
 
 
@@ -708,7 +722,7 @@ def _draft_problems(report: Any, findings: dict[str, dict], config: TriageConfig
     _check_status(report, parts, problems)
     _check_actions(config, parts, findings, problems)
     _check_hypothesis_causes(parts, problems)
-    _check_label_words(report, parts, problems)
+    _check_label_words(report, problems)
     _check_secrets(report, problems)
     return problems, parts
 

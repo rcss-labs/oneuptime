@@ -184,7 +184,7 @@ Before judging write placeholders in the fields marked after, because `judge.py 
 | `hypotheses[].statement` | yes | Non-empty text | before |
 | `hypotheses[].prediction` | yes | Non-empty text: what must be seen if it is true | before |
 | `hypotheses[].test` | yes | Non-empty text: the read that tested it | before |
-| `hypotheses[].result` | yes | `confirmed`, `rejected`, or `inconclusive` | before |
+| `hypotheses[].result` | yes | `confirmed`, `rejected`, or `inconclusive`. Write what your test showed before judging; judging does not read it and no digest covers it, so after judging change it to agree with the labels (a `confirmed` result needs its cause judged `probable` or `confirmed`) | after |
 | `hypotheses[].finding_ids` | yes | List of finding ids; may be empty | before |
 | `hypotheses[].cause` | no | A cause `id`, or `null` | before |
 | `actions` | yes | List of action objects; may be empty | before |
@@ -220,6 +220,12 @@ Before judging write placeholders in the fields marked after, because `judge.py 
 | `run` | yes | Object | before |
 | `run.engineer` | yes | Text; may be empty | before |
 | `run.duration_minutes` | yes | A number | before |
+
+Label words. No text you write in the draft may contain `confirmed`, `probable`, `candidate`, `recommended`, `root cause`, or
+`TypeSafe` as a whole word: the summary text, symptoms, cause statements, every hypothesis and action field, open questions,
+`coverage.not_checked`, and `map_changes` (every field the draft digest covers). Ids, `type`, `target`, the finding id lists,
+and the fields marked after are not checked. Validation lists each one as
+`<path>: labels are printed from the judgments; describe what happened without them`.
 
 Ids. A cause, hypothesis, or action id matches `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`; ids are unique within their list.
 A finding id in `supporting`, `contradicting`, or `finding_ids` has the same form and must be a finding under `valid` in `checked.json`.
@@ -340,11 +346,11 @@ The summary stores a digest of each cause, each action, and the draft. Validatio
 | Part of report.json | After an edit |
 | --- | --- |
 | `causes[].label`, `actions[].label`, and the keys `confidence` and `reasons` of a cause or action | Allowed. These are the only fields a cause or action digest leaves out. |
-| `status`, `summary.top_cause`, `coverage.typesafe` | Allowed; they must agree with the labels and the summary (section 5) |
+| `status`, `summary.top_cause`, `coverage.typesafe`, `hypotheses[].result` | Allowed; they must agree with the labels and the summary (section 5) |
 | `run` | Allowed: no digest covers it |
 | Any other field of a cause (including `supporting`, `contradicting`, `statement`, an extra key) | That cause counts as `candidate` |
 | Any other field of an action | That action counts as `candidate`; it cannot be `recommended` |
-| `symptoms`, `summary.scope`, `summary.what_broke`, `summary.impact`, `open_questions`, `coverage.not_checked`, `map_changes`, any field of a hypothesis, adding or removing a cause, action, or hypothesis | The draft digest changes: every cause and action counts as `candidate` |
+| `symptoms`, `summary.scope`, `summary.what_broke`, `summary.impact`, `open_questions`, `coverage.not_checked`, `map_changes`, any field of a hypothesis other than `result`, adding or removing a cause, action, or hypothesis | The draft digest changes: every cause and action counts as `candidate` |
 | A cited finding changed by a new findings check (its `checked.json` entry) | The causes that cite it count as `candidate` |
 | A cause edited | An action of that cause cannot be `recommended` |
 

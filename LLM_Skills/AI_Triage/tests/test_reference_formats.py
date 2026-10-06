@@ -515,3 +515,13 @@ def test_analyst_prompt_and_template_use_the_same_request_fields():
     prompt = ANALYST_PROMPT.read_text()
     assert "`what`" in prompt and "`why`" in prompt
     assert "~/.claude/skills/ai-triage/reference/formats.md" in prompt
+
+
+def test_hypothesis_result_is_set_after_judging_and_edits_to_it_are_allowed():
+    text = section(reference_text(), "report.json")
+    row = next(line for line in text.splitlines() if line.startswith("| `hypotheses[].result`"))
+    assert row.rstrip(" |").endswith("after")
+    allowed = [cells[0] for _, rows in tables(section(reference_text(), "Edits after judging")) for cells in rows
+               if cells[1].startswith("Allowed")]
+    assert "hypotheses[].result" in {name for cell in allowed for name in inline_code(cell)}
+    assert digest.POST_JUDGING_HYPOTHESIS_FIELDS == ("result",)

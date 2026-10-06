@@ -11,6 +11,7 @@ from triage.digest import (
     case_identity,
     cause_digest,
     draft_digest,
+    hypothesis_digest,
 )
 
 FINDINGS = {
@@ -199,7 +200,6 @@ FULL_REPORT = {
     lambda r: r["hypotheses"][0].__setitem__("statement", "Other"),
     lambda r: r["hypotheses"][0].__setitem__("prediction", "Other"),
     lambda r: r["hypotheses"][0].__setitem__("test", "Other"),
-    lambda r: r["hypotheses"][0].__setitem__("result", "rejected"),
     lambda r: r["hypotheses"][0].__setitem__("cause", None),
     lambda r: r["hypotheses"][0].__setitem__("finding_ids", []),
     lambda r: r["hypotheses"].append({"id": "H2"}),
@@ -222,6 +222,8 @@ def test_an_edit_to_printed_report_text_changes_the_draft_digest(change):
     lambda r: r["run"].__setitem__("duration_minutes", 90),
     lambda r: r["causes"][0].__setitem__("label", "candidate"),
     lambda r: r["actions"][0].__setitem__("label", "candidate"),
+    lambda r: r["hypotheses"][0].__setitem__("result", "rejected"),
+    lambda r: r["hypotheses"][0].__setitem__("result", "inconclusive"),
 ])
 def test_the_fields_the_judging_step_decides_stay_outside_the_draft_digest(change):
     edited = copy.deepcopy(FULL_REPORT)
@@ -235,3 +237,9 @@ def test_the_hypothesis_order_does_not_matter():
     first = draft_digest(reordered, FINDINGS, IDENTITY)
     reordered["hypotheses"].reverse()
     assert draft_digest(reordered, FINDINGS, IDENTITY) == first
+
+
+def test_a_hypothesis_digest_leaves_out_only_the_result():
+    hypothesis = FULL_REPORT["hypotheses"][0]
+    assert hypothesis_digest({**hypothesis, "result": "rejected"}) == hypothesis_digest(hypothesis)
+    assert hypothesis_digest({**hypothesis, "statement": "x"}) != hypothesis_digest(hypothesis)

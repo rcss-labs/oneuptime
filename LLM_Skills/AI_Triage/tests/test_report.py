@@ -1901,6 +1901,11 @@ REPLAY_LINE = "REPLAY: the evidence in this report comes from recordings, not fr
 @pytest.mark.parametrize("where", [
     ("summary", "what_broke"), ("summary", "impact"), ("open_questions", 0), ("hypotheses", 0, "statement"),
     ("hypotheses", 0, "prediction"), ("hypotheses", 1, "test"), ("actions", 0, "rationale"),
+    ("summary", "scope"), ("symptoms", 0), ("causes", 0, "statement"), ("causes", 1, "statement"),
+    ("actions", 0, "title"), ("actions", 1, "change"), ("actions", 0, "current_state"), ("actions", 0, "required_state"),
+    ("actions", 0, "risk"), ("actions", 0, "blast_radius"), ("actions", 0, "preconditions", 0),
+    ("actions", 0, "verification", 0), ("actions", 1, "rollback", 0),
+    ("coverage", "not_checked", 0, "what"), ("coverage", "not_checked", 0, "why"),
 ])
 def test_free_text_may_not_state_a_label(findings, config, word, where):
     def put(report):
@@ -1921,9 +1926,21 @@ def test_label_words_inside_other_words_are_fine(findings, config, text):
     assert check_draft(report, findings, config) == []
 
 
-def test_label_words_are_fine_in_fields_the_scoring_covers(findings, config):
-    report = mutated(VALID_REPORT, lambda r: r["causes"][0].update(statement="A confirmed memory limit problem"))
+@pytest.mark.parametrize("change", ["Confirmed: add the queue", {"note": "the root cause service", "service": "orders"}])
+def test_map_changes_may_not_state_a_label(findings, config, change):
+    report = mutated(VALID_REPORT, lambda r: r["map_changes"].append(change))
+    assert any(problem.startswith("map_changes[0]") and "labels are printed" in problem
+               for problem in check_draft(report, findings, config))
+
+
+def test_identifiers_and_judged_fields_are_not_free_text(findings, config):
+    def put(report):
+        report["actions"][0]["target"]["service"] = "confirmed-api"
+        report["actions"][0]["target"]["resource_id"] = "candidate-queue"
+    report = mutated(VALID_REPORT, put)
     assert not any("labels are printed" in problem for problem in check_draft(report, findings, config))
+    # the hypothesis result "confirmed" and the labels themselves are enums decided after judging
+    assert check_draft(VALID_REPORT, findings, config) == []
 
 
 def test_a_confirmed_hypothesis_needs_a_cause_the_summary_labels_probable_or_confirmed(case_dir, case, findings, config):
@@ -2132,3 +2149,22 @@ def test_a_recommended_action_needs_a_confirmed_cause_not_just_a_probable_one(ca
     assert not any("actions[1]" in problem for problem in problems)
     confirmed = problems_for(VALID_REPORT, case, findings, config)
     assert not any("cause is not labelled confirmed" in problem for problem in confirmed)
+
+
+def test_making_hypothesis_results_agree_after_judging_is_not_an_edit(case_dir, case, findings, config):
+    """SKILL step 9 on the unresolved path: judged candidate everywhere, so the confirmed hypothesis becomes inconclusive."""
+    def placeholders(r):
+        r["status"], r["summary"]["top_cause"], r["coverage"]["typesafe"] = "unresolved", None, ""
+        for entry in r["causes"] + r["actions"]:
+            entry["label"] = "candidate"
+    draft = mutated(VALID_REPORT, placeholders)
+    summary = copy.deepcopy(SUMMARY)
+    summary["causes"]["C1"]["label"] = "candidate"
+    summary["actions"]["A1"]["label"] = "candidate"
+    store_summary(case_dir, summary, report=draft)
+
+    def step_nine(r):
+        r["coverage"]["typesafe"] = "available"
+        r["hypotheses"][0]["result"] = "inconclusive"
+    assert problems_for(mutated(draft, step_nine), case, findings, config) == []
+

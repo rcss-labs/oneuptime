@@ -1,7 +1,7 @@
 """Digests that tie a stored judgment to the draft it judged.
 
-A cause or action digest covers the whole object except the few fields that are written
-after judging. A cause digest also covers the whole checked entry of every finding the
+A cause, action, or hypothesis digest covers the whole object except the few fields that are
+written after judging. A cause digest also covers the whole checked entry of every finding the
 cause cites. The draft digest covers the report-level inputs, every cause and action, and
 the case, so adding or changing anything that a label depended on changes it.
 None of the functions raise on wrongly typed input.
@@ -19,6 +19,7 @@ JUDGED_ACTION_FIELDS = ("id", "cause", "title", "target", "current_state", "requ
 # Written after judging; the only fields a digest leaves out.
 POST_JUDGING_CAUSE_FIELDS = ("label", "confidence", "reasons")
 POST_JUDGING_ACTION_FIELDS = ("label", "confidence", "reasons")
+POST_JUDGING_HYPOTHESIS_FIELDS = ("result",)
 
 
 def _field(container: Any, name: str) -> Any:
@@ -74,29 +75,49 @@ def _digests(entries: Any, digest) -> list[str]:
 
 
 def hypothesis_digest(hypothesis: dict) -> str:
-    """A hypothesis is written before judging and has no field that judging fills, so all of it is covered."""
-    return _canonical_hash(hypothesis)
+    """Covers the hypothesis except its result, which is set to agree with the labels after judging."""
+    return _canonical_hash(_without(hypothesis, POST_JUDGING_HYPOTHESIS_FIELDS))
 
 
-def draft_digest(report: dict, findings_by_id: dict, case_identity: str) -> str:
-    """Covers everything the report prints that judging does not decide: the summary text, symptoms, every cause,
-    action, and hypothesis, the open questions, what was not checked, the map changes, and the case.
+def _entries_without(entries: Any, skipped: tuple[str, ...]) -> Any:
+    return [_without(entry, skipped) for entry in entries] if isinstance(entries, list) else entries
 
-    Left out are the fields that are decided after judging: status, summary.top_cause, coverage.typesafe, the run
-    details, and the labels, confidences, and reasons of causes and actions.
+
+def draft_text(report: Any) -> dict:
+    """What the draft digest covers, shaped as in report.json: the summary text, symptoms, every cause, action, and
+    hypothesis, the open questions, what was not checked, and the map changes. The fields decided after judging are
+    left out: status, summary.top_cause, coverage.typesafe, the run details, the labels, confidences, and reasons of
+    causes and actions, and the results of hypotheses.
+
+    report.py checks every string in it for label words, so the check and the digest cover the same text.
     """
     summary = _field(report, "summary")
     coverage = _field(report, "coverage")
-    return _canonical_hash({
+    return {
+        "summary": {key: _field(summary, key) for key in ("what_broke", "impact", "scope")},
         "symptoms": _field(report, "symptoms"),
-        "scope": _field(summary, "scope"),
-        "what_broke": _field(summary, "what_broke"),
-        "impact": _field(summary, "impact"),
+        "causes": _entries_without(_field(report, "causes"), POST_JUDGING_CAUSE_FIELDS),
+        "hypotheses": _entries_without(_field(report, "hypotheses"), POST_JUDGING_HYPOTHESIS_FIELDS),
+        "actions": _entries_without(_field(report, "actions"), POST_JUDGING_ACTION_FIELDS),
         "open_questions": _field(report, "open_questions"),
-        "not_checked": _field(coverage, "not_checked"),
+        "coverage": {"not_checked": _field(coverage, "not_checked")},
         "map_changes": _field(report, "map_changes"),
-        "hypotheses": _digests(_field(report, "hypotheses"), hypothesis_digest),
-        "causes": _digests(_field(report, "causes"), lambda cause: cause_digest(cause, findings_by_id)),
-        "actions": _digests(_field(report, "actions"), action_digest),
+    }
+
+
+def draft_digest(report: dict, findings_by_id: dict, case_identity: str) -> str:
+    """Covers everything draft_text holds, each cause with the findings it cites, and the case."""
+    text = draft_text(report)
+    return _canonical_hash({
+        "symptoms": text["symptoms"],
+        "scope": text["summary"]["scope"],
+        "what_broke": text["summary"]["what_broke"],
+        "impact": text["summary"]["impact"],
+        "open_questions": text["open_questions"],
+        "not_checked": text["coverage"]["not_checked"],
+        "map_changes": text["map_changes"],
+        "hypotheses": _digests(text["hypotheses"], hypothesis_digest),
+        "causes": _digests(text["causes"], lambda cause: cause_digest(cause, findings_by_id)),
+        "actions": _digests(text["actions"], action_digest),
         "case": case_identity if isinstance(case_identity, str) else "",
     })

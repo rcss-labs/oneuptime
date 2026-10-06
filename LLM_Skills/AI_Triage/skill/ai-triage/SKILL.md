@@ -103,9 +103,10 @@ Do the steps in order. Work without stopping to ask, except where a step says to
    unresolved report still lists each cause you tested, with the findings that
    contradict it; the judging step needs at least one cause. What you could not
    establish (why a limit was set, who made a change, what a host should have
-   been) goes in `open_questions`, not into the cause. Free text (`what_broke`,
-   `impact`, hypotheses, rationales, open questions) never states a label or calls
-   anything the root cause: the page prints labels from the judgments only.
+   been) goes in `open_questions`, not into the cause. No text you write in the
+   draft (cause statements, summary, symptoms, hypotheses, every action field, open
+   questions, what was not checked, map changes) states a label or calls anything
+   the root cause: the page prints labels from the judgments only.
 9. **Judge.** `run judge run --case-dir <case>`. Read `judgments/summary.json`. In
    `report.json` set each label to the label the summary gives, copy its `typesafe`
    value into `coverage.typesafe`, and make `status`, `summary.top_cause`, and the
