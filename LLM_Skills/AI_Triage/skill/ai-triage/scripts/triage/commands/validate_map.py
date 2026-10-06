@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Validate the team config and the service map.
 
 Exit codes: 0 valid, 1 the service map is invalid, 2 usage error or an invalid config.
@@ -11,19 +10,23 @@ from pathlib import Path
 
 from triage.config import ConfigError, default_config_path, load_config
 from triage.service_map import MapError, default_map_path, load_map
-from triage.cli import add_exit_codes, run
+from triage.cli import add_exit_codes
+from triage.commands.common import SKILL_DIR
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="validate_map", description="Validate triage-config.yaml and service-map.yaml."
+        prog="run.py validate_map", description="Validate triage-config.yaml and service-map.yaml."
     )
     parser.add_argument("--config", type=Path, default=default_config_path(SKILL_DIR), help="path to the config file")
     parser.add_argument("--map", type=Path, default=default_map_path(SKILL_DIR), help="path to the service map")
     add_exit_codes(parser)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     try:
         config = load_config(args.config)
     except ConfigError as exc:
@@ -40,7 +43,3 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"OK: {len(config.accounts)} accounts, {len(service_map.services)} services")
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(run(main))

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Collect read-only evidence from one source into the evidence format.
 
 Exit codes: 0 collected, 2 usage or config error, 3 sign-in expired, 4 unknown collector or bad target key.
@@ -21,10 +20,10 @@ from triage.case import CaseError, check_replay, resolve_case_dir
 from triage.evidence import Evidence, EvidenceExists
 from triage.fixtures import FixtureError, fixture_dir, kube_runner_from_env, replay_banner, runner_from_env
 from triage.window import WindowError, make_window
-from triage.cli import add_exit_codes, run
+from triage.cli import add_exit_codes
+from triage.commands.common import SKILL_DIR
 
 GLOBAL_REGION = "us-east-1"  # hosts the global services
-SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
 def _read_case(case_dir: Path) -> dict:
@@ -82,8 +81,8 @@ def _asked_items(collector: Collector, targets: dict[str, str]) -> dict[str, lis
     return {key: split_csv(value) for key, value in targets.items() if key in list_keys}
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="collect", description=__doc__.split("\n\n")[0])
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="run.py collect", description=__doc__.split("\n\n")[0])
     parser.add_argument("name", nargs="?", help="collector name; see --list")
     parser.add_argument("--list", action="store_true", help="list the collectors and their target keys")
     parser.add_argument("--account", metavar="ALIAS", help="account alias from the config")
@@ -104,7 +103,7 @@ def _fail(message: str, code: int) -> int:
 
 
 def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runner: Runner | None = None) -> int:
-    parser = _build_parser()
+    parser = build_parser()
     args = parser.parse_args(argv)
     collectors = all_collectors()
     if args.list:
@@ -179,7 +178,3 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     else:
         print(evidence.to_json())
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(run(main))

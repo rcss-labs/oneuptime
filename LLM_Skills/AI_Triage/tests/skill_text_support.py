@@ -115,11 +115,11 @@ _HELP_CACHE: dict[tuple[str, str], tuple[int, str]] = {}
 
 
 def script_accepts(script: str, subcommand: str) -> tuple[bool, str]:
-    """True when `<script>.py <subcommand> --help` exits 0 (argparse rejects an unknown subcommand). No AWS call."""
+    """True when `run.py <script> <subcommand> --help` exits 0 (argparse rejects an unknown subcommand). No AWS call."""
     key = (script, subcommand)
     if key not in _HELP_CACHE:
         env = {**os.environ, "PYTHONPATH": str(SCRIPTS_DIR), "PYTHONDONTWRITEBYTECODE": "1"}
-        argv = [sys.executable, str(SCRIPTS_DIR / f"{script}.py")] + ([subcommand] if subcommand else []) + ["--help"]
+        argv = [sys.executable, str(SCRIPTS_DIR / "run.py"), script] + ([subcommand] if subcommand else []) + ["--help"]
         done = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=60)
         _HELP_CACHE[key] = (done.returncode, done.stderr.strip().splitlines()[-1] if done.stderr.strip() else "")
     code, message = _HELP_CACHE[key]
@@ -130,7 +130,7 @@ RUN_RE = re.compile(r"`run ([A-Za-z_][A-Za-z0-9_]*)(?: ([a-z][a-z-]*))?")
 
 
 def run_references(text: str) -> list[tuple[int, str, str]]:
-    """(line, script, subcommand or "") for each `run <script> [subcommand]` written in backticks."""
+    """(line, command, subcommand or "") for each `run <command> [subcommand]` written in backticks."""
     found = []
     for number, line in enumerate(text.splitlines(), start=1):
         for match in RUN_RE.finditer(line):

@@ -1,6 +1,6 @@
 """The publishing commands refuse a rendered report that no longer matches what it was rendered from.
 
-The cases are built with the real report code: judged by run_judgments, validated and rendered by report.py.
+The cases are built with the real report code: judged by run_judgments, validated and rendered by run.py report.
 """
 import copy
 import json
@@ -20,8 +20,8 @@ from test_report import VALID_REPORT, case_dir, case, findings, judged  # noqa: 
 from triage.config import parse_config
 from triage.judge import run_judgments
 
-PUBLISH = SKILL_SRC / "scripts" / "publish.py"
-REPORT = SKILL_SRC / "scripts" / "report.py"
+PUBLISH = [str(SKILL_SRC / "scripts" / "run.py"), "publish"]
+REPORT = [str(SKILL_SRC / "scripts" / "run.py"), "report"]
 NOW = "2026-10-04T11:30:00Z"
 COMMANDS = (("audit",), ("confluence",), ("slack-message",))
 
@@ -51,7 +51,7 @@ def skill_dir(tmp_path, config_data, cases_root):
 
 
 def run_script(script, skill_dir, *args):
-    return subprocess.run([sys.executable, str(script), *args, "--skill-dir", str(skill_dir)],
+    return subprocess.run([sys.executable, *script, *args, "--skill-dir", str(skill_dir)],
                           capture_output=True, text=True)
 
 

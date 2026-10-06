@@ -14,14 +14,11 @@ from fakes import FakeJudge
 from test_judge import build_case, locate_answer, make_responder
 from triage.config import parse_config
 
-COMMAND = SKILL_SRC / "scripts" / "judge.py"
+COMMAND = [str(SKILL_SRC / "scripts" / "run.py"), "judge"]
 
 
 def load_command():
-    spec = importlib.util.spec_from_file_location("judge_command", COMMAND)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("triage.commands.judge")
 
 
 @pytest.fixture
@@ -54,7 +51,7 @@ def invoke(command, skill_dir, *args, judge=None):
 
 
 def test_help_works():
-    result = subprocess.run([sys.executable, str(COMMAND), "--help"], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, *COMMAND, "--help"], capture_output=True, text=True)
     assert result.returncode == 0 and "run" in result.stdout and "locate" in result.stdout and "adhoc" in result.stdout
 
 
@@ -109,7 +106,7 @@ def test_run_with_a_broken_question_file_exits_1(command, skill_dir, case_dir, c
 
 def test_run_without_a_key_records_unavailable_and_exits_0(skill_dir, case_dir):
     env = {key: value for key, value in os.environ.items() if key != "TYPESAFE_API_KEY"}
-    result = subprocess.run([sys.executable, str(COMMAND), "run", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir)],
+    result = subprocess.run([sys.executable, *COMMAND, "run", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir)],
                             capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
     summary = json.loads((case_dir / "judgments" / "summary.json").read_text())

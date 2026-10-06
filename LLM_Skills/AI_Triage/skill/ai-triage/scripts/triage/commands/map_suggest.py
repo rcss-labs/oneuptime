@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Propose a service map entry from a discovered target, or append it to the engineer's service map.
 
 Exit codes: 0 done, 1 the suggestion cannot be made or applied, 2 usage or config error.
@@ -14,13 +13,13 @@ from triage.case import CaseError
 from triage.config import ConfigError, default_config_path, load_config
 from triage.map_suggest import SuggestError, apply, propose
 from triage.service_map import default_map_path
-from triage.cli import add_exit_codes, run
+from triage.cli import add_exit_codes
+from triage.commands.common import SKILL_DIR
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="map_suggest", description=__doc__.split("\n\n")[0])
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="run.py map_suggest", description=__doc__.split("\n\n")[0])
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="subcommand", required=True, metavar="SUBCOMMAND")
 
@@ -39,7 +38,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
     now = datetime.now(timezone.utc)
     try:
         config = load_config(default_config_path(args.skill_dir))
@@ -58,7 +57,3 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, CaseError) as error:
         print("\n".join(error.errors), file=sys.stderr)
         return 2
-
-
-if __name__ == "__main__":
-    sys.exit(run(main))

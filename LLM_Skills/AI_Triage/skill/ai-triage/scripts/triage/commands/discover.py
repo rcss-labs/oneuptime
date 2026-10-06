@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Discover the AWS resources behind a hostname and propose a service map entry.
 
 Exit codes: 0 something was found, 1 nothing was found, 2 usage or config error, 3 sign-in expired.
@@ -16,16 +15,16 @@ from triage.context import SignInExpired
 from triage.discover import discover_hostname
 from triage.service_map import MapError, parse_map
 from triage.fixtures import FixtureError, fixture_dir, replay_banner, kube_runner_from_env, runner_from_env
-from triage.cli import add_exit_codes, run
+from triage.cli import add_exit_codes
+from triage.commands.common import SKILL_DIR
 
 INTAKE_DIR_NAME = "intake"
 OUTPUT_KEYS = {"discovery", "service_name", "proposed_entry", "validation"}
 PLACEHOLDER_SERVICE_NAME = "discovered-service"
-SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="discover", description=__doc__.split("\n\n")[0])
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="run.py discover", description=__doc__.split("\n\n")[0])
     parser.add_argument("--hostname", required=True, help="the incident's hostname")
     parser.add_argument("--account", action="append", default=[], metavar="ALIAS", help="search only this account; repeatable")
     parser.add_argument("--service-name", help="service name to validate the proposed entry under")
@@ -69,7 +68,7 @@ def _fail(message: str, code: int) -> int:
 
 
 def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runner: Runner | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
     try:
         replay = fixture_dir()
         if replay and runner is None:
@@ -109,7 +108,3 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
         target.write_text(text + "\n", encoding="utf-8")
     print(text)
     return 0 if found else 1
-
-
-if __name__ == "__main__":
-    sys.exit(run(main))

@@ -583,9 +583,9 @@ def test_search_and_top_messages_facts_record_what_was_asked(cluster):
 
 def test_the_invocation_becomes_the_fact_command(cluster):
     ctx, _ = make_context(cluster, {"_cluster/health": {"status": "green"}})
-    ctx.invocation = "opensearch_query.py health --cluster logs-prod"
+    ctx.invocation = "run.py opensearch_query health --cluster logs-prod"
     queries.health(ctx)
-    assert ctx.evidence.facts[0].command == "opensearch_query.py health --cluster logs-prod"
+    assert ctx.evidence.facts[0].command == "run.py opensearch_query health --cluster logs-prod"
 
 
 def test_a_null_source_does_not_crash_search(cluster):

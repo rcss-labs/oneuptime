@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Check analyst findings against the evidence they cite.
 
 Exit codes: 0 checked, 2 usage error or missing case folder.
@@ -13,13 +12,13 @@ from pathlib import Path
 from triage.case import REPLAY_NOTICE, CaseError, check_replay, resolve_case_dir
 from triage.config import ConfigError, default_config_path, load_config
 from triage.findings import check_findings
-from triage.cli import add_exit_codes, run
+from triage.cli import add_exit_codes
+from triage.commands.common import SKILL_DIR
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="findings", description=__doc__.split("\n\n")[0])
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="run.py findings", description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check", help="check every findings/*.json and write findings/checked.json")
     check.add_argument("--case-dir", type=Path, required=True, help="the case folder")
@@ -29,7 +28,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
     try:
         case_dir = resolve_case_dir(args.case_dir, load_config(default_config_path(args.skill_dir)))
         case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
@@ -48,7 +47,3 @@ def main(argv: list[str] | None = None) -> int:
         f"unreadable={len(result['unreadable'])} requests={len(result['requests'])}"
     )
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(run(main))

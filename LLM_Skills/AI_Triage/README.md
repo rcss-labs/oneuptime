@@ -95,18 +95,18 @@ Never commit any of these files, or a case folder, to a repository. The config a
 
 ```bash
 cd ~/.claude/skills/ai-triage
-.venv/bin/python scripts/validate_map.py    # config and service map are well formed
-.venv/bin/python scripts/preflight.py       # config, sign-in, tools, shell, folders, TypeSafe key
-.venv/bin/python scripts/verify_access.py   # reads work, writes are denied
+.venv/bin/python scripts/run.py validate_map    # config and service map are well formed
+.venv/bin/python scripts/run.py preflight       # config, sign-in, tools, shell, folders, TypeSafe key
+.venv/bin/python scripts/run.py verify_access   # reads work, writes are denied
 ```
 
-Preflight checks that the config and map load, that the AWS CLI is present, that each account is signed in, that `kubectl` and the kubeconfig exist when EKS clusters are configured, that the cases folder is writable, and whether `TYPESAFE_API_KEY` is set. It also fails when `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or `AWS_SESSION_TOKEN` is exported (kubectl would use it instead of the triage profile), warns when `~/.aws/cli/alias` defines CLI aliases (top-level and `[command <service>]` sub-command aliases) and when `AWS_CONFIG_FILE` or `AWS_SHARED_CREDENTIALS_FILE` moves where the triage profile is read from, and fails when the session is in replay mode unless you pass `--allow-replay`. It reads Claude Code's newest shell snapshot and fails when a function, alias or shell option would change what an approved command runs. `verify_access.py` signs in with each profile, makes one harmless read per permission area, simulates every read that the collectors and playbooks use and that rests on `ViewOnlyAccess` (a missing grant is reported by name), and asks the IAM policy simulator about sample writes. Nothing is attempted against your resources.
+Preflight checks that the config and map load, that the AWS CLI is present, that each account is signed in, that `kubectl` and the kubeconfig exist when EKS clusters are configured, that the cases folder is writable, and whether `TYPESAFE_API_KEY` is set. It also fails when `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or `AWS_SESSION_TOKEN` is exported (kubectl would use it instead of the triage profile), warns when `~/.aws/cli/alias` defines CLI aliases (top-level and `[command <service>]` sub-command aliases) and when `AWS_CONFIG_FILE` or `AWS_SHARED_CREDENTIALS_FILE` moves where the triage profile is read from, and fails when the session is in replay mode unless you pass `--allow-replay`. It reads Claude Code's newest shell snapshot and fails when a function, alias or shell option would change what an approved command runs. `run.py verify_access` signs in with each profile, makes one harmless read per permission area, simulates every read that the collectors and playbooks use and that rests on `ViewOnlyAccess` (a missing grant is reported by name), and asks the IAM policy simulator about sample writes. Nothing is attempted against your resources.
 
 | Script | Exit 0 | Exit 1 | Exit 2 | Exit 3 |
 |---|---|---|---|---|
-| `validate_map.py` | valid | invalid | usage error | |
-| `preflight.py` | ready | a check failed | usage error | only a sign-in is needed |
-| `verify_access.py` | all passed | a check failed | usage or config error | a sign-in expired |
+| `run.py validate_map` | valid | invalid | usage error | |
+| `run.py preflight` | ready | a check failed | usage error | only a sign-in is needed |
+| `run.py verify_access` | all passed | a check failed | usage or config error | a sign-in expired |
 
 ## Permissions in Claude Code
 
@@ -134,15 +134,15 @@ The skill then does the following, in order:
 
 1. Runs preflight. An expired sign-in stops the run with the `aws sso login` line to use.
 2. Reads the incident from OneUptime (the order is in `reference/intake.md`, which has not yet been run against a live OneUptime), saves it as an intake file and creates the case folder.
-3. Matches the incident to a service in the map and chooses the target. With several matches, a TypeSafe question chooses or tells Claude to ask you. With none, `discover.py --save` looks for the resources behind the host name. If the incident has no host name or discovery finds nothing, Claude asks you.
-4. Runs the whole collection plan with `case.py collect`, then the further collectors that each service playbook names.
+3. Matches the incident to a service in the map and chooses the target. With several matches, a TypeSafe question chooses or tells Claude to ask you. With none, `run.py discover --save` looks for the resources behind the host name. If the incident has no host name or discovery finds nothing, Claude asks you.
+4. Runs the whole collection plan with `run.py case collect`, then the further collectors that each service playbook names.
 5. Dispatches analyst subagents on Sonnet in parallel (changes and logs always; compute, data and edge when there is evidence in their domain). They write findings.
 6. Checks every finding against the evidence it cites, and builds `timeline.json`.
 7. Forms hypotheses: changes first, then the request path hop by hop, then a comparison with something that works. Each one is tested with a read that could disprove it.
 8. Writes `report.json`: symptoms, causes, every hypothesis and the actions. Free text never states a label.
 9. Runs judging. TypeSafe scores the claims, and the labels come from its summary.
 10. Validates and renders `report.md` and `work-order.json`.
-11. Audits the report for secrets, has a subagent read it, publishes it to Confluence, reads the page back and compares it with `publish.py verify-confluence`, then shows you the Slack message and asks.
+11. Audits the report for secrets, has a subagent read it, publishes it to Confluence, reads the page back and compares it with `run.py publish verify-confluence`, then shows you the Slack message and asks.
 12. Proposes a service-map entry when the target came from discovery.
 13. Hands over: status, top cause and label, actions, what was not checked and where the case folder is.
 
@@ -155,11 +155,11 @@ Loading the skill turns on the guard for the rest of that Claude Code session. I
 The guard is a Claude Code hook that evaluates every shell command, every Write and Edit call, and every OneUptime, Slack and Confluence tool call in the session. For AWS and kubectl it approves only what it fully understands. Anything else is not approved, and Claude Code applies your normal permission settings.
 
 - **Allows without a prompt:** AWS commands that use a triage profile, set a region and name a known read operation; kubectl reads (`get`, `describe`, `logs`, `top`, `events` and similar) with the skill's kubeconfig, a triage context and a namespace; the skill's own scripts, with case folders only of the form `<cases_dir>/<incident>/<run>`; the output filters `jq`, `head`, `tail`, `sort`, `uniq`, `wc`, `cut`, `tr` and `column`; and OneUptime read tools.
-- **Denies:** AWS commands with another profile or no profile, with a write operation, or with an operation that returns secrets (including EC2 user data from instance attributes, launch template data and spot requests, and VPN pre-shared keys) or writes a local file (including `--cli-input-json`); kubectl write verbs, secret reads and other kubeconfigs; direct requests to a configured OpenSearch cluster (use `opensearch_query.py`); OneUptime write tools; and file-tool writes to the script-owned files listed above.
-- **Asks you** for a Slack tool that sends or changes anything; for a Confluence write whose body is not the report that was audited in the last 30 minutes (the exact audited body is allowed only with the recorded title and, for an update, the page recorded for the incident); for AWS reads that return user data, launch templates or build environments; for `map_suggest.py apply` and `publish.py --accept-hits`; for path-like option values outside the CloudWatch Logs name options; and for any command it cannot check (see below).
+- **Denies:** AWS commands with another profile or no profile, with a write operation, or with an operation that returns secrets (including EC2 user data from instance attributes, launch template data and spot requests, and VPN pre-shared keys) or writes a local file (including `--cli-input-json`); kubectl write verbs, secret reads and other kubeconfigs; direct requests to a configured OpenSearch cluster (use `run.py opensearch_query`); OneUptime write tools; and file-tool writes to the script-owned files listed above.
+- **Asks you** for a Slack tool that sends or changes anything; for a Confluence write whose body is not the report that was audited in the last 30 minutes (the exact audited body is allowed only with the recorded title and, for an update, the page recorded for the incident); for AWS reads that return user data, launch templates or build environments; for `run.py map_suggest apply` and `run.py publish --accept-hits`; for path-like option values outside the CloudWatch Logs name options; and for any command it cannot check (see below).
 - **Leaves alone** everything unrelated. Tool names of other connectors, and unusual connector names, fall through to your normal prompt. The guard cannot catch other tools that change infrastructure with your everyday credentials (terraform, `psql`, `curl` to an IP address). Commands that use `aws` indirectly (`env aws`, a full path, `xargs aws`) are asked about.
 - **Redirects.** Output redirects to `/dev/null` and copies of one output descriptor to another (`>/dev/null`, `2>/dev/null`, `&>/dev/null`, `2>&1`) are accepted. A redirect to any other file is not approved.
-- **Replay.** A case made from recordings is marked as a replay, and the publish commands refuse to publish it. There is no option to override this; the tests reach the publish step through the script's `main` function. `collect.py` and `opensearch_query.py` also refuse to write recorded evidence into a live case, or live evidence into a replay case.
+- **Replay.** A case made from recordings is marked as a replay, and the publish commands refuse to publish it. There is no option to override this; the tests reach the publish step through the command's `main` function. `run.py collect` and `run.py opensearch_query` also refuse to write recorded evidence into a live case, or live evidence into a replay case.
 - **If the guard breaks** (missing Python environment, crash), the wrapper script falls back to a text check. It denies commands that mention `aws` or `kubectl`, writes to a run's judgments, edits of the skill config, calls to the OpenSearch tool or host, and any connector call to OneUptime, Slack or Confluence. It says what it still cannot cover.
 
 Refused by design, with the reason:
@@ -169,13 +169,13 @@ Refused by design, with the reason:
 - **Shell variables and command substitution.** The guard sees the text, not the value that the shell would put in.
 - **Input redirects (`<`).** zsh reads forms such as numeric globs as redirects, so what the guard checks would differ from what runs.
 
-Two options are yours alone. `map_suggest.py apply` writes into your service map. `publish.py --accept-hits=<digest>` publishes although the audit found something. The skill's instructions forbid the agent to use the second one, and the guard always asks you for a command that carries it.
+Two options are yours alone. `run.py map_suggest apply` writes into your service map. `run.py publish --accept-hits=<digest>` publishes although the audit found something. The skill's instructions forbid the agent to use the second one, and the guard always asks you for a command that carries it.
 
 ## What is published, and the residual risk
 
 ### What is sent to the scoring service
 
-Every judged run sends redacted text to the TypeSafe scoring service: finding claims, the evidence summaries and quoted passages they cite, what was asked, cause statements, symptoms, scope, and action titles, targets and changes. For `judge.py locate` it sends the incident title, description, monitors, labels, host names, and each candidate's account alias, region and resource names. The text is redacted first, and account ids become aliases. The redaction limits below apply to this text too.
+Every judged run sends redacted text to the TypeSafe scoring service: finding claims, the evidence summaries and quoted passages they cite, what was asked, cause statements, symptoms, scope, and action titles, targets and changes. For `run.py judge locate` it sends the incident title, description, monitors, labels, host names, and each candidate's account alias, region and resource names. The text is redacted first, and account ids become aliases. The redaction limits below apply to this text too.
 
 ### What is published
 
@@ -239,12 +239,12 @@ One file per service in `skill/ai-triage/playbooks/`. The agent opens the one th
 | Preflight exits 3 or says the sign-in session has expired | Run the `aws sso login --profile <name>` line it prints, then run preflight again. The skill stops and gives you that line. |
 | A command stops with a permission prompt | Read the reason on the prompt. Most often the command uses `~`, a variable, a redirect or `grep`. Write it in the forms in `skill/ai-triage/reference/reading.md`, or approve it yourself if you understand it. |
 | The audit reports a hit | Do not edit `report.md`. If the hit is in words Claude wrote in `report.json`, Claude rewrites them there, then judges and renders again. Otherwise read the positions the audit printed. If it is a false alarm, you may publish with `--accept-hits=<digest>`, using the digest the refusal printed. It is valid only for the files exactly as audited, so publish to Confluence before writing the Slack message, or audit again. |
-| "the report must be validated and rendered again before anything is published" | `report.json`, the judging summary or `checked.json` changed after the last render. Run `report.py validate`, then `report.py render`. If you changed a cause or action after judging, run `judge.py run` again first. |
-| A judging run failed ("failed: ...; judging must be run again") | The TypeSafe call failed or answered in a form the client refused. Every label is candidate. Check `TYPESAFE_API_KEY` and run `judge.py run` again. If the service is only unavailable, the report is capped at probable and says so. |
+| "the report must be validated and rendered again before anything is published" | `report.json`, the judging summary or `checked.json` changed after the last render. Run `run.py report validate`, then `run.py report render`. If you changed a cause or action after judging, run `run.py judge run` again first. |
+| A judging run failed ("failed: ...; judging must be run again") | The TypeSafe call failed or answered in a form the client refused. Every label is candidate. Check `TYPESAFE_API_KEY` and run `run.py judge run` again. If the service is only unavailable, the report is capped at probable and says so. |
 | "<file> already exists; pass another --suffix to keep both" | A collector never overwrites evidence. Run it again with a different `--suffix`, or leave the existing file. |
-| "the triage guard has no valid config" | `triage-config.yaml` is missing or invalid. Run `validate_map.py` and fix what it lists. |
+| "the triage guard has no valid config" | `triage-config.yaml` is missing or invalid. Run `run.py validate_map` and fix what it lists. |
 | "the skill is not installed correctly" | The Python environment is missing. Run `./install.sh` again. |
-| `verify_access.py` says the profile does not use the `ai-triage-read-only` permission set | The profile's `sso_role_name` points at another permission set. |
+| `run.py verify_access` says the profile does not use the `ai-triage-read-only` permission set | The profile's `sso_role_name` points at another permission set. |
 
 ## Develop
 
@@ -255,7 +255,7 @@ cd LLM_Skills/AI_Triage
 python3 tools/check_policy_actions.py           # needs network; run after editing the policy
 ```
 
-Run `./run-tests.sh` with the test files you changed. Do not run the lint of the surrounding OneUptime repository over this folder. The tests never call AWS. `verify_access.py` is the only script that does, and you run it yourself.
+Run `./run-tests.sh` with the test files you changed. Do not run the lint of the surrounding OneUptime repository over this folder. The tests never call AWS. `run.py verify_access` is the only command that does, and you run it yourself.
 
 - **Replay scenarios.** `tests/replay/` holds three recorded incidents (`ecs-bad-deploy`, `cert-expired`, `eks-oom-discovered`) with canned AWS and OpenSearch answers. `tests/test_replay_pipeline.py` runs the whole pipeline on them with no credentials. See [tests/replay/README.md](tests/replay/README.md).
 - **The instruction files are tested.** `tests/test_skill_text.py`, `tests/test_playbooks.py` and `tests/test_reference_formats.py` check `SKILL.md`, the playbooks, the prompts and `reference/formats.md` against the code: collector names and target keys, that every aws and kubectl command in the text is approved by the real guard, and that the examples in `reference/formats.md` run through the real commands. `tests/test_docs.py` checks the permission document and this README against the code.

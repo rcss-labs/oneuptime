@@ -47,14 +47,14 @@ skill records in the report's coverage notes.
 
 Checked on 2026-10-04 against `ViewOnlyAccess` version 46 and `ReadOnlyAccess`
 version 190. AWS changes these policies over time. Re-run
-`tools/check_policy_actions.py` and `verify_access.py` after AWS updates them.
+`tools/check_policy_actions.py` and `run.py verify_access` after AWS updates them.
 
 ### What `ViewOnlyAccess` already provides
 
-**This list is unverified until your first `verify_access.py` run.** The contents of
+**This list is unverified until your first `run.py verify_access` run.** The contents of
 `ViewOnlyAccess` were not read when this document was written. Every read that rests on it
 (SQS queue attributes, the EKS describes, `acm:ListCertificates`, `cloudwatch:GetMetricData`,
-the VPC describes, and the rest) is asked of the IAM policy simulator by `verify_access.py`,
+the VPC describes, and the rest) is asked of the IAM policy simulator by `run.py verify_access`,
 which reports any that are not granted, grouped by the collector that needs them.
 
 ECS describe and list, EC2 describe, EKS describe and list, RDS describe including
@@ -290,7 +290,7 @@ authorising. The skill uses only the `get_`, `list_`, and `count_` tools.
 ## 6. Verify your setup
 
 ```bash
-~/.claude/skills/ai-triage/.venv/bin/python ~/.claude/skills/ai-triage/scripts/verify_access.py
+~/.claude/skills/ai-triage/.venv/bin/python ~/.claude/skills/ai-triage/scripts/run.py verify_access
 ```
 
 For every configured account this checks four things:

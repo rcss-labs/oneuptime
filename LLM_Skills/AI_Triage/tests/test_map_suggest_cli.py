@@ -11,7 +11,7 @@ from pathlib import Path
 
 from conftest import SKILL_SRC
 
-COMMAND = SKILL_SRC / "scripts" / "map_suggest.py"
+COMMAND = [str(SKILL_SRC / "scripts" / "run.py"), "map_suggest"]
 INCIDENT = {
     "number": "INC-9",
     "title": "Orders API is down",
@@ -33,21 +33,21 @@ def skill_dir(tmp_path, config_data):
 
 
 def run(skill_dir, *args):
-    return subprocess.run([sys.executable, str(COMMAND), *args, "--skill-dir", str(skill_dir)],
+    return subprocess.run([sys.executable, *COMMAND, *args, "--skill-dir", str(skill_dir)],
                           capture_output=True, text=True)
 
 
 def make_case(skill_dir, tmp_path, discovery=DISCOVERY):
-    case_script = SKILL_SRC / "scripts" / "case.py"
+    case_command = [str(SKILL_SRC / "scripts" / "run.py"), "case"]
     incident = tmp_path / "incident.json"
     incident.write_text(json.dumps(INCIDENT))
-    out = subprocess.run([sys.executable, str(case_script), "init", "--incident", str(incident),
+    out = subprocess.run([sys.executable, *case_command, "init", "--incident", str(incident),
                           "--now", "2026-10-04T11:00:00Z", "--skill-dir", str(skill_dir)],
                          capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     case_dir = json.loads(out.stdout)["case_dir"]
     if discovery is not None and discovery["resources"].get("opensearch") == {"cluster": "logs-prod"}:
-        # case.py target refuses an OpenSearch resource without an index pattern; write the target as an old case.json held it.
+        # case target refuses an OpenSearch resource without an index pattern; write the target as an old case.json held it.
         path = Path(case_dir) / "case.json"
         case = json.loads(path.read_text())
         case["target"] = {"source": "discovered", "service": None, "environment": None, "account": discovery["account"],
@@ -56,7 +56,7 @@ def make_case(skill_dir, tmp_path, discovery=DISCOVERY):
     elif discovery is not None:
         found = tmp_path / "discovery.json"
         found.write_text(json.dumps(discovery))
-        done = subprocess.run([sys.executable, str(case_script), "target", "--case-dir", case_dir,
+        done = subprocess.run([sys.executable, *case_command, "target", "--case-dir", case_dir,
                                "--discovery", str(found), "--skill-dir", str(skill_dir)],
                               capture_output=True, text=True)
         assert done.returncode == 0, done.stderr
@@ -74,7 +74,7 @@ def map_file(skill_dir):
 
 
 def test_help_works():
-    result = subprocess.run([sys.executable, str(COMMAND), "--help"], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, *COMMAND, "--help"], capture_output=True, text=True)
     assert result.returncode == 0 and "propose" in result.stdout and "apply" in result.stdout
 
 

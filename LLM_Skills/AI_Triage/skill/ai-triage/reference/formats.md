@@ -8,9 +8,9 @@ You write three kinds of file: the incident file, `findings/<analyst>.json`, and
 The scripts write every other file in a case folder (the evidence files, `findings/checked.json`, `judgments/summary.json`,
 `report.md`, `work-order.json`, `audit.json`, `render.json`, `case.json`, `case.md`, the timeline files). Never edit them.
 
-## 1. The incident file for case.py init
+## 1. The incident file for run.py case init
 
-`case.py init --incident <file>` reads one JSON object. A key it does not know is dropped (`observed_at` in the replay files is one).
+`run.py case init --incident <file>` reads one JSON object. A key it does not know is dropped (`observed_at` in the replay files is one).
 
 | Field | Required | Allowed values |
 | --- | --- | --- |
@@ -82,7 +82,7 @@ and a finding whose excerpt only repeats it is refused (rules in section 3). Dic
 
 ## 3. The findings file an analyst writes
 
-Write `findings/<analyst>.json`. The file name without `.json` is the analyst name. `findings.py check` reads every file there except `checked.json`.
+Write `findings/<analyst>.json`. The file name without `.json` is the analyst name. `run.py findings check` reads every file there except `checked.json`.
 
 | Field | Required | Allowed values |
 | --- | --- | --- |
@@ -159,9 +159,9 @@ Run the check again after you change any findings file; judging and validation r
 
 ## 5. report.json
 
-`judge.py run` reads the draft first; `report.py validate` and `render` check all of it. The column "Filled" says when you set the field:
+`run.py judge run` reads the draft first; `run.py report validate` and `render` check all of it. The column "Filled" says when you set the field:
 before = write it before judging; after = set it from `judgments/summary.json` once judging is done.
-Before judging write placeholders in the fields marked after, because `judge.py run` refuses a draft without them: every `label` `candidate`, `status` `unresolved`, `summary.top_cause` `null`,
+Before judging write placeholders in the fields marked after, because `run.py judge run` refuses a draft without them: every `label` `candidate`, `status` `unresolved`, `summary.top_cause` `null`,
 `coverage.typesafe` empty text. The judging step replaces them, and with TypeSafe unavailable your draft label is what it caps, so never write a stronger one.
 
 | Field | Required | Allowed values | Filled |
@@ -271,7 +271,7 @@ Label rules checked on the draft (the judged ceiling is in section 6):
 
 ## 6. What judging writes and what each label needs
 
-`judge.py run --case-dir <case>` reads from `report.json`: `symptoms`, `summary.scope`, each cause's `id`, `statement`, `supporting`, `contradicting`,
+`run.py judge run --case-dir <case>` reads from `report.json`: `symptoms`, `summary.scope`, each cause's `id`, `statement`, `supporting`, `contradicting`,
 and each action's `id`, `cause`, `title`, `target`, `current_state`, `required_state`, `change`. It reads each cited finding's `claim` and the summary of its cited facts from `checked.json`.
 It writes `judgments/summary.json` and one `judgments/<nnn>-<kind>.json` per question; both are script files.
 
@@ -356,7 +356,7 @@ The summary stores a digest of each cause, each action, and the draft. Validatio
 | A cited finding changed by a new findings check (its `checked.json` entry) | The causes that cite it count as `candidate` |
 | A cause edited | An action of that cause cannot be `recommended` |
 
-The messages, all from `report.py validate`:
+The messages, all from `run.py report validate`:
 
 | Message | Meaning |
 | --- | --- |
@@ -366,12 +366,12 @@ The messages, all from `report.py validate`:
 | `<path>: labelled <label>, stronger than the judged label <judged>` | Label above the summary |
 | `<path>: recommended, but the summary labels it candidate` | Action above the summary |
 
-After such an edit, run `judge.py run` again, set the labels again, and validate. Running it again renames the old summary to `summary.json.stale`.
-If `report.json`, the summary, or `checked.json` changes after `report.py render`, the next `report.py` call renames `report.md` and `work-order.json` to `.stale`; render again.
+After such an edit, run `run.py judge run` again, set the labels again, and validate. Running it again renames the old summary to `summary.json.stale`.
+If `report.json`, the summary, or `checked.json` changes after `run.py report render`, the next `run.py report` call renames `report.md` and `work-order.json` to `.stale`; render again.
 
 ## 8. The ad hoc question file
 
-`judge.py adhoc --case-dir <case> --question-file <file>` asks one question the fixed set does not cover. The answer is printed and the question is listed under `adhoc` in the summary.
+`run.py judge adhoc --case-dir <case> --question-file <file>` asks one question the fixed set does not cover. The answer is printed and the question is listed under `adhoc` in the summary.
 
 | Field | Required | Allowed values |
 | --- | --- | --- |
@@ -405,7 +405,7 @@ If `report.json`, the summary, or `checked.json` changes after `report.py render
 
 ## 9. report.md and work-order.json
 
-`report.py render` writes both, only when validation passes. Do not edit them.
+`run.py report render` writes both, only when validation passes. Do not edit them.
 `report.md` has the title `# Triage report: <number> <title>` and nine sections, in this order:
 
 1. `## 1. Summary`: what broke, impact, scope, symptoms, the top cause with its label.
@@ -424,7 +424,7 @@ If `report.json`, the summary, or `checked.json` changes after `report.py render
 Each entry of `actions` has `id`, `type`, `label`, `cause`, `title`, `target`, `current_state`, `required_state`, `change`, `rationale`, `finding_ids`, `risk`, `blast_radius`, `preconditions`, `verification`, `rollback`.
 `coverage_gaps` lists each `not_checked` entry as `<what>: <why>`, a TypeSafe note when it was not `available`, unreadable finding files, and evidence errors.
 
-The Slack message takes `status`, the top cause's `label` and `statement`, and the `title` and `label` of at most 3 actions from `report.json`; `publish.py slack-message` refuses with
+The Slack message takes `status`, the top cause's `label` and `statement`, and the `title` and `label` of at most 3 actions from `report.json`; `run.py publish slack-message` refuses with
 `report.json: status is cause_found but top_cause <id> is not in causes` or `report.json: <where> has no <key>`. The Confluence title comes from `case.json`.
 A 12-digit number in the report that is not a configured account id is an audit hit.
 

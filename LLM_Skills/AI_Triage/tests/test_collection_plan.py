@@ -62,8 +62,8 @@ def one(commands, name):
 
 def test_collect_commands_carry_the_case_options(config):
     command = one(plan({"rds": "checkout-prod-db"}, config), "rds")
-    assert command.argv[:3] == [PYTHON, str(SKILL_DIR / "scripts" / "collect.py"), "rds"]
-    assert command.tool == "collect.py"
+    assert command.argv[:4] == [PYTHON, str(SKILL_DIR / "scripts" / "run.py"), "collect", "rds"]
+    assert command.tool == "collect"
     assert option(command, "--account") == "prod-main"
     assert option(command, "--region") == "eu-west-1"
     assert option(command, "--start") == START and option(command, "--end") == END
@@ -184,11 +184,11 @@ def test_opensearch_plans_three_queries(config):
     resources = {"opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-checkout-*",
                                 "filter": {"service": "checkout-api", "env": "prod"}}}
     commands = named(plan(resources, config), "opensearch")
-    assert [c.argv[2] for c in commands] == ["histogram", "top-messages", "search"]
+    assert [c.argv[3] for c in commands] == ["histogram", "top-messages", "search"]
     assert [option(c, "--suffix") for c in commands] == ["histogram", "top-messages", "search"]
     for command in commands:
-        assert command.tool == "opensearch_query.py"
-        assert command.argv[:2] == [PYTHON, str(SKILL_DIR / "scripts" / "opensearch_query.py")]
+        assert command.tool == "opensearch_query"
+        assert command.argv[:3] == [PYTHON, str(SKILL_DIR / "scripts" / "run.py"), "opensearch_query"]
         assert option(command, "--cluster") == "logs-prod"
         assert option(command, "--index") == "app-logs-checkout-*"
         assert option(command, "--start") == START and option(command, "--end") == END
@@ -281,10 +281,10 @@ def test_every_collector_has_a_domain():
 
 def test_planned_collectors_exist_and_targets_are_declared(config):
     registry = all_collectors()
-    commands = [c for c in plan(FULL_RESOURCES, config) if c.tool == "collect.py"]
+    commands = [c for c in plan(FULL_RESOURCES, config) if c.tool == "collect"]
     assert len(commands) >= 15
     for command in commands:
-        collector = registry[command.argv[2]]
+        collector = registry[command.argv[3]]
         assert command.name == collector.name
         targets = targets_of(command)
         assert set(targets) <= set(collector.required) | set(collector.optional)
@@ -301,29 +301,29 @@ def test_every_command_has_a_known_domain(config):
 
 
 def test_collect_options_are_accepted_by_the_command(config):
-    import collect
-    parser = collect._build_parser()
+    from triage.commands import collect
+    parser = collect.build_parser()
     for command in plan(FULL_RESOURCES, config):
-        if command.tool == "collect.py":
-            parser.parse_args(command.argv[2:])
+        if command.tool == "collect":
+            parser.parse_args(command.argv[3:])
 
 
 def test_opensearch_options_are_accepted_by_the_command(config):
-    import opensearch_query
-    parser = opensearch_query._build_parser()
+    from triage.commands import opensearch_query
+    parser = opensearch_query.build_parser()
     resources = {"opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-checkout-*", "filter": {"a": "b"}}}
     for command in plan(resources, config):
-        if command.tool == "opensearch_query.py":
-            parser.parse_args(command.argv[2:])
+        if command.tool == "opensearch_query":
+            parser.parse_args(command.argv[3:])
 
 
 # fix round 1
 
 def test_a_suffix_that_starts_with_a_dash_is_planned_as_one_word(config):
-    import collect
+    from triage.commands import collect
     command = one(plan({"dynamodb_tables": ["-ledger"]}, config), "dynamodb")
     assert "--suffix=-ledger" in command.argv
-    assert collect._build_parser().parse_args(command.argv[2:]).suffix == "-ledger"
+    assert collect.build_parser().parse_args(command.argv[3:]).suffix == "-ledger"
 
 
 def test_opensearch_suffix_is_one_word(config):
@@ -333,13 +333,13 @@ def test_opensearch_suffix_is_one_word(config):
 
 
 def test_non_string_filter_values_are_planned_as_json(config):
-    import opensearch_query
+    from triage.commands import opensearch_query
     filter_ = {"ok": True, "no": False, "n": 5, "x": None, "s": "text", "f": 1.5}
     resources = {"opensearch": {"cluster": "logs-prod", "index_pattern": "app-logs-checkout-*", "filter": filter_}}
     command = named(plan(resources, config), "opensearch")[0]
     filters = [v for f, v in zip(command.argv, command.argv[1:]) if f == "--filter"]
     assert filters == ["ok=true", "no=false", "n=5", "x=null", "s=text", "f=1.5"]
-    opensearch_query._build_parser().parse_args(command.argv[2:])
+    opensearch_query.build_parser().parse_args(command.argv[3:])
 
 
 @pytest.mark.parametrize("value", [" /svc", "cluster/ ", "/", "  /  ", "a/b/c"])
@@ -368,7 +368,7 @@ def evidence_stem(command):
     ("lambda_functions", ["a_b", "a.b", "a-b"]),
 ])
 def test_names_that_clean_to_the_same_text_get_distinct_files(config, key, names):
-    commands = [c for c in plan({key: names}, config) if c.tool == "collect.py" and c.name not in ("changes", "platform", "alarms")]
+    commands = [c for c in plan({key: names}, config) if c.tool == "collect" and c.name not in ("changes", "platform", "alarms")]
     assert len(commands) == len(names)
     assert len({evidence_stem(c) for c in commands}) == len(names)
 
@@ -413,8 +413,8 @@ def test_good_opensearch_filter_keys_are_planned(config, key):
 
 
 def test_every_planned_command_is_accepted_by_the_guard_and_the_parsers(config):
-    import collect
-    import opensearch_query
+    from triage.commands import collect
+    from triage.commands import opensearch_query
     from triage.guard import context_from_config, decide
     from triage.verdict import ALLOW
     resources = {
@@ -429,16 +429,16 @@ def test_every_planned_command_is_accepted_by_the_guard_and_the_parsers(config):
         if command.tool == "skipped":
             continue
         assert decide(command.shell(), context).kind == ALLOW, command.shell()
-        if command.tool == "collect.py":
-            collect._build_parser().parse_args(command.argv[2:])
+        if command.tool == "collect":
+            collect.build_parser().parse_args(command.argv[3:])
         else:
-            opensearch_query._build_parser().parse_args(command.argv[2:])
+            opensearch_query.build_parser().parse_args(command.argv[3:])
 
 
 # fix round 3
 
 def stems(commands):
-    return [c.argv[2] + "|" + option(c, "--suffix").lower() for c in commands if c.tool == "collect.py" and "--suffix=" in " ".join(c.argv)]
+    return [c.argv[3] + "|" + option(c, "--suffix").lower() for c in commands if c.tool == "collect" and "--suffix=" in " ".join(c.argv)]
 
 
 @pytest.mark.parametrize("names", [["Orders", "orders"], ["orders", "Orders"], ["ORDERS", "Orders", "orders"]])
@@ -481,13 +481,13 @@ def test_two_long_names_with_the_same_start_stay_distinct(config):
 
 
 def test_long_names_are_still_accepted_by_the_guard_and_parser(config):
-    import collect
+    from triage.commands import collect
     from triage.guard import context_from_config, decide
     from triage.verdict import ALLOW
     context = context_from_config(config, SKILL_DIR)
     for command in named(plan({"dynamodb_tables": ["A" * 400, "b" * 400]}, config), "dynamodb"):
         assert decide(command.shell(), context).kind == ALLOW
-        collect._build_parser().parse_args(command.argv[2:])
+        collect.build_parser().parse_args(command.argv[3:])
 
 
 # follow-up: incident start for every collector that declares it
@@ -496,7 +496,7 @@ def test_every_planned_collector_that_declares_incident_start_gets_it(config):
     registry = all_collectors()
     wanting = {name for name, collector in registry.items() if "incident_start" in collector.optional}
     assert {"changes", "rds"} <= wanting
-    planned = [c for c in plan(FULL_RESOURCES, config) if c.tool == "collect.py" and c.name in wanting]
+    planned = [c for c in plan(FULL_RESOURCES, config) if c.tool == "collect" and c.name in wanting]
     assert {c.name for c in planned} >= {"changes", "rds"}
     for command in planned:
         assert targets_of(command)["incident_start"] == "2026-10-04T10:42:00Z", command.name
@@ -505,7 +505,7 @@ def test_every_planned_collector_that_declares_incident_start_gets_it(config):
 def test_collectors_that_do_not_declare_incident_start_do_not_get_it(config):
     registry = all_collectors()
     for command in plan(FULL_RESOURCES, config):
-        if command.tool == "collect.py" and "incident_start" not in registry[command.name].optional:
+        if command.tool == "collect" and "incident_start" not in registry[command.name].optional:
             assert "incident_start" not in targets_of(command), command.name
 
 
@@ -550,7 +550,7 @@ def test_the_evidence_names_match_what_the_evidence_writer_makes(config, tmp_pat
     from triage.window import make_window
     window = make_window(START, END, 6)
     for command in plan({"lambda_functions": ["a_b", "Orders", "x.y"], "dynamodb_tables": ["-t"]}, config):
-        if command.tool == "collect.py":
+        if command.tool == "collect":
             account, region = option(command, "--account"), option(command, "--region")
             suffix = option(command, "--suffix") if "--suffix=" in " ".join(command.argv) else ""
             written = Evidence(command.name, account, region, window).write(tmp_path, suffix)
@@ -587,7 +587,7 @@ def test_run_collection_runs_every_command_and_reports_counts(config, tmp_path):
     assert [r["name"] for r in results] == [c.name for c in commands]
     assert len(log) == len(commands) and all(timeout == 300 for _, timeout in log)
     rds = next(r for r in results if r["name"] == "rds")
-    assert rds == {"name": "rds", "tool": "collect.py", "suffix": "", "status": "collected", "exit_code": 0,
+    assert rds == {"name": "rds", "tool": "collect", "suffix": "", "status": "collected", "exit_code": 0,
                    "evidence": "evidence/rds-prod-main-eu-west-1.json", "facts": 3, "errors": 0, "stderr": ""}
 
 
@@ -613,9 +613,9 @@ def test_a_command_that_cannot_start_or_times_out_does_not_stop_the_others(confi
     commands = plan({"rds": "d", "efs": "fs", "ecs_service": "c/s"}, config)
 
     def launch(argv, timeout):
-        if argv[2] == "rds":
+        if argv[3] == "rds":
             raise FileNotFoundError(2, "No such file or directory")
-        if argv[2] == "efs":
+        if argv[3] == "efs":
             raise subprocess.TimeoutExpired(argv, timeout)
         write_evidence(tmp_path, next(c for c in commands if c.argv == argv))
         return 0, ""
@@ -649,7 +649,7 @@ def test_skipped_commands_are_reported_and_not_run(config, tmp_path):
     results = run_collection(commands, tmp_path, launch=fake_launch(log))
     skipped = next(r for r in results if r["status"] == "skipped")
     assert skipped["tool"] == "skipped" and skipped["stderr"] and skipped["evidence"] is None
-    assert all(argv[2] != "rds" for argv, _ in log)
+    assert all(argv[3] != "rds" for argv, _ in log)
 
 
 def test_the_default_launch_uses_the_same_interpreter(monkeypatch):
@@ -662,8 +662,8 @@ def test_the_default_launch_uses_the_same_interpreter(monkeypatch):
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
-    module._launch(["/skill/.venv/bin/python", "/skill/scripts/collect.py", "rds"], 300)
-    assert seen["argv"] == [sys.executable, "/skill/scripts/collect.py", "rds"]
+    module._launch(["/skill/.venv/bin/python", "/skill/scripts/run.py", "collect", "rds"], 300)
+    assert seen["argv"] == [sys.executable, "/skill/scripts/run.py", "collect", "rds"]
     assert seen["timeout"] == 300 and "env" not in seen
 
 
@@ -753,7 +753,7 @@ def test_alarm_names_are_capped_at_the_collectors_limit(config):
 def test_without_mapped_alarms_the_alarms_in_alarm_now_are_planned(config):
     for resources in ({"rds": "db"}, {"alarms": []}):
         alarms = one(plan(resources, config), "alarms")
-        assert alarms.tool == "collect.py" and alarms.domain == "logs"
+        assert alarms.tool == "collect" and alarms.domain == "logs"
         assert targets_of(alarms) == {"in_alarm": "true"}
         assert alarms.reason == "alarms in ALARM now; alarms that fired and cleared need names in the service map"
         assert alarms.evidence == "evidence/alarms-prod-main-eu-west-1.json"
@@ -861,11 +861,11 @@ def test_a_dependency_with_no_environment_or_no_resources_is_a_skipped_line(conf
 
 
 def test_dependency_commands_pass_the_guard_and_the_parser(config):
-    import collect
+    from triage.commands import collect
     from triage.guard import context_from_config, decide
     from triage.verdict import ALLOW
     context = context_from_config(config, SKILL_DIR)
     for command in plan_collection(with_dependencies(FULL_RESOURCES, [PAYMENTS]), config, SKILL_DIR):
-        if command.tool == "collect.py":
+        if command.tool == "collect":
             assert decide(command.shell(), context).kind == ALLOW
-            collect._build_parser().parse_args(command.argv[2:])
+            collect.build_parser().parse_args(command.argv[3:])

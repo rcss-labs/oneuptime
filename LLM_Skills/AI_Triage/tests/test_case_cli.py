@@ -8,7 +8,7 @@ import yaml
 
 from conftest import SKILL_SRC
 
-COMMAND = SKILL_SRC / "scripts" / "case.py"
+COMMAND = [str(SKILL_SRC / "scripts" / "run.py"), "case"]
 INCIDENT = {
     "number": "INC-123",
     "title": "Checkout API is down",
@@ -31,7 +31,7 @@ def skill_dir(tmp_path, config_data, map_data):
 
 
 def run(skill_dir, *args):
-    return subprocess.run([sys.executable, str(COMMAND), *args, "--skill-dir", str(skill_dir)],
+    return subprocess.run([sys.executable, *COMMAND, *args, "--skill-dir", str(skill_dir)],
                           capture_output=True, text=True)
 
 
@@ -49,7 +49,7 @@ def case_dir(skill_dir, tmp_path):
 
 
 def test_help_works():
-    result = subprocess.run([sys.executable, str(COMMAND), "--help"], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, *COMMAND, "--help"], capture_output=True, text=True)
     assert result.returncode == 0 and "init" in result.stdout and "plan" in result.stdout
 
 
@@ -149,7 +149,7 @@ def test_plan_prints_shell_quoted_commands(skill_dir, case_dir):
     planned = json.loads(result.stdout)
     assert all(set(item) == {"domain", "tool", "name", "command", "reason"} for item in planned)
     ecs = next(item for item in planned if item["name"] == "ecs")
-    assert ecs["command"].startswith(f"{skill_dir}/.venv/bin/python {skill_dir}/scripts/collect.py ecs ")
+    assert ecs["command"].startswith(f"{skill_dir}/.venv/bin/python {skill_dir}/scripts/run.py collect ecs ")
     assert "--target cluster=checkout --target service=checkout-api" in ecs["command"]
     assert {"changes", "platform", "opensearch"} <= {item["name"] for item in planned}
     log_group = next(item for item in planned if item["name"] == "logs")
@@ -245,11 +245,11 @@ def start_uncollected(base):
     skill_dir, _ = _build_skill_dir(SCENARIO, base)
     case = ReplayCase(SCENARIO, base, skill_dir, case_dir=base)
     incident = json.loads((SCENARIO / "incident.json").read_text())
-    init = json.loads(case.script("init", "case.py", "init", "--incident", str(SCENARIO / "incident.json"),
+    init = json.loads(case.script("init", "case", "init", "--incident", str(SCENARIO / "incident.json"),
                                   "--now", incident["observed_at"])["stdout"])
     case.case_dir = Path(init["case_dir"])
     candidate = init["match"]["candidates"][0]
-    case.script("target", "case.py", "target", "--case-dir", str(case.case_dir),
+    case.script("target", "case", "target", "--case-dir", str(case.case_dir),
                 "--service", candidate["service"], "--environment", candidate["environment"])
     return case
 
@@ -261,7 +261,7 @@ def evidence_files(case_dir):
 def test_collect_writes_the_same_evidence_as_running_the_planned_commands_one_by_one(tmp_path):
     reference = start_case(SCENARIO, tmp_path / "one-by-one")
     case = start_uncollected(tmp_path / "collect")
-    done = case.script("collect", "case.py", "collect", "--case-dir", str(case.case_dir))
+    done = case.script("collect", "case", "collect", "--case-dir", str(case.case_dir))
     report = json.loads(done["stdout"])
     assert evidence_files(case.case_dir) == evidence_files(reference.case_dir)
     assert len(evidence_files(case.case_dir)) >= 6
@@ -275,21 +275,18 @@ def test_collect_writes_the_same_evidence_as_running_the_planned_commands_one_by
 
 def test_a_second_collect_reports_already_collected_and_makes_no_call(tmp_path):
     case = start_uncollected(tmp_path / "again")
-    case.script("collect", "case.py", "collect", "--case-dir", str(case.case_dir))
+    case.script("collect", "case", "collect", "--case-dir", str(case.case_dir))
     calls = load_call_log(case.base)
     assert calls
     before = evidence_files(case.case_dir)
-    again = json.loads(case.script("collect again", "case.py", "collect", "--case-dir", str(case.case_dir))["stdout"])
+    again = json.loads(case.script("collect again", "case", "collect", "--case-dir", str(case.case_dir))["stdout"])
     assert {entry["status"] for entry in again["commands"]} - {"skipped"} == {"already collected"}
     assert load_call_log(case.base) == calls
     assert evidence_files(case.case_dir) == before
 
 
 def load_command_module():
-    spec = importlib.util.spec_from_file_location("case_command_under_test", COMMAND)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("triage.commands.case")
 
 
 def test_a_command_that_cannot_start_gives_exit_1_and_the_others_still_run(skill_dir, tmp_path, case_dir, capsys, monkeypatch):
@@ -299,8 +296,8 @@ def test_a_command_that_cannot_start_gives_exit_1_and_the_others_still_run(skill
     started = []
 
     def launch(argv, timeout):
-        started.append(argv[2])
-        if argv[2] == "rds":
+        started.append(argv[3])
+        if argv[3] == "rds":
             raise FileNotFoundError(2, "No such file or directory")
         return 0, ""
 
@@ -331,9 +328,9 @@ def test_the_guard_allows_collect_in_the_skills_form(tmp_path, monkeypatch):
     home = case.skill_dir.parents[2]  # the fake home that holds .claude/skills/ai-triage
     monkeypatch.setenv("HOME", str(home))
     context = context_from_config(load_config(case.skill_dir / "config" / "triage-config.yaml"), case.skill_dir)
-    command = skill_style([str(case.python), str(case.skill_dir / "scripts" / "case.py"), "collect",
+    command = skill_style([str(case.python), str(case.skill_dir / "scripts" / "run.py"), "case", "collect",
                            "--case-dir", str(case.case_dir)], home)
-    assert command.startswith('"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/case.py" collect')
+    assert command.startswith('"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/run.py" case collect')
     assert decide(command, context).kind == ALLOW
 
 
@@ -365,7 +362,7 @@ def test_a_run_folder_given_through_a_link_still_works(skill_dir, case_dir, tmp_
 # replay
 
 def run_with_env(skill_dir, env, *args):
-    return subprocess.run([sys.executable, str(COMMAND), *args, "--skill-dir", str(skill_dir)],
+    return subprocess.run([sys.executable, *COMMAND, *args, "--skill-dir", str(skill_dir)],
                           capture_output=True, text=True, env={**os.environ, **env})
 
 

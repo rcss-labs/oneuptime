@@ -446,12 +446,12 @@ def test_a_replay_case_is_never_published_from_the_command_line(scenario, tmp_pa
     case.judge(favourable_judge(folder), apply_labels=True)
     case.render(required=True)
     for name in ("audit", "confluence", "slack-message"):
-        refused = case.script(f"publish {name} without the option", "publish.py", name, "--case-dir", str(case.case_dir),
+        refused = case.script(f"publish {name} without the option", "publish", name, "--case-dir", str(case.case_dir),
                               required=False)
         assert refused["returncode"] == 1 and "replay" in refused["stderr"], name
         assert refused["stdout"] == ""
     assert not (case.case_dir / "audit.json").exists() and not (case.case_dir / "slack-message.md").exists()
-    bypass = case.script("publish audit with the old option", "publish.py", "audit", "--case-dir", str(case.case_dir),
+    bypass = case.script("publish audit with the old option", "publish", "audit", "--case-dir", str(case.case_dir),
                          "--allow-replay", required=False)
     assert bypass["returncode"] == 2 and "--allow-replay" in bypass["stderr"]
     assert not (case.case_dir / "audit.json").exists()
@@ -470,15 +470,15 @@ def test_a_copy_of_a_finished_run_is_refused_by_validate_render_judge_and_publis
     for copy in copies:
         shutil.copytree(case.case_dir, copy)
     # The same commands work on the real run, so each refusal below is about the folder, not about the command.
-    validate = case.script("validate the real run", "report.py", "validate", "--case-dir", str(case.case_dir))
+    validate = case.script("validate the real run", "report", "validate", "--case-dir", str(case.case_dir))
     assert validate["returncode"] == 0
     judge_main = _judge_main()
     monkeypatch.setenv(FIXTURE_ENV, str(folder))
     assert judge_main(["run", "--case-dir", str(case.case_dir), "--skill-dir", str(case.skill_dir)], judge=favourable_judge(folder)) == 0
     for copy in copies:
         refused = [
-            case.script("validate a copy", "report.py", "validate", "--case-dir", str(copy), required=False),
-            case.script("render a copy", "report.py", "render", "--case-dir", str(copy), required=False),
+            case.script("validate a copy", "report", "validate", "--case-dir", str(copy), required=False),
+            case.script("render a copy", "report", "render", "--case-dir", str(copy), required=False),
             case.publish_replay("audit a copy", "audit", "--case-dir", str(copy), required=False),
             case.publish_replay("confluence a copy", "confluence", "--case-dir", str(copy), required=False),
             case.publish_replay("slack a copy", "slack-message", "--case-dir", str(copy), required=False),
@@ -495,11 +495,8 @@ def test_a_copy_of_a_finished_run_is_refused_by_validate_render_judge_and_publis
 
 
 def _judge_main():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("judge_script", SKILL_SRC / "scripts" / "judge.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.main
+    from triage.commands import judge
+    return judge.main
 
 
 # --- the traffic rise that triggers the EKS incident ------------------------------------------------
@@ -533,7 +530,7 @@ def test_a_report_that_cites_a_change_lookup_by_event_source_audits_clean(tmp_pa
     findings = read_json(folder / "findings" / "changes.json")
     findings["findings"].append(extra)
     (case.case_dir / "findings" / "changes.json").write_text(json.dumps(findings))
-    case.script("findings check again", "findings.py", "check", "--case-dir", str(case.case_dir))
+    case.script("findings check again", "findings", "check", "--case-dir", str(case.case_dir))
     draft = read_json(folder / "report.json")
     draft["causes"][2]["contradicting"].append("changes-1")
     case.judge(favourable_judge(folder), apply_labels=True, draft=draft)
@@ -574,7 +571,7 @@ def test_the_guard_allows_every_command_the_pipeline_ran_and_asks_before_a_map_c
     # would run carry no bypass, so every command is allowed, each of the repeated "plan: opensearch" steps included.
     assert [(step, command) for step, command, kind in verdicts if kind != ALLOW] == []
     apply_command = skill_style(
-        [str(skill_dir / ".venv" / "bin" / "python"), str(skill_dir / "scripts" / "map_suggest.py"), "apply",
+        [str(skill_dir / ".venv" / "bin" / "python"), str(skill_dir / "scripts" / "run.py"), "map_suggest", "apply",
          "--case-dir", str(run["case_dir"]), "--service-name", "checkout-api"], home)
     assert decide(apply_command, context).kind == ASK
 

@@ -1,6 +1,6 @@
 """The shared command-line wrapper: one exit-code table, one line per error, never a traceback.
 
-The I4 rows of the final quality review are reproduced here through the real scripts.
+The I4 rows of the final quality review are reproduced here through the real commands.
 """
 import json
 import os
@@ -30,7 +30,9 @@ NOT_UTF8 = b"cases_dir: /tmp/caf\xe9\n"
 
 
 def script(name, *args, stdin=None, env=None):
-    return subprocess.run([sys.executable, str(SCRIPTS / name), *map(str, args)], capture_output=True,
+    """Run a command of run.py, or guard_hook.py (the one other entry point)."""
+    entry = [str(SCRIPTS / name)] if name == "guard_hook.py" else [str(SCRIPTS / "run.py"), name]
+    return subprocess.run([sys.executable, *entry, *map(str, args)], capture_output=True,
                           input=stdin, env={**os.environ, **(env or {})})
 
 
@@ -52,7 +54,7 @@ def skill_dir(tmp_path, config_data, map_data):
 def case_dir(skill_dir, tmp_path):
     incident = tmp_path / "incident.json"
     incident.write_text(json.dumps(INCIDENT))
-    result = script("case.py", "init", "--incident", incident, "--now", "2026-10-04T11:00:00Z", "--skill-dir", skill_dir)
+    result = script("case", "init", "--incident", incident, "--now", "2026-10-04T11:00:00Z", "--skill-dir", skill_dir)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)["case_dir"]
 
@@ -107,10 +109,10 @@ def test_the_table_names_every_code_the_scripts_use():
         assert f"  {code}  " in cli.EXIT_CODES
 
 
-@pytest.mark.parametrize("name", ["case.py", "collect.py", "discover.py", "findings.py", "judge.py", "map_suggest.py",
-                                  "opensearch_query.py", "preflight.py", "publish.py", "report.py", "timeline.py",
-                                  "validate_map.py", "verify_access.py"])
-def test_every_script_help_ends_with_the_exit_code_table(name):
+@pytest.mark.parametrize("name", ["case", "collect", "discover", "findings", "judge", "map_suggest",
+                                  "opensearch_query", "preflight", "publish", "report", "timeline",
+                                  "validate_map", "verify_access"])
+def test_every_command_help_ends_with_the_exit_code_table(name):
     result = script(name, "--help")
     assert result.returncode == 0
     assert result.stdout.decode().rstrip().endswith(cli.EXIT_CODES.rstrip())
@@ -122,20 +124,20 @@ def bad_config_runs(skill_dir, case_dir):
     config = skill_dir / "config" / "triage-config.yaml"
     window = ["--start", WINDOW_START, "--end", WINDOW_END]
     return [
-        ("validate_map.py", ["--config", config]),
-        ("verify_access.py", ["--config", config]),
-        ("preflight.py", ["--skill-dir", skill_dir]),
-        ("case.py", ["show", "--case-dir", case_dir, "--skill-dir", skill_dir]),
-        ("collect.py", ["ecs", "--account", "prod-main", *window, "--target", "cluster=c", "--target", "service=s",
+        ("validate_map", ["--config", config]),
+        ("verify_access", ["--config", config]),
+        ("preflight", ["--skill-dir", skill_dir]),
+        ("case", ["show", "--case-dir", case_dir, "--skill-dir", skill_dir]),
+        ("collect", ["ecs", "--account", "prod-main", *window, "--target", "cluster=c", "--target", "service=s",
                         "--skill-dir", skill_dir]),
-        ("judge.py", ["locate", "--case-dir", case_dir, "--skill-dir", skill_dir]),
-        ("publish.py", ["audit", "--case-dir", case_dir, "--skill-dir", skill_dir]),
-        ("map_suggest.py", ["propose", "--case-dir", case_dir, "--service-name", "checkout", "--skill-dir", skill_dir]),
-        ("discover.py", ["--hostname", "checkout.example.com", "--skill-dir", skill_dir]),
-        ("opensearch_query.py", ["health", "--cluster", "logs-prod", "--skill-dir", skill_dir]),
-        ("findings.py", ["--skill-dir", skill_dir, "check", "--case-dir", case_dir]),
-        ("timeline.py", ["--case-dir", case_dir, "--skill-dir", skill_dir]),
-        ("report.py", ["validate", "--case-dir", case_dir, "--skill-dir", skill_dir]),
+        ("judge", ["locate", "--case-dir", case_dir, "--skill-dir", skill_dir]),
+        ("publish", ["audit", "--case-dir", case_dir, "--skill-dir", skill_dir]),
+        ("map_suggest", ["propose", "--case-dir", case_dir, "--service-name", "checkout", "--skill-dir", skill_dir]),
+        ("discover", ["--hostname", "checkout.example.com", "--skill-dir", skill_dir]),
+        ("opensearch_query", ["health", "--cluster", "logs-prod", "--skill-dir", skill_dir]),
+        ("findings", ["--skill-dir", skill_dir, "check", "--case-dir", case_dir]),
+        ("timeline", ["--case-dir", case_dir, "--skill-dir", skill_dir]),
+        ("report", ["validate", "--case-dir", case_dir, "--skill-dir", skill_dir]),
     ]
 
 
@@ -143,7 +145,7 @@ def test_a_config_that_is_not_utf8_exits_2_in_every_script(skill_dir, case_dir):
     (skill_dir / "config" / "triage-config.yaml").write_bytes(NOT_UTF8)
     for name, args in bad_config_runs(skill_dir, case_dir):
         result = script(name, *args)
-        expected = 1 if name == "preflight.py" else 2  # preflight reports the config as a failed check
+        expected = 1 if name == "preflight" else 2  # preflight reports the config as a failed check
         assert result.returncode == expected, (name, text(result))
         assert "not UTF-8 text" in text(result), (name, text(result))
         assert "Traceback" not in text(result), name
@@ -156,17 +158,17 @@ def test_a_service_map_that_is_not_utf8_never_gives_a_traceback(skill_dir, case_
     incident = tmp_path / "incident2.json"
     incident.write_text(json.dumps(INCIDENT))
     runs = [
-        ("validate_map.py", ["--config", skill_dir / "config" / "triage-config.yaml",
+        ("validate_map", ["--config", skill_dir / "config" / "triage-config.yaml",
                              "--map", skill_dir / "config" / "service-map.yaml"], 1),
-        ("case.py", ["target", "--case-dir", case_dir, "--service", "checkout", "--environment", "prod",
+        ("case", ["target", "--case-dir", case_dir, "--service", "checkout", "--environment", "prod",
                      "--skill-dir", skill_dir], 2),
     ]
     for name, args, code in runs:
         result = script(name, *args)
         assert result.returncode == code, (name, text(result))
         assert "not UTF-8 text" in text(result) and "Traceback" not in text(result), name
-    for name, args in (("preflight.py", ["--skill-dir", skill_dir]),
-                       ("case.py", ["init", "--incident", incident, "--now", "2026-10-04T11:00:01Z", "--skill-dir", skill_dir])):
+    for name, args in (("preflight", ["--skill-dir", skill_dir]),
+                       ("case", ["init", "--incident", incident, "--now", "2026-10-04T11:00:01Z", "--skill-dir", skill_dir])):
         result = script(name, *args)
         assert "Traceback" not in text(result), name
         assert result.returncode in (0, 1, 2), name
@@ -182,7 +184,7 @@ def test_an_unwritable_findings_folder_exits_2_with_the_path(skill_dir, case_dir
         json.dump({"analyst": "a", "findings": []}, handle)
     os.chmod(findings, 0o500)
     try:
-        result = script("findings.py", "--skill-dir", skill_dir, "check", "--case-dir", case_dir)
+        result = script("findings", "--skill-dir", skill_dir, "check", "--case-dir", case_dir)
     finally:
         os.chmod(findings, 0o700)
     assert result.returncode == 2, text(result)
@@ -199,7 +201,7 @@ def test_an_unwritable_evidence_folder_exits_2_in_collect(skill_dir, case_dir):
     with open(os.path.join(fixtures, "aws.json"), "w") as handle:
         json.dump([], handle)
     try:
-        result = script("collect.py", "ecs", "--account", "prod-main", "--start", WINDOW_START, "--end", WINDOW_END,
+        result = script("collect", "ecs", "--account", "prod-main", "--start", WINDOW_START, "--end", WINDOW_END,
                         "--target", "cluster=c", "--target", "service=s", "--case-dir", case_dir, "--skill-dir", skill_dir,
                         env={"AI_TRIAGE_FIXTURES": fixtures})
     finally:
@@ -228,7 +230,7 @@ def test_judge_writes_that_fail_exit_2_with_the_path(capsys, tmp_path, subcomman
 def test_a_case_json_of_the_wrong_shape_gives_one_line(skill_dir, case_dir, content, record):
     with open(os.path.join(case_dir, "case.json"), "w") as handle:
         handle.write(content)
-    result = script("publish.py", record[0], "--case-dir", case_dir, *record[1:], "--skill-dir", skill_dir)
+    result = script("publish", record[0], "--case-dir", case_dir, *record[1:], "--skill-dir", skill_dir)
     assert result.returncode in (1, 2), text(result)
     assert "Traceback" not in text(result)
     assert len(result.stderr.decode().strip().splitlines()) == 1
@@ -238,7 +240,7 @@ def test_a_case_json_of_the_wrong_shape_gives_one_line(skill_dir, case_dir, cont
 def test_an_incident_json_that_is_not_an_object_gives_one_line_in_judge_locate(skill_dir, case_dir, content):
     with open(os.path.join(case_dir, "incident.json"), "w") as handle:
         handle.write(content)
-    result = script("judge.py", "locate", "--case-dir", case_dir, "--skill-dir", skill_dir)
+    result = script("judge", "locate", "--case-dir", case_dir, "--skill-dir", skill_dir)
     assert result.returncode in (1, 2), text(result)
     assert "Traceback" not in text(result)
     assert len(result.stderr.decode().strip().splitlines()) == 1
@@ -256,11 +258,8 @@ def test_hook_input_that_is_not_utf8_fails_closed_and_exits_0(skill_dir):
 # M6: exit codes that agree across scripts
 
 def load_script(name):
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(f"script_{name}", SCRIPTS / f"{name}.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    import importlib
+    return importlib.import_module(f"triage.commands.{name}")
 
 
 @pytest.mark.parametrize("statuses, expected", [

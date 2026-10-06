@@ -1231,7 +1231,7 @@ def test_an_edited_report_is_never_rendered_as_confirmed_or_recommended(skill_di
     report = copy.deepcopy(VALID_REPORT)
     edit(report)
     (case_dir / "report.json").write_text(json.dumps(report))
-    result = subprocess.run([sys.executable, str(SKILL_SRC / "scripts" / "report.py"), "render", "--case-dir", str(case_dir),
+    result = subprocess.run([sys.executable, str(SKILL_SRC / "scripts" / "run.py"), "report", "render", "--case-dir", str(case_dir),
                              "--skill-dir", str(skill_dir)], capture_output=True, text=True)
     assert result.returncode == 1
     assert "edited after judging" in result.stderr

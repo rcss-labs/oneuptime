@@ -54,7 +54,7 @@ READ_PROBES: tuple[Probe, ...] = (
 
 # The simulator must answer "allowed" for each of these, listed under the collector that needs it.
 # Many of these rest on ViewOnlyAccess and not on the inline policy, so this list is how a first run
-# of verify_access.py finds out which are really granted.
+# of verify_access finds out which are really granted.
 SIMULATED_READS_BY_COLLECTOR: dict[str, tuple[str, ...]] = {
     "logs": ("logs:GetLogEvents", "logs:StartQuery", "logs:DescribeLogGroups", "logs:DescribeLogStreams"),
     "ecs": ("ecs:DescribeServices", "ecs:DescribeTaskDefinition", "ecs:DescribeTasks", "ecs:ListTasks",

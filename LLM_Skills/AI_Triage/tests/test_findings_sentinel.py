@@ -11,8 +11,8 @@ from urllib.parse import urlsplit
 import pytest
 import yaml
 
-import collect
-import opensearch_query
+from triage.commands import collect
+from triage.commands import opensearch_query
 from fakes import FakeAws
 from helpers import WINDOW_END, WINDOW_START, FakeKubectl
 from triage.findings import check_findings, load_facts
@@ -189,7 +189,7 @@ def run_collector(skill_dir, case_dir, name, targets, runner):
     assert collect.main(argv, runner=runner, kube_runner=FakeKubectl({})) == 0
     (path,) = (case_dir / "evidence").glob("*.json")
     document = json.loads(path.read_text())
-    assert "asked" in document, "collect.py no longer records what was asked"
+    assert "asked" in document, "collect no longer records what was asked"
     return document
 
 

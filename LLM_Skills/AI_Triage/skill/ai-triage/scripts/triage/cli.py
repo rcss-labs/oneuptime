@@ -1,6 +1,6 @@
-"""One wrapper around every script's main: one table of exit codes, and one line per error, never a traceback.
+"""One wrapper around every command's main: one table of exit codes, and one line per error, never a traceback.
 
-Exit codes (every script; each script's --help ends with this table):
+Exit codes (every command; each command's --help ends with this table):
   0  done
   1  a check failed or found a problem (the audit, the report, judging, nothing discovered, a planned
      collector, a map or config that validate_map or preflight checks), or an unexpected error (one line;
@@ -24,7 +24,7 @@ from triage.case import CaseError
 from triage.config import ConfigError
 from triage.service_map import MapError
 
-EXIT_CODES = __doc__.split("\n\n", 1)[1].replace(" (every script; each script's --help ends with this table)", "")
+EXIT_CODES = __doc__.split("\n\n", 1)[1].replace(" (every command; each command's --help ends with this table)", "")
 DEBUG_ENV = "AI_TRIAGE_DEBUG"
 USAGE_OR_FILE = 2
 UNEXPECTED = 1

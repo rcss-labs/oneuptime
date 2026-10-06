@@ -200,8 +200,8 @@ Next steps:
 
 6. Check your setup:
 
-     ${dest_dir}/.venv/bin/python ${dest_dir}/scripts/validate_map.py
-     ${dest_dir}/.venv/bin/python ${dest_dir}/scripts/verify_access.py
+     ${dest_dir}/.venv/bin/python ${dest_dir}/scripts/run.py validate_map
+     ${dest_dir}/.venv/bin/python ${dest_dir}/scripts/run.py verify_access
 
 See README.md and docs/aws-permissions.md for details.
 NEXT

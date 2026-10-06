@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Validate report.json and render the report and the remediation work order.
 
 Exit codes: 0 done, 1 the report is invalid (every problem is printed), 2 usage, config, or missing file.
@@ -32,9 +31,9 @@ from triage.report import (
 from triage.redact import Redactor
 from triage.timeline import build_timeline
 from triage.window import WindowError, parse_time
-from triage.cli import add_exit_codes, run
+from triage.cli import add_exit_codes
+from triage.commands.common import SKILL_DIR
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
 class InvalidReport(Exception):
@@ -43,8 +42,8 @@ class InvalidReport(Exception):
         super().__init__("; ".join(problems))
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="report", description=__doc__.split("\n\n")[0])
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="run.py report", description=__doc__.split("\n\n")[0])
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     for name, help_text in (("validate", "check report.json and print every problem"),
@@ -128,7 +127,7 @@ def _stale_note(case_dir: Path) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
     outputs_at_risk = False
     try:
         config = load_config(default_config_path(args.skill_dir))
@@ -164,7 +163,3 @@ def main(argv: list[str] | None = None) -> int:
         message = "\n".join(part for part in (message, _stale_note(args.case_dir)) if part)
     print(message, file=sys.stderr)
     return code
-
-
-if __name__ == "__main__":
-    sys.exit(run(main))

@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-# What judge.py reads to build a state, an option, or a question.
+# What judge reads to build a state, an option, or a question.
 JUDGED_CAUSE_FIELDS = ("id", "statement", "supporting", "contradicting")
 JUDGED_ACTION_FIELDS = ("id", "cause", "title", "target", "current_state", "required_state", "change")
 # Written after judging; the only fields a digest leaves out.
@@ -89,7 +89,7 @@ def draft_text(report: Any) -> dict:
     left out: status, summary.top_cause, coverage.typesafe, the run details, the labels, confidences, and reasons of
     causes and actions, and the results of hypotheses.
 
-    report.py checks every string in it for label words, so the check and the digest cover the same text.
+    report checks every string in it for label words, so the check and the digest cover the same text.
     """
     summary = _field(report, "summary")
     coverage = _field(report, "coverage")

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Check Claude's conclusions with TypeSafe: judge the report draft, locate a service, or ask one ad hoc question.
 
 Exit codes: 0 done (also when TypeSafe is unavailable; the summary records it),
@@ -34,13 +33,13 @@ from triage.questions import QuestionError, default_questions_path, load_questio
 from triage.redact import Redactor
 from triage.service_map import MapError, ServiceMap, default_map_path, load_map
 from triage.window import WindowError
-from triage.cli import add_exit_codes, run
+from triage.cli import add_exit_codes
+from triage.commands.common import SKILL_DIR
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="judge", description=__doc__.split("\n\n")[0])
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="run.py judge", description=__doc__.split("\n\n")[0])
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="subcommand", required=True, metavar="SUBCOMMAND")
 
@@ -111,7 +110,7 @@ def _adhoc(args: argparse.Namespace, config, judge: Judge | None) -> int:
 
 
 def main(argv: list[str] | None = None, judge: Judge | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
     handler = {"run": _run, "locate": _locate, "adhoc": _adhoc}[args.subcommand]
     try:
         try:
@@ -133,7 +132,3 @@ def main(argv: list[str] | None = None, judge: Judge | None = None) -> int:
         return _fail("\n".join(error.errors), 2)
     except (JudgmentError, QuestionError) as error:
         return _fail("\n".join(error.errors), 1)
-
-
-if __name__ == "__main__":
-    sys.exit(run(main))

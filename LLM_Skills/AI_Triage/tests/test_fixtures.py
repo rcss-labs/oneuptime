@@ -373,7 +373,7 @@ def test_files_are_read_once_per_process_across_runners(tmp_path):
 
 
 def test_verify_access_refuses_to_run_in_replay_mode(tmp_path, monkeypatch, capsys):
-    import verify_access
+    from triage.commands import verify_access
 
     monkeypatch.setenv(FIXTURE_ENV, str(tmp_path))
     monkeypatch.setattr("subprocess.run", lambda *a, **k: pytest.fail("a real subprocess was started"))

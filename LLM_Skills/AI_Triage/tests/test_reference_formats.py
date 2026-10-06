@@ -30,7 +30,7 @@ from triage.report import check_case_inputs, validate_report
 REFERENCE = SKILL_SRC / "reference" / "formats.md"
 FINDINGS_EXAMPLE = SKILL_SRC / "templates" / "findings.example.json"
 REPORT_EXAMPLE = SKILL_SRC / "templates" / "report.example.json"
-SOURCE_DIRS = (SKILL_SRC / "scripts", SKILL_SRC / "scripts" / "triage")
+SOURCE_DIRS = (SKILL_SRC / "scripts", SKILL_SRC / "scripts" / "triage", SKILL_SRC / "scripts" / "triage" / "commands")
 # Lists whose items are free-form: their keys are not fields the code knows.
 # Not ecs-bad-deploy: that recording is the one agents are tested on, and the examples must not solve it.
 SCENARIO = "cert-expired"
@@ -155,7 +155,7 @@ def built(tmp_path_factory, examples):
         path.unlink()
     analyst = examples["findings"]["analyst"]
     shutil.copyfile(FINDINGS_EXAMPLE, findings_dir / f"{analyst}.json")
-    case.script("findings check", "findings.py", "check", "--case-dir", str(case.case_dir))
+    case.script("findings check", "findings", "check", "--case-dir", str(case.case_dir))
     checked = json.loads((findings_dir / "checked.json").read_text())
     config = load_config(case.skill_dir / "config" / "triage-config.yaml")
     questions = load_questions(default_questions_path(case.skill_dir))
@@ -207,7 +207,7 @@ def test_judging_the_example_report_completes(judged):
 
 def test_example_report_is_valid_with_its_own_labels_after_judging(judged):
     case = judged["case"]
-    result = case.script("report validate", "report.py", "validate", "--case-dir", str(case.case_dir))
+    result = case.script("report validate", "report", "validate", "--case-dir", str(case.case_dir))
     assert "report is valid" in result["stdout"]
 
 
@@ -215,7 +215,7 @@ def test_example_report_is_valid_with_the_labels_the_summary_allows(judged):
     case = judged["case"]
     shutil.copyfile(REPORT_EXAMPLE, case.case_dir / "report.json")
     apply_judged_labels(case.case_dir)
-    result = case.script("report validate", "report.py", "validate", "--case-dir", str(case.case_dir))
+    result = case.script("report validate", "report", "validate", "--case-dir", str(case.case_dir))
     assert "report is valid" in result["stdout"]
     shutil.copyfile(REPORT_EXAMPLE, case.case_dir / "report.json")
 
@@ -223,7 +223,7 @@ def test_example_report_is_valid_with_the_labels_the_summary_allows(judged):
 def test_example_report_renders_with_the_nine_sections(judged):
     case = judged["case"]
     now = json.loads((REPLAY_DIR / SCENARIO / "incident.json").read_text())["observed_at"]
-    case.script("report render", "report.py", "render", "--case-dir", str(case.case_dir), "--now", now)
+    case.script("report render", "report", "render", "--case-dir", str(case.case_dir), "--now", now)
     text = (case.case_dir / "report.md").read_text()
     headings = [line for line in text.splitlines() if line.startswith("# ") or line.startswith("## ")]
     assert len(headings) == len(report_module.REQUIRED_HEADINGS)

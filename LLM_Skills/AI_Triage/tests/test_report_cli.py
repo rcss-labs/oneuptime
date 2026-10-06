@@ -13,7 +13,7 @@ from test_report import VALID_REPORT, config, case_dir, case, findings, judged, 
 from triage.judge import run_judgments
 from triage.report import REQUIRED_HEADINGS, render_is_current, validate_work_order
 
-SCRIPT = SKILL_SRC / "scripts" / "report.py"
+SCRIPT = [str(SKILL_SRC / "scripts" / "run.py"), "report"]
 NOW = "2026-10-04T11:30:00Z"
 
 
@@ -27,7 +27,7 @@ def skill_dir(tmp_path, config_data):
 
 
 def run(skill_dir, *args):
-    return subprocess.run([sys.executable, str(SCRIPT), *args, "--skill-dir", str(skill_dir)],
+    return subprocess.run([sys.executable, *SCRIPT, *args, "--skill-dir", str(skill_dir)],
                           capture_output=True, text=True)
 
 
@@ -36,7 +36,7 @@ def write_report(case_dir, report):
 
 
 def test_help_works():
-    result = subprocess.run([sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, *SCRIPT, "--help"], capture_output=True, text=True)
     assert result.returncode == 0 and "validate" in result.stdout and "render" in result.stdout
 
 
@@ -71,7 +71,7 @@ def test_missing_report_exits_two(skill_dir, case_dir):
 
 def test_missing_case_dir_and_usage_errors_exit_two(skill_dir, tmp_path):
     assert run(skill_dir, "validate", "--case-dir", str(tmp_path / "none")).returncode == 2
-    assert subprocess.run([sys.executable, str(SCRIPT)], capture_output=True).returncode == 2
+    assert subprocess.run([sys.executable, *SCRIPT], capture_output=True).returncode == 2
     assert run(skill_dir, "render").returncode == 2
 
 
@@ -111,14 +111,7 @@ import importlib.util
 
 
 def load_command():
-    spec = importlib.util.spec_from_file_location("report_command", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    sys.path.insert(0, str(SCRIPT.parent))
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.path.pop(0)
-    return module
+    return importlib.import_module("triage.commands.report")
 
 
 def render_ok(skill_dir, case_dir):

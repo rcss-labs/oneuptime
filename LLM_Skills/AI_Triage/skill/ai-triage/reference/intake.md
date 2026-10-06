@@ -2,7 +2,7 @@
 
 ## 1. What this mapping is
 
-This turns an incident number into the incident file that `case.py init` reads (the file's format is in `reference/formats.md`, section 1).
+This turns an incident number into the incident file that `run.py case init` reads (the file's format is in `reference/formats.md`, section 1).
 It was written from the descriptions of the OneUptime MCP tools and from the OneUptime source. It has not run against a live OneUptime.
 Tool names below are the generated ones: `list_<things>` and `get_<thing>`. Each `list_` tool takes `query`, `select`, `skip`, `limit`, `sort`;
 each `get_` tool takes the record's `id` and `select`. If a name or a shape differs from what is written here, use the nearest tool, keep the
@@ -22,7 +22,7 @@ field empty when you cannot fill it, and write the gap in `open_questions` of `r
 7. `list_incident_internal_notes` and `list_incident_public_notes` with `query` `{"incidentId": "<_id>"}`. Select `note`, `createdAt` (public notes: `postedAt` if present).
 8. Alerts: `list_alerts` is linked to a monitor, not to an incident, and the incident file has no place for them. Skip it, or put what you learn in `notes`.
 
-Write the result to `~/.ai-triage/intake/<number>.json` with the Write tool, then run `case.py init`.
+Write the result to `~/.ai-triage/intake/<number>.json` with the Write tool, then run `run.py case init`.
 
 ## 3. Field by field
 

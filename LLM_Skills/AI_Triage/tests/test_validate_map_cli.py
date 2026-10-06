@@ -3,11 +3,11 @@ import sys
 
 from conftest import EXAMPLE_CONFIG, EXAMPLE_MAP, SKILL_SRC
 
-SCRIPT = SKILL_SRC / "scripts" / "validate_map.py"
+SCRIPT = [str(SKILL_SRC / "scripts" / "run.py"), "validate_map"]
 
 
 def run(*args):
-    return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True)
+    return subprocess.run([sys.executable, *SCRIPT, *args], capture_output=True, text=True)
 
 
 def test_valid_files_exit_zero():

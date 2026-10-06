@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Create a case folder for an incident, choose its target, and print the collection plan.
 
 Exit codes: 0 done, 1 a planned command failed, could not be started, or timed out (collect, after running all),
@@ -28,10 +27,10 @@ from triage.collection_plan import plan_collection, run_collection
 from triage.config import ConfigError, default_config_path, load_config
 from triage.service_map import MapError, ServiceMap, default_map_path, load_map
 from triage.window import WindowError, parse_time
-from triage.cli import add_exit_codes, run
+from triage.cli import add_exit_codes
+from triage.commands.common import SKILL_DIR
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
-SIGN_IN_EXPIRED = 3  # collect.py's exit code for an expired sign-in
+SIGN_IN_EXPIRED = 3  # collect's exit code for an expired sign-in
 
 
 MANUAL_TARGET_HELP = """\
@@ -48,8 +47,8 @@ Add what discovery could not find to a discovery file the same way.
 """
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="case", description=__doc__.split("\n\n")[0])
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="run.py case", description=__doc__.split("\n\n")[0])
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="subcommand", required=True, metavar="SUBCOMMAND")
 
@@ -67,7 +66,7 @@ def _build_parser() -> argparse.ArgumentParser:
     target.add_argument("--case-dir", type=Path, required=True)
     target.add_argument("--service", help="service name in the service map")
     target.add_argument("--environment", help="environment name in the service map")
-    target.add_argument("--discovery", type=Path, help="JSON printed by discover.py")
+    target.add_argument("--discovery", type=Path, help="JSON printed by run.py discover")
     plan = add("plan", "print the collector commands for the chosen target")
     plan.add_argument("--case-dir", type=Path, required=True)
     collect = add("collect", "run every planned command (at most 4 at a time) and report what each wrote")
@@ -158,7 +157,7 @@ def _show(args: argparse.Namespace, config) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
     handler = {"init": _init, "target": _target, "plan": _plan, "collect": _collect, "show": _show}[args.subcommand]
     try:
         config = load_config(default_config_path(args.skill_dir))
@@ -173,7 +172,3 @@ def main(argv: list[str] | None = None) -> int:
         return _fail(str(error).replace("\n", " "))
     except WindowError as error:
         return _fail(str(error))
-
-
-if __name__ == "__main__":
-    sys.exit(run(main))

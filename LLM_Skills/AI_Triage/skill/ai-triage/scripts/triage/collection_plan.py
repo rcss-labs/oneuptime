@@ -110,8 +110,7 @@ class _Planner:
         target = case["target"]
         self.account, self.region, self.resources = target["account"], target["region"], target["resources"]
         self.python = str(skill_dir / ".venv" / "bin" / "python")
-        self.collect_script = str(skill_dir / "scripts" / "collect.py")
-        self.opensearch_script = str(skill_dir / "scripts" / "opensearch_query.py")
+        self.run_script = str(skill_dir / "scripts" / "run.py")
         self.hostnames = list(case["incident"].get("hostnames", []))
         self.commands: list[PlannedCommand] = []
         self.evidence_files: set[tuple[str, str, str]] = set()
@@ -130,7 +129,7 @@ class _Planner:
     def collect(self, name: str, targets: dict[str, str], reason: str, suffix: str = "",
                 account: str | None = None, region: str | None = None) -> None:
         account, region = account or self.account, region or self.region
-        argv = [self.python, self.collect_script, name, "--account", account, "--region", region,
+        argv = [self.python, self.run_script, "collect", name, "--account", account, "--region", region,
                 "--start", self.case["window"]["start"], "--end", self.case["window"]["end"],
                 "--case-dir", self.case["case_dir"]]
         # Every collector that declares an optional incident_start gets the case's, in the form changes takes.
@@ -142,10 +141,10 @@ class _Planner:
         if suffix:
             argv.append(f"--suffix={suffix}")
         self.commands.append(PlannedCommand(
-            COLLECTOR_DOMAIN[name], "collect.py", name, argv, reason, suffix, _evidence_path(name, account, region, suffix)))
+            COLLECTOR_DOMAIN[name], "collect", name, argv, reason, suffix, _evidence_path(name, account, region, suffix)))
 
     def opensearch(self, subcommand: str, spec: dict, reason: str) -> None:
-        argv = [self.python, self.opensearch_script, subcommand, "--cluster", spec["cluster"],
+        argv = [self.python, self.run_script, "opensearch_query", subcommand, "--cluster", spec["cluster"],
                 "--index", spec["index_pattern"], "--start", self.case["window"]["start"],
                 "--end", self.case["window"]["end"], "--case-dir", self.case["case_dir"]]
         for key, value in (spec.get("filter") or {}).items():
@@ -155,7 +154,7 @@ class _Planner:
         argv.append(f"--suffix={subcommand}")
         cluster = self.config.opensearch_clusters[spec["cluster"]]
         self.commands.append(PlannedCommand(
-            COLLECTOR_DOMAIN["opensearch"], "opensearch_query.py", "opensearch", argv, reason, subcommand,
+            COLLECTOR_DOMAIN["opensearch"], "opensearch_query", "opensearch", argv, reason, subcommand,
             _evidence_path("opensearch", cluster.account, cluster.name, subcommand)))
 
     def skip_note(self, why: str) -> None:
@@ -381,7 +380,7 @@ def _plan_dependency(p: _Planner, dependency: dict) -> None:
 def plan_collection(case: dict, config: TriageConfig, skill_dir: Path) -> list[PlannedCommand]:
     """The commands to run for the case's target, in a fixed order."""
     if not case.get("target"):
-        raise CaseError(["the case has no target; run case.py target first"])
+        raise CaseError(["the case has no target; run run.py case target first"])
     p = _Planner(case, config, skill_dir)
     handlers = {
         "ecs_service": _plan_ecs,

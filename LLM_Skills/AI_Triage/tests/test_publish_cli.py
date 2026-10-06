@@ -9,7 +9,7 @@ from conftest import SKILL_SRC
 from triage.case import load_case, save_case
 from triage.report import input_hashes, write_render_marker
 
-COMMAND = SKILL_SRC / "scripts" / "publish.py"
+COMMAND = [str(SKILL_SRC / "scripts" / "run.py"), "publish"]
 AWS_KEY = "AKIA" + "ABCDEFGHIJKLMNOP"
 HIGH_ENTROPY = "Zk3" + "vQ9xLm2" + "Pq7RtYw4" + "Nb8HdFs6Jc"
 CASE = {
@@ -56,17 +56,17 @@ def case_dir(tmp_path):
 
 
 def run(skill_dir, *args):
-    return subprocess.run([sys.executable, str(COMMAND), *args, "--skill-dir", str(skill_dir)],
+    return subprocess.run([sys.executable, *COMMAND, *args, "--skill-dir", str(skill_dir)],
                           capture_output=True, text=True)
 
 
 def test_help_exits_zero():
-    result = subprocess.run([sys.executable, str(COMMAND), "--help"], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, *COMMAND, "--help"], capture_output=True, text=True)
     assert result.returncode == 0 and "confluence" in result.stdout
 
 
 def test_no_subcommand_is_a_usage_error():
-    result = subprocess.run([sys.executable, str(COMMAND)], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, *COMMAND], capture_output=True, text=True)
     assert result.returncode == 2
 
 
@@ -382,11 +382,8 @@ def test_the_command_line_has_no_replay_bypass(skill_dir, case_dir, command):
 
 
 def _publish_main():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("publish_script", COMMAND)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.main
+    from triage.commands import publish
+    return publish.main
 
 
 def test_a_replay_case_publishes_only_through_the_module_function(skill_dir, case_dir, capsys):

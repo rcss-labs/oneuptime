@@ -3,7 +3,7 @@ import json
 import pytest
 import yaml
 
-import discover
+from triage.commands import discover
 from fakes import SSO_EXPIRED_ERROR, FakeAws
 from test_discover import HOSTNAME, dns_answers, full_walk, lb_answers
 

@@ -10,7 +10,7 @@ import yaml
 
 from conftest import SKILL_SRC
 
-COMMAND = SKILL_SRC / "scripts" / "case.py"
+COMMAND = [str(SKILL_SRC / "scripts" / "run.py"), "case"]
 SCRIPTS_DIR = SKILL_SRC / "scripts"
 
 
@@ -100,7 +100,7 @@ def test_case_init_preserves_utf8_characters(tmp_path, config_data, map_data):
         "PATH": Path.cwd().parent,  # Preserve PATH
     }
     result = subprocess.run(
-        [sys.executable, str(COMMAND), "init", "--incident", str(incident_file),
+        [sys.executable, *COMMAND, "init", "--incident", str(incident_file),
          "--now", "2026-10-04T11:00:00Z", "--skill-dir", str(skill_dir)],
         capture_output=True,
         text=True,

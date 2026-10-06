@@ -4,7 +4,7 @@ import textwrap
 import pytest
 import yaml
 
-import collect
+from triage.commands import collect
 
 import triage.collectors as registry
 from fakes import SSO_EXPIRED_ERROR, FakeAws

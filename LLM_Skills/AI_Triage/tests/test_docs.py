@@ -41,7 +41,7 @@ def test_readme_covers_the_required_sections():
     text = README.read_text()
     for heading in ("## Prerequisites", "## Install", "## Configure", "## Verify", "## Use", "## Upgrade", "## Uninstall", "## Troubleshooting"):
         assert heading in text
-    for script in ("validate_map.py", "preflight.py", "verify_access.py", "install.sh"):
+    for script in ("run.py validate_map", "run.py preflight", "run.py verify_access", "install.sh"):
         assert script in text
 
 
@@ -82,21 +82,26 @@ def test_every_script_the_readme_names_exists():
     assert missing == []
 
 
-def test_every_subcommand_the_readme_names_is_in_the_script_help():
+def test_every_command_and_subcommand_the_readme_names_is_in_the_help():
     import subprocess
     import sys
 
-    pairs = set(re.findall(r"\b([a-z_]+)\.py ([a-z][a-z-]+)\b", README.read_text()))
+    from triage.commands import COMMANDS
+
+    named = set(re.findall(r"\brun\.py ([a-z_]+)(?: ([a-z][a-z-]+))?", README.read_text()))
     problems = []
-    for script, sub in sorted(pairs):
-        path = SCRIPTS / f"{script}.py"
-        if not path.exists():
-            continue  # a tool, or covered by the previous test
-        out = subprocess.run([sys.executable, str(path), "--help"], capture_output=True, text=True, cwd=SCRIPTS).stdout
+    for command, sub in sorted(named):
+        if command not in COMMANDS:
+            problems.append(f"run.py {command}")
+            continue
+        if not sub:
+            continue
+        out = subprocess.run([sys.executable, str(SCRIPTS / "run.py"), command, "--help"], capture_output=True, text=True,
+                             cwd=SCRIPTS).stdout
         if sub not in out:
-            problems.append(f"{script}.py {sub}")
+            problems.append(f"run.py {command} {sub}")
     assert problems == []
-    assert ("publish", "verify-confluence") in pairs and ("case", "collect") in pairs
+    assert ("publish", "verify-confluence") in named and ("case", "collect") in named
 
 
 def test_readme_does_not_name_a_timeline_file_that_nothing_writes():

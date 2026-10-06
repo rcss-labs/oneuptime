@@ -13,7 +13,7 @@ here is invented: the account ids are the placeholders `111111111111` and `22222
 | `aws.json` | Canned `aws` answers, read by `AI_TRIAGE_FIXTURES`. Each entry has `match` (service and operation), optional `contains` (words that must appear in the arguments), and a `result` or an `error`. The first entry that fits wins. |
 | `opensearch.json` | Canned OpenSearch answers (only `ecs-bad-deploy`). Each entry has `path_contains` and a `body`. One body serves every query on that index, so it holds hits and both aggregations. |
 | `kubectl.json` | Canned `kubectl` answers (only `eks-oom-discovered`). Each entry has `match` (the verb and first argument, for example `get pods` or `logs <pod>`), optional `contains`, and a `stdout` or an `error`. |
-| `engineer-additions.json` | Only for a discovered service: what the engineer adds by hand to what `discover.py` found (see below). |
+| `engineer-additions.json` | Only for a discovered service: what the engineer adds by hand to what `run.py discover` found (see below). |
 | `triage-config.yaml` | The config of the recorded world. `cases_dir` is overridden by the test. |
 | `service-map.yaml` | The service map of the recorded world. |
 | `findings/` | The canned analyst findings, in the stage 3 format. Each cites facts the collectors really produce from these answers. |
@@ -34,9 +34,9 @@ The scenarios:
   CloudTrail event. One optional read (`eks describe-addon` for coredns) is access denied, so the
   eks evidence file holds one error. Pod logs hold the fake secret and an invented customer email address.
 
-For a service that is not in the map, `run_pipeline` takes the discovery path: `case.py init` finds no match,
-`discover.py --hostname` runs against the recording, its output (plus `engineer-additions.json`) goes to
-`case.py target --discovery`, and after publishing `map_suggest.py propose` prints the entry. discovery follows the IP targets of the load balancer to the pods of the configured EKS cluster and finds the cluster,
+For a service that is not in the map, `run_pipeline` takes the discovery path: `run.py case init` finds no match,
+`run.py discover --hostname` runs against the recording, its output (plus `engineer-additions.json`) goes to
+`run.py case target --discovery`, and after publishing `run.py map_suggest propose` prints the entry. discovery follows the IP targets of the load balancer to the pods of the configured EKS cluster and finds the cluster,
 namespace, and workload; it cannot find the database of a pod, so the engineer's additions hold the database only.
 
 ## Run the pipeline in a test
@@ -48,9 +48,9 @@ scenario = REPLAY_DIR / "ecs-bad-deploy"
 case_dir = run_pipeline(scenario, tmp_path, favourable_judge(scenario))
 ```
 
-`run_pipeline` builds a skill folder under `tmp_path`, runs `case.py init`, `target`, and `plan`, every planned
-collector, `findings.py check`, `timeline.py`, judging (in this process, with the judge you pass), `report.py render`,
-`publish.py audit`, `publish.py confluence`, and `publish.py slack-message`, and returns the case folder. The commands it
+`run_pipeline` builds a skill folder under `tmp_path`, runs `run.py case init`, `target`, and `plan`, every planned
+collector, `run.py findings check`, `run.py timeline`, judging (in this process, with the judge you pass), `run.py report render`,
+`run.py publish audit`, `run.py publish confluence`, and `run.py publish slack-message`, and returns the case folder. The commands it
 ran are listed by `replay_support.load_log(tmp_path)`. The tests are in `tests/test_replay_pipeline.py`:
 
 ```
@@ -74,14 +74,14 @@ cp -R skill/ai-triage/scripts skill/ai-triage/judgments skill/ai-triage/template
 cp "$SCENARIO/triage-config.yaml" "$SCENARIO/service-map.yaml" "$S/config/"
 # edit cases_dir in "$S/config/triage-config.yaml" to a folder under $HOME, for example $HOME/cases
 export AI_TRIAGE_FIXTURES="$SCENARIO"
-python3 "$S/scripts/case.py" init --incident "$SCENARIO/incident.json" --now 2026-10-04T11:10:00Z
-python3 "$S/scripts/case.py" target --case-dir <the case_dir printed above> --service checkout-api --environment prod
-python3 "$S/scripts/case.py" plan --case-dir <the case_dir>
+python3 "$S/scripts/run.py" case init --incident "$SCENARIO/incident.json" --now 2026-10-04T11:10:00Z
+python3 "$S/scripts/run.py" case target --case-dir <the case_dir printed above> --service checkout-api --environment prod
+python3 "$S/scripts/run.py" case plan --case-dir <the case_dir>
 ```
 
 Run each planned command (with `python3` in place of the skill's venv python), copy `findings/` into the case folder, and
-carry on with `findings.py check`, `timeline.py`, `judge.py run` (this one needs TypeSafe, or use the test),
-`report.py render`, and `publish.py audit`. `verify_access.py` refuses to run in replay mode, and preflight skips the
+carry on with `run.py findings check`, `run.py timeline`, `run.py judge run` (this one needs TypeSafe, or use the test),
+`run.py report render`, and `run.py publish audit`. `run.py verify_access` refuses to run in replay mode, and preflight skips the
 kubeconfig and shell checks there.
 
 ## What the tests check beyond the happy path

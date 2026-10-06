@@ -13,6 +13,7 @@ from skill_text_support import (
 )
 from triage.collection_plan import COLLECTOR_DOMAIN
 from triage.collectors import all_collectors
+from triage.commands import COMMANDS
 from triage.verdict import ALLOW
 
 SKILL_MD = SKILL_SRC / "SKILL.md"
@@ -72,15 +73,15 @@ def check_run_references(path) -> list[str]:
     problems, collectors = [], all_collectors()
     for number, script, subcommand in run_references(path.read_text()):
         where = f"{path.name}:{number}: `run {script}{' ' + subcommand if subcommand else ''}`"
-        if not (SCRIPTS_DIR / f"{script}.py").is_file():
-            problems.append(f"{where}: no script scripts/{script}.py")
+        if script not in COMMANDS:
+            problems.append(f"{where}: run.py has no command {script}")
         elif script == "collect":  # the collector name is a positional argument, not a subcommand
             if subcommand and subcommand not in collectors:
                 problems.append(f"{where}: no collector named {subcommand}")
         elif subcommand:
             ok, message = script_accepts(script, subcommand)
             if not ok:
-                problems.append(f"{where}: {script}.py does not accept it ({message})")
+                problems.append(f"{where}: run.py {script} does not accept it ({message})")
     return problems
 
 
@@ -95,10 +96,10 @@ def test_run_references_in_reading_md_name_real_scripts_and_subcommands():
 
 
 def full_command_form() -> str:
-    """The fenced line in SKILL.md that shows how to run a script, with a real script and plain arguments."""
+    """The fenced line in SKILL.md that shows how to run a command, with a real command and plain arguments."""
     lines = fenced_commands(SKILL_MD.read_text(), prefixes=('"$HOME/',))
     assert len(lines) == 1, f"expected one full command form in SKILL.md, found {lines}"
-    return lines[0][1].replace("<script>", "collect").replace("<arguments>", "--list")
+    return lines[0][1].replace("<command>", "collect").replace("<arguments>", "--list")
 
 
 def test_the_full_command_form_is_allowed(monkeypatch):
@@ -175,7 +176,7 @@ def test_analyst_prompts_agree_with_the_collector_domains():
 
 # Final review fixes: the skill text must name the commands and the stops the fixes added.
 
-SKILL_SCRIPT = '"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/{}.py"'
+SKILL_SCRIPT = '"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/run.py" {}'
 
 
 def skill_text() -> str:

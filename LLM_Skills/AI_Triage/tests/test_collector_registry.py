@@ -3,7 +3,7 @@ import json
 import pytest
 import yaml
 
-import collect
+from triage.commands import collect
 from fakes import FakeAws
 from helpers import WINDOW_END, WINDOW_START
 from triage.collectors import all_collectors

@@ -5,7 +5,7 @@ from urllib.parse import parse_qsl, urlsplit
 import pytest
 import yaml
 
-import opensearch_query
+from triage.commands import opensearch_query
 from triage.config import parse_config
 from triage.opensearch.policy import Request, check_request
 
@@ -273,7 +273,7 @@ def test_fact_commands_are_the_runnable_invocation(skill_dir, capsys):
         "--interval", "15m")
     command = json.loads(capsys.readouterr().out)["facts"][0]["command"]
     assert shlex.split(command) == [
-        "opensearch_query.py", "histogram", "--cluster", "logs-prod", "--index", "app-logs-*",
+        "run.py", "opensearch_query", "histogram", "--cluster", "logs-prod", "--index", "app-logs-*",
         "--start", START, "--end", END, "--query", "level:ERROR", "--filter", "service=checkout",
         "--interval", "15m"]
 
@@ -281,7 +281,7 @@ def test_fact_commands_are_the_runnable_invocation(skill_dir, capsys):
 def test_state_commands_carry_a_short_invocation(skill_dir, capsys):
     run(skill_dir, "health")
     command = json.loads(capsys.readouterr().out)["facts"][0]["command"]
-    assert shlex.split(command) == ["opensearch_query.py", "health", "--cluster", "logs-prod"]
+    assert shlex.split(command) == ["run.py", "opensearch_query", "health", "--cluster", "logs-prod"]
 
 
 def test_unexpected_response_shapes_exit_6_without_a_traceback(skill_dir, capsys):

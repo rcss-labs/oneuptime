@@ -177,9 +177,8 @@ def test_text_output_shows_fixes_only_for_problems(skill_dir):
 
 
 def test_cli_reports_a_missing_config_as_json(tmp_path):
-    script = SKILL_SRC / "scripts" / "preflight.py"
     result = subprocess.run(
-        [sys.executable, str(script), "--json", "--skill-dir", str(tmp_path)], capture_output=True, text=True
+        [sys.executable, str(SKILL_SRC / "scripts" / "run.py"), "preflight", "--json", "--skill-dir", str(tmp_path)], capture_output=True, text=True
     )
     assert result.returncode == 1
     body = json.loads(result.stdout)
@@ -189,7 +188,7 @@ def test_cli_reports_a_missing_config_as_json(tmp_path):
 # replay mode
 
 def test_preflight_command_in_replay_mode_uses_fixtures_and_treats_tools_as_present(skill_dir, tmp_path, monkeypatch, capsys):
-    import preflight
+    from triage.commands import preflight
 
     replay = tmp_path / "replay"
     replay.mkdir()
@@ -220,7 +219,7 @@ def test_preflight_command_in_replay_mode_uses_fixtures_and_treats_tools_as_pres
 
 
 def test_preflight_command_with_a_bad_fixture_directory_exits_2(skill_dir, tmp_path, monkeypatch, capsys):
-    import preflight
+    from triage.commands import preflight
 
     monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path / "nowhere"))
     assert preflight.main(["--skill-dir", str(skill_dir)]) == 2
@@ -483,7 +482,7 @@ def test_replay_with_allow_replay_has_no_replay_failure(skill_dir):
 
 
 def test_the_command_fails_on_replay_unless_allowed(skill_dir, tmp_path, monkeypatch, capsys):
-    import preflight
+    from triage.commands import preflight
 
     replay = tmp_path / "replay"
     replay.mkdir()

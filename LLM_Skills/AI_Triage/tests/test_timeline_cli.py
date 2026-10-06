@@ -9,7 +9,7 @@ import yaml
 
 from conftest import SKILL_SRC
 
-SCRIPT = SKILL_SRC / "scripts" / "timeline.py"
+SCRIPT = [str(SKILL_SRC / "scripts" / "run.py"), "timeline"]
 FIXTURE_ENV = "AI_TRIAGE_FIXTURES"
 
 
@@ -26,7 +26,7 @@ def run(skill_dir, *args, replay=False):
     env = {key: value for key, value in os.environ.items() if key != FIXTURE_ENV}
     if replay:
         env[FIXTURE_ENV] = str(skill_dir / "recordings")
-    return subprocess.run([sys.executable, str(SCRIPT), *args, "--skill-dir", str(skill_dir)],
+    return subprocess.run([sys.executable, *SCRIPT, *args, "--skill-dir", str(skill_dir)],
                           capture_output=True, text=True, env=env)
 
 

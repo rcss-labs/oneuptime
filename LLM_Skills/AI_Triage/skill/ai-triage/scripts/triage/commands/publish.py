@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Check the report for secrets, prepare what is published to Confluence and Slack, and record what was published.
 
 Exit codes: 0 done, 1 the audit found something or a precondition failed (including a replay case), 2 usage,
@@ -35,13 +34,13 @@ from triage.publish import (
 )
 from triage.report import render_is_current
 from triage.window import WindowError, parse_time
-from triage.cli import add_exit_codes, run
+from triage.cli import add_exit_codes
+from triage.commands.common import SKILL_DIR
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="publish", description=__doc__.split("\n\n")[0], allow_abbrev=False)
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="run.py publish", description=__doc__.split("\n\n")[0], allow_abbrev=False)
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
     sub = parser.add_subparsers(dest="subcommand", required=True, metavar="SUBCOMMAND")
 
@@ -187,7 +186,7 @@ def _refuse_replay(args: argparse.Namespace, allow_replay: bool) -> bool:
 def main(argv: list[str] | None = None, *, allow_replay: bool = False) -> int:
     """allow_replay has no command-line option: a replay case is never published from the command line, and the
     tests that publish one call this function."""
-    args = _build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
     handler = {"audit": _audit, "confluence": _confluence, "confluence-request": _confluence, "slack-message": _slack_message,
                "verify-confluence": _verify_confluence, "record-confluence": _record_confluence,
                "record-slack": _record_slack}[args.subcommand]
@@ -206,7 +205,3 @@ def main(argv: list[str] | None = None, *, allow_replay: bool = False) -> int:
     except WindowError as error:
         print(str(error), file=sys.stderr)
         return 2
-
-
-if __name__ == "__main__":
-    sys.exit(run(main))

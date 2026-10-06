@@ -39,14 +39,14 @@ stop and tell the engineer. Never set `AI_TRIAGE_FIXTURES` yourself; it exists f
 
 ## Commands
 
-Every step below is a script. Write each command in full, because the guard refuses
-shell variables and `~`:
+Every step below is a command of the skill's one script, run.py. Write each command in
+full, because the guard refuses shell variables and `~`:
 
 ```bash
-"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/<script>.py" <arguments>
+"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/run.py" <command> <arguments>
 ```
 
-Below, `run <script> <arguments>` means exactly that line. Files in this skill folder:
+Below, `run <command> <arguments>` means exactly that line. Files in this skill folder:
 `reference/formats.md` (the format of every file you write), `reference/reading.md`
 (rules for your own read-only AWS, kubectl and OpenSearch commands), `playbooks/`
 (one per service), `prompts/` (analyst and audit prompts), `templates/` (examples).

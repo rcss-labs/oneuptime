@@ -163,7 +163,7 @@ class ReplayCase:
         return record
 
     def script(self, step: str, name: str, *args: str, required: bool = True) -> dict:
-        return self.command(step, [str(self.python), str(self.skill_dir / "scripts" / name), *args], required)
+        return self.command(step, [str(self.python), str(self.skill_dir / "scripts" / "run.py"), name, *args], required)
 
     def collect_evidence(self) -> None:
         plan = json.loads(self.log[-1]["stdout"])
@@ -174,8 +174,8 @@ class ReplayCase:
 
     def check_findings(self) -> None:
         shutil.copytree(self.scenario / "findings", self.case_dir / "findings", dirs_exist_ok=True)
-        self.script("findings check", "findings.py", "check", "--case-dir", str(self.case_dir))
-        self.script("timeline", "timeline.py", "--case-dir", str(self.case_dir))
+        self.script("findings check", "findings", "check", "--case-dir", str(self.case_dir))
+        self.script("timeline", "timeline", "--case-dir", str(self.case_dir))
 
     def judge(self, judge: FakeJudge, apply_labels: bool = False, draft: dict | None = None) -> dict:
         """Copy the canned report (or write `draft` instead), judge it in this process, and (as the skill's agent
@@ -188,10 +188,10 @@ class ReplayCase:
         questions = load_questions(default_questions_path(self.skill_dir))
         incident = json.loads((self.scenario / "incident.json").read_text())
         summary = run_judgments(self.case_dir, config, judge, questions, random.Random(incident["number"]))
-        # judge.py run needs TypeSafe, so the judging runs in this process; the command the skill would run is logged
+        # judge run needs TypeSafe, so the judging runs in this process; the command the skill would run is logged
         # in its own form, so that the guard test checks it too.
         self.log.append({"step": "judge run", "returncode": 0, "stdout": "", "stderr": "", "in_process": True,
-                         "argv": [str(self.python), str(self.skill_dir / "scripts" / "judge.py"), "run",
+                         "argv": [str(self.python), str(self.skill_dir / "scripts" / "run.py"), "judge", "run",
                                   "--case-dir", str(self.case_dir)]})
         (self.base / LOG_NAME).write_text(json.dumps(self.log))
         if apply_labels:
@@ -200,25 +200,22 @@ class ReplayCase:
 
     def render(self, required: bool = False) -> dict:
         now = json.loads((self.scenario / "incident.json").read_text())["observed_at"]
-        return self.script("report render", "report.py", "render", "--case-dir", str(self.case_dir), "--now", now,
+        return self.script("report render", "report", "render", "--case-dir", str(self.case_dir), "--now", now,
                            required=required)
 
     def propose_map_entry(self, service_name: str) -> dict:
-        return self.script("map_suggest propose", "map_suggest.py", "propose", "--case-dir", str(self.case_dir),
+        return self.script("map_suggest propose", "map_suggest", "propose", "--case-dir", str(self.case_dir),
                            "--service-name", service_name)
 
     def publish_replay(self, step: str, *args: str, required: bool = True) -> dict:
-        """Run publish.py's main in this process with allow_replay=True: the command line has no option that
+        """Run publish's main in this process with allow_replay=True: the command line has no option that
         publishes a replay case, so this is the only way a test reaches the steps after the replay gate. The
-        command is logged in the skill's form (without any bypass), so that the guard test checks it too."""
+        command is logged in the skill's form (without any bypass, and without the --skill-dir that stands in for
+        the installed copy's own folder), so that the guard test checks it too."""
         import contextlib
-        import importlib.util
         import io
 
-        script = self.skill_dir / "scripts" / "publish.py"
-        spec = importlib.util.spec_from_file_location("publish_script", script)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        from triage.commands import publish as module
         out, err = io.StringIO(), io.StringIO()
         saved_env, saved_cwd = dict(os.environ), os.getcwd()
         os.environ.clear()
@@ -227,14 +224,15 @@ class ReplayCase:
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
-                    code = module.main(list(args), allow_replay=True)
+                    code = module.main([*args, "--skill-dir", str(self.skill_dir)], allow_replay=True)
                 except SystemExit as error:
                     code = error.code if isinstance(error.code, int) else 2
         finally:
             os.chdir(saved_cwd)
             os.environ.clear()
             os.environ.update(saved_env)
-        record = {"step": step, "argv": [str(self.python), str(script), *args], "returncode": code,
+        record = {"step": step, "argv": [str(self.python), str(self.skill_dir / "scripts" / "run.py"), "publish", *args],
+                  "returncode": code,
                   "stdout": out.getvalue(), "stderr": err.getvalue(), "in_process": True}
         self.log.append(record)
         (self.base / LOG_NAME).write_text(json.dumps(self.log))
@@ -305,13 +303,13 @@ def _build_skill_dir(scenario: Path, base: Path) -> tuple[Path, Path]:
 
 
 def _discover(case: ReplayCase, incident: dict) -> Path:
-    """The discovery path: discover.py on the incident's hostname, then the engineer's additions.
+    """The discovery path: discover on the incident's hostname, then the engineer's additions.
 
-    discover.py follows a hostname to a load balancer and then only to an ECS service or an Auto Scaling group, so
+    discover follows a hostname to a load balancer and then only to an ECS service or an Auto Scaling group, so
     for pods behind IP targets it finds the account, the region, and the load balancer only. The scenario's
     engineer-additions.json holds what the engineer would add by hand (the cluster, namespace, workload, database).
     """
-    found = case.script("discover", "discover.py", "--hostname", incident["hostnames"][0])
+    found = case.script("discover", "discover", "--hostname", incident["hostnames"][0])
     document = json.loads(found["stdout"])
     additions = case.scenario / "engineer-additions.json"
     if additions.is_file():
@@ -328,20 +326,20 @@ def start_case(scenario: Path, base: Path) -> ReplayCase:
     skill_dir, _ = _build_skill_dir(scenario, base)
     case = ReplayCase(scenario, base, skill_dir, case_dir=base)
     incident = json.loads((scenario / "incident.json").read_text())
-    init = case.script("case init", "case.py", "init", "--incident", str(scenario / "incident.json"),
+    init = case.script("case init", "case", "init", "--incident", str(scenario / "incident.json"),
                        "--now", incident["observed_at"])
     summary = json.loads(init["stdout"])
     case.case_dir = Path(summary["case_dir"])
     if summary["match"]["status"] == "none":
         discovered = _discover(case, incident)
-        case.script("case target", "case.py", "target", "--case-dir", str(case.case_dir), "--discovery", str(discovered))
+        case.script("case target", "case", "target", "--case-dir", str(case.case_dir), "--discovery", str(discovered))
     else:
         candidates = summary["match"]["candidates"]
         if summary["match"]["status"] != "one" or len(candidates) != 1:
             raise PipelineError(f"the incident did not match exactly one service: {summary['match']}")
-        case.script("case target", "case.py", "target", "--case-dir", str(case.case_dir),
+        case.script("case target", "case", "target", "--case-dir", str(case.case_dir),
                     "--service", candidates[0]["service"], "--environment", candidates[0]["environment"])
-    case.script("case plan", "case.py", "plan", "--case-dir", str(case.case_dir))
+    case.script("case plan", "case", "plan", "--case-dir", str(case.case_dir))
     case.collect_evidence()
     case.check_findings()
     return case

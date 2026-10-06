@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Query an OpenSearch cluster read-only and write the answer as evidence.
 
 The tool builds every request itself and sends it through the read policy. It never takes a raw path or body.
@@ -23,9 +22,9 @@ from triage.opensearch.client import OpenSearchClient, OpenSearchError, Transpor
 from triage.opensearch.policy import Refused
 from triage.redact import Redactor
 from triage.window import Window, WindowError, make_window
-from triage.cli import add_exit_codes, run
+from triage.cli import add_exit_codes
+from triage.commands.common import SKILL_DIR
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
 
 
 def _read_case(case_dir: Path) -> dict:
@@ -67,14 +66,14 @@ def _add_window_options(parser: argparse.ArgumentParser) -> None:
                         help="exact match on a field; repeatable")
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--cluster", required=True, metavar="NAME", help="cluster name from the config")
     common.add_argument("--case-dir", type=Path, help="write the evidence file into this case folder")
     common.add_argument("--suffix", default="", help="added to the evidence file name")
     common.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)
 
-    parser = argparse.ArgumentParser(prog="opensearch_query", description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(prog="run.py opensearch_query", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="subcommand", required=True, metavar="SUBCOMMAND")
 
     def add(name: str, help_text: str, state_only: bool = False) -> argparse.ArgumentParser:
@@ -116,7 +115,7 @@ def _window_for(args: argparse.Namespace, max_hours: int) -> Window:
 
 def _invocation(args: argparse.Namespace) -> str:
     """The command line that reproduces this query, quoted so that it can be pasted into a shell."""
-    words = ["opensearch_query.py", args.subcommand, "--cluster", args.cluster]
+    words = ["run.py", "opensearch_query", args.subcommand, "--cluster", args.cluster]
     for option, value in (("--index", args.index if hasattr(args, "index") else None),
                           ("--start", getattr(args, "start", None)), ("--end", getattr(args, "end", None)),
                           ("--query", getattr(args, "query", None))):
@@ -157,7 +156,7 @@ def _runner(args: argparse.Namespace) -> Callable[[queries.QueryContext], None]:
 
 
 def main(argv: list[str] | None = None, transport: Transport | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
     try:
         replay = fixture_dir()
         if replay and transport is None:
@@ -208,7 +207,3 @@ def main(argv: list[str] | None = None, transport: Transport | None = None) -> i
     else:
         print(evidence.to_json())
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(run(main))
