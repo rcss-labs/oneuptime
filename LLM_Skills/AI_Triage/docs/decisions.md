@@ -206,6 +206,11 @@ The guard is the hook that approves or refuses commands. "Platform" covers the p
 - **Why:** The rule-by-rule redaction had gone five rounds and still missed common shapes; the window rule closes the class at the cost of masking some ids near secret words.
 - **Cost if wrong:** Ids near "key"-type words are masked (a KMS key UUID, `key metrics for build abc123def456ghi7`); a whole-text check over 12,984 lines of docs, skill files and replay recordings showed no other change.
 
+#### G39. One entry point, run.py (2026-10-06)
+- **Decision:** The thirteen entry scripts became commands of `scripts/run.py` (`run.py case collect`, `run.py judge run`, `run.py publish confluence`, ...), each in `triage/commands/<name>.py`, with no compatibility files. The guard trusts the skill's venv python, `scripts/run.py` and a command from the fixed list `triage.commands.COMMANDS` as the next word; every per-command rule is unchanged, and an unknown command, an option before the command, `run.py` elsewhere or an old spelling (`scripts/case.py`) gets the verdict an unknown script got. The commands share one helper that opens a case folder (`triage/commands/common.py`). Dead constants, a test-only config method and duplicated patterns were removed in the same pass.
+- **Why:** The owner asked for a leaner skill without losing capabilities; thirteen near-identical entry files repeated the same case setup, and SKILL.md already wrote every step as `run <script> <arguments>`.
+- **Cost if wrong:** Old command lines in notes or habits are no longer approved by the guard (they fall to the normal permission flow) and the old files are removed on the next install. Earlier entries name the scripts as they were then.
+
 ## Evidence and collectors
 
 #### E1. Unique evidence file names
@@ -666,7 +671,7 @@ These need the owner.
   - a run against real AWS accounts and a real OneUptime, including the intake shapes (`reference/intake.md`, two unconfirmed details);
   - the connector trial: a Confluence page write and read-back, the space id, and Slack to people as well as a channel;
   - CloudTrail lookups by resource name and by event source on a known change;
-  - the ViewOnlyAccess grants, through `verify_access.py` (the simulated action names are unverified);
+  - the ViewOnlyAccess grants, through `run.py verify_access` (the simulated action names are unverified);
   - whether skill hooks fire inside subagents;
   - the calibration of the TypeSafe thresholds, which are uncalibrated starting values.
 - **Commits whose co-author line names a different model than the session's.** The ledgers record the three foundation commits for tasks 4 to 6, whose message folded the body and a Haiku co-author line into the subject, and the guard round 4 commits `fe117c991d` and `7ad4b2a120`. Co-author lines elsewhere name the model that wrote each commit. None were rewritten, because rewriting history needs the owner's consent.
