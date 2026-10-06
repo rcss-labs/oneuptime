@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 
@@ -27,12 +28,12 @@ def sandbox(tmp_path):
     return home, bin_dir
 
 
-def install(sandbox, *args, skip_venv=True):
+def install(sandbox, *args, skip_venv=True, script=INSTALL):
     home, bin_dir = sandbox
     env = {"HOME": str(home), "PATH": f"{bin_dir}:/usr/bin:/bin"}
     if skip_venv:
         env["AI_TRIAGE_SKIP_VENV"] = "1"
-    return subprocess.run(["bash", str(INSTALL), *args], capture_output=True, text=True, env=env)
+    return subprocess.run(["bash", str(script), *args], capture_output=True, text=True, env=env)
 
 
 def dest(sandbox):
@@ -157,46 +158,62 @@ def test_home_that_is_a_file_is_refused(sandbox, tmp_path):
     assert result.returncode == 1 and "HOME is not set to a directory" in result.stderr
 
 
-def source_fingerprint():
+@pytest.fixture
+def project_copy(tmp_path):
+    """A throwaway copy of install.sh and the skill folder.
+
+    Tests that point the install folder at the source run this copy, so a faulty
+    installer can only damage the copy and never the repository.
+    """
+    project = tmp_path / "project"
+    (project / "skill").mkdir(parents=True)
+    shutil.copy2(INSTALL, project / "install.sh")
+    shutil.copytree(SKILL_SRC, project / "skill" / "ai-triage", ignore=shutil.ignore_patterns("__pycache__"))
+    return project
+
+
+def source_fingerprint(source):
     return {
-        str(path.relative_to(SKILL_SRC)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(SKILL_SRC.rglob("*"))
+        str(path.relative_to(source)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(source.rglob("*"))
         if path.is_file() and "__pycache__" not in path.parts
     }
 
 
-def assert_source_untouched(before):
-    """Every file that existed before is still there, unchanged. New files from other work are ignored."""
-    after = source_fingerprint()
+def assert_source_untouched(source, before):
+    """Every file that existed before is still there, unchanged."""
+    after = source_fingerprint(source)
     assert {name: after.get(name) for name in before} == before
 
 
 LINK_ERROR = "the install folder points into the repository; remove the link and run again"
 
 
-def test_destination_linked_to_the_source_is_refused_and_source_is_untouched(sandbox):
+def test_destination_linked_to_the_source_is_refused_and_source_is_untouched(sandbox, project_copy):
+    source = project_copy / "skill" / "ai-triage"
     skills = sandbox[0] / ".claude" / "skills"
     skills.mkdir(parents=True)
-    (skills / "ai-triage").symlink_to(SKILL_SRC)
-    before = source_fingerprint()
+    (skills / "ai-triage").symlink_to(source)
+    before = source_fingerprint(source)
 
-    result = install(sandbox)
+    result = install(sandbox, script=project_copy / "install.sh")
 
     assert result.returncode == 1 and LINK_ERROR in result.stderr
-    assert_source_untouched(before)
+    assert_source_untouched(source, before)
     assert not (sandbox[0] / ".ai-triage").exists()
 
 
-def test_destination_inside_the_source_through_a_linked_parent_is_refused(sandbox):
+def test_destination_inside_the_source_through_a_linked_parent_is_refused(sandbox, project_copy):
+    source = project_copy / "skill" / "ai-triage"
     claude = sandbox[0] / ".claude"
     claude.mkdir()
-    (claude / "skills").symlink_to(SKILL_SRC.parent)  # skill/, so the destination is skill/ai-triage
-    before = source_fingerprint()
+    (claude / "skills").symlink_to(source.parent)  # skill/, so the destination is skill/ai-triage
+    before = source_fingerprint(source)
 
-    result = install(sandbox)
+    result = install(sandbox, script=project_copy / "install.sh")
 
     assert result.returncode == 1 and LINK_ERROR in result.stderr
-    assert_source_untouched(before)
+    assert_source_untouched(source, before)
 
 
 def test_dry_run_only_says_what_it_would_do(sandbox):
@@ -288,3 +305,32 @@ def test_failed_config_backup_stops_before_anything_is_replaced(sandbox):
     assert result.returncode == 1
     assert f"could not back up your config folder: {target / 'config'}" in result.stderr
     assert (target / "scripts" / "stale.py").exists()
+
+
+@pytest.mark.parametrize("linked", ["claude", "skills"])
+def test_a_linked_ancestor_of_a_missing_destination_is_refused(sandbox, project_copy, linked):
+    source = project_copy / "skill" / "ai-triage"
+    home = sandbox[0]
+    if linked == "claude":
+        (home / ".claude").symlink_to(source)
+    else:
+        (home / ".claude").mkdir()
+        (home / ".claude" / "skills").symlink_to(source)
+    before = source_fingerprint(source)
+    entries_before = sorted(p.name for p in source.iterdir())
+
+    result = install(sandbox, script=project_copy / "install.sh")
+
+    assert result.returncode == 1 and LINK_ERROR in result.stderr
+    assert_source_untouched(source, before)
+    assert sorted(p.name for p in source.iterdir()) == entries_before
+    assert not (home / ".ai-triage").exists()
+
+
+def test_a_linked_ancestor_outside_the_repository_is_fine(sandbox, project_copy, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (sandbox[0] / ".claude").symlink_to(elsewhere)
+    result = install(sandbox, script=project_copy / "install.sh")
+    assert result.returncode == 0, result.stderr
+    assert (elsewhere / "skills" / "ai-triage" / "SKILL.md").is_file()

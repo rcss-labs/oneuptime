@@ -1,0 +1,631 @@
+"""Validate report.json, render the report, and build the remediation work order.
+
+Validation is the quality gate: a report is rendered only when it is complete and consistent.
+"""
+from __future__ import annotations
+
+import copy
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from triage.config import TriageConfig
+from triage.findings import evidence_documents, load_facts
+from triage.redact import Redactor, audit_text
+from triage.window import WindowError, format_time, parse_time
+
+LABEL_ORDER = ("candidate", "probable", "confirmed")
+STATUSES = ("cause_found", "unresolved")
+HYPOTHESIS_RESULTS = ("confirmed", "rejected", "inconclusive")
+ACTION_TYPES = ("mitigation", "permanent_fix")
+ACTION_LABELS = ("recommended", "candidate")
+WORK_ORDER_CAUSE_LABELS = LABEL_ORDER + ("unresolved",)
+TARGET_KEYS = ("account_alias", "account_id", "region", "service", "resource_id", "arn")
+ACTION_TEXT_KEYS = ("title", "current_state", "required_state", "change", "rationale", "risk", "blast_radius")
+ACTION_LIST_KEYS = ("preconditions", "verification", "rollback")
+REQUIRED_HEADINGS = (
+    "# Triage report:",
+    "## 1. Summary",
+    "## 2. Incident and window",
+    "## 3. Timeline",
+    "## 4. Findings",
+    "## 5. Ranked causes",
+    "## 6. Remediation work order",
+    "## 7. Coverage notes",
+    "## 8. Proposed service map changes",
+    "## 9. Run details",
+)
+SUMMARY_NAME = "summary.json"
+TYPESAFE_UNAVAILABLE_PREFIX = "unavailable: "
+NO_CAUSE_TEXT = "No cause was established."
+
+
+# --- shape helpers --------------------------------------------------------------------------
+
+def _is_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _text_field(data: dict, key: str, where: str, problems: list[str], required_text: bool = True) -> None:
+    if key not in data:
+        problems.append(f"{where}.{key}: missing")
+    elif not isinstance(data[key], str):
+        problems.append(f"{where}.{key}: must be text")
+    elif required_text and not data[key].strip():
+        problems.append(f"{where}.{key}: is empty")
+
+
+def _choice_field(data: dict, key: str, allowed: tuple[str, ...], where: str, problems: list[str]) -> None:
+    if key not in data:
+        problems.append(f"{where}.{key}: missing")
+    elif data[key] not in allowed:
+        problems.append(f"{where}.{key}: must be one of {', '.join(allowed)}")
+
+
+def _string_list_field(data: dict, key: str, where: str, problems: list[str], at_least_one: bool = False) -> None:
+    if key not in data:
+        problems.append(f"{where}.{key}: missing")
+    elif not isinstance(data[key], list) or not all(isinstance(item, str) for item in data[key]):
+        problems.append(f"{where}.{key}: must be a list of text")
+    elif at_least_one and not any(item.strip() for item in data[key]):
+        problems.append(f"{where}.{key}: needs at least one non-empty step")
+
+
+def _dict_field(data: dict, key: str, where: str, problems: list[str]) -> dict | None:
+    if key not in data:
+        problems.append(f"{where}.{key}: missing")
+    elif not isinstance(data[key], dict):
+        problems.append(f"{where}.{key}: must be an object")
+    else:
+        return data[key]
+    return None
+
+
+def _object_items(report: dict, key: str, problems: list[str]) -> list[tuple[int, dict]]:
+    if key not in report:
+        problems.append(f"{key}: missing")
+        return []
+    if not isinstance(report[key], list):
+        problems.append(f"{key}: must be a list")
+        return []
+    items = []
+    for index, item in enumerate(report[key]):
+        if isinstance(item, dict):
+            items.append((index, item))
+        else:
+            problems.append(f"{key}[{index}]: must be an object")
+    return items
+
+
+def _duplicate_ids(items: list[tuple[int, dict]], key: str, problems: list[str]) -> None:
+    seen: set[str] = set()
+    for index, item in items:
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id in seen:
+            problems.append(f"{key}[{index}].id: duplicate id {item_id}")
+        if isinstance(item_id, str):
+            seen.add(item_id)
+
+
+# --- shape ---------------------------------------------------------------------------------
+
+def _check_shape(report: dict, problems: list[str]) -> dict[str, list[tuple[int, dict]]]:
+    _choice_field(report, "status", STATUSES, "report", problems)
+    summary = _dict_field(report, "summary", "report", problems)
+    if summary is not None:
+        for key in ("what_broke", "impact", "scope"):
+            _text_field(summary, key, "summary", problems)
+        if "top_cause" not in summary:
+            problems.append("summary.top_cause: missing")
+        elif summary["top_cause"] is not None and not isinstance(summary["top_cause"], str):
+            problems.append("summary.top_cause: must be text or null")
+    if "symptoms" not in report:
+        problems.append("symptoms: missing")
+    elif not isinstance(report["symptoms"], list) or not all(isinstance(item, str) for item in report["symptoms"]):
+        problems.append("symptoms: must be a list of text")
+    elif not any(item.strip() for item in report["symptoms"]):
+        problems.append("symptoms: needs at least one non-empty symptom")
+
+    causes = _object_items(report, "causes", problems)
+    for index, cause in causes:
+        where = f"causes[{index}]"
+        _text_field(cause, "id", where, problems)
+        _text_field(cause, "statement", where, problems)
+        _choice_field(cause, "label", LABEL_ORDER, where, problems)
+        _string_list_field(cause, "supporting", where, problems)
+        _string_list_field(cause, "contradicting", where, problems)
+    hypotheses = _object_items(report, "hypotheses", problems)
+    for index, hypothesis in hypotheses:
+        where = f"hypotheses[{index}]"
+        for key in ("id", "statement", "prediction", "test"):
+            _text_field(hypothesis, key, where, problems)
+        _choice_field(hypothesis, "result", HYPOTHESIS_RESULTS, where, problems)
+        _string_list_field(hypothesis, "finding_ids", where, problems)
+    actions = _object_items(report, "actions", problems)
+    for index, action in actions:
+        _check_action_shape(action, f"actions[{index}]", problems)
+
+    if "open_questions" not in report:
+        problems.append("open_questions: missing")
+    else:
+        _string_list_field(report, "open_questions", "report", problems)
+    coverage = _dict_field(report, "coverage", "report", problems)
+    if coverage is not None:
+        _check_coverage_shape(coverage, problems)
+    if "map_changes" not in report:
+        problems.append("map_changes: missing")
+    elif not isinstance(report["map_changes"], list):
+        problems.append("map_changes: must be a list")
+    run = _dict_field(report, "run", "report", problems)
+    if run is not None:
+        _text_field(run, "engineer", "run", problems, required_text=False)
+        if "duration_minutes" not in run:
+            problems.append("run.duration_minutes: missing")
+        elif not _is_number(run["duration_minutes"]):
+            problems.append("run.duration_minutes: must be a number")
+    for key, items in (("causes", causes), ("hypotheses", hypotheses), ("actions", actions)):
+        _duplicate_ids(items, key, problems)
+    return {"causes": causes, "hypotheses": hypotheses, "actions": actions}
+
+
+def _check_action_shape(action: dict, where: str, problems: list[str]) -> None:
+    _text_field(action, "id", where, problems)
+    _choice_field(action, "type", ACTION_TYPES, where, problems)
+    _choice_field(action, "label", ACTION_LABELS, where, problems)
+    _text_field(action, "cause", where, problems)
+    for key in ACTION_TEXT_KEYS:
+        _text_field(action, key, where, problems)
+    target = _dict_field(action, "target", where, problems)
+    if target is not None:
+        for key in TARGET_KEYS:
+            _text_field(target, key, f"{where}.target", problems,
+                        required_text=key in ("account_alias", "region", "service", "resource_id"))
+    _string_list_field(action, "finding_ids", where, problems)
+    for key in ACTION_LIST_KEYS:
+        _string_list_field(action, key, where, problems, at_least_one=key in ("verification", "rollback"))
+
+
+def _check_coverage_shape(coverage: dict, problems: list[str]) -> None:
+    _text_field(coverage, "typesafe", "coverage", problems)
+    typesafe = coverage.get("typesafe")
+    if isinstance(typesafe, str) and typesafe != "available" and not typesafe.startswith(TYPESAFE_UNAVAILABLE_PREFIX):
+        problems.append(f"coverage.typesafe: must be 'available' or start with '{TYPESAFE_UNAVAILABLE_PREFIX}'")
+    if "not_checked" not in coverage:
+        problems.append("coverage.not_checked: missing")
+    elif not isinstance(coverage["not_checked"], list):
+        problems.append("coverage.not_checked: must be a list")
+    else:
+        for index, entry in enumerate(coverage["not_checked"]):
+            if not isinstance(entry, dict):
+                problems.append(f"coverage.not_checked[{index}]: must be an object")
+                continue
+            for key in ("what", "why"):
+                _text_field(entry, key, f"coverage.not_checked[{index}]", problems)
+
+
+# --- consistency --------------------------------------------------------------------------
+
+def _strength(label: Any) -> int:
+    return LABEL_ORDER.index(label) if label in LABEL_ORDER else -1
+
+
+def _check_finding_ids(items: list[tuple[int, dict]], section: str, keys: tuple[str, ...],
+                       findings: dict[str, dict], problems: list[str]) -> None:
+    for index, item in items:
+        for key in keys:
+            ids = item.get(key)
+            for finding_id in ids if isinstance(ids, list) else []:
+                if isinstance(finding_id, str) and finding_id not in findings:
+                    problems.append(
+                        f"{section}[{index}].{key}: {finding_id} is not a valid finding "
+                        "(it does not exist or failed its evidence check)")
+
+
+def _check_causes(parts: dict, findings: dict[str, dict], problems: list[str]) -> None:
+    for index, cause in parts["causes"]:
+        label, name = cause.get("label"), cause.get("id", index)
+        supporting = [i for i in cause.get("supporting", []) if i in findings] if isinstance(cause.get("supporting"), list) else []
+        contradicting = cause.get("contradicting") if isinstance(cause.get("contradicting"), list) else []
+        if label in ("confirmed", "probable") and not supporting:
+            problems.append(f"causes[{index}] ({name}): labelled {label} but has no supporting finding")
+        if label == "confirmed":
+            if contradicting:
+                problems.append(f"causes[{index}] ({name}): labelled confirmed but has a contradicting finding")
+            if not any(findings[i].get("provenance") == "incident_time" for i in supporting):
+                problems.append(f"causes[{index}] ({name}): labelled confirmed but no supporting finding has provenance incident_time")
+
+
+def _check_status(report: dict, parts: dict, problems: list[str]) -> None:
+    status = report.get("status")
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    top = summary.get("top_cause")
+    causes = {cause.get("id"): cause for _, cause in parts["causes"]}
+    results = [h.get("result") for _, h in parts["hypotheses"]]
+    if status == "cause_found":
+        if top not in causes:
+            problems.append(f"summary.top_cause: {top!r} is not a cause id")
+        elif causes[top].get("label") not in ("confirmed", "probable"):
+            problems.append(f"summary.top_cause: the top cause {top} must be labelled confirmed or probable")
+        if "confirmed" not in results:
+            problems.append("status is cause_found but no hypothesis has the result confirmed")
+    if results.count("rejected") >= 3 and "confirmed" not in results and status != "unresolved":
+        problems.append("status: three or more hypotheses were rejected and none confirmed, so status must be unresolved")
+    if status == "unresolved":
+        if top not in (None, ""):
+            problems.append("summary.top_cause: must be null or empty when status is unresolved")
+        for index, cause in parts["causes"]:
+            if cause.get("label") == "confirmed":
+                problems.append(f"causes[{index}]: status is unresolved, so no cause may be labelled confirmed")
+        for index, action in parts["actions"]:
+            if action.get("label") == "recommended":
+                problems.append(f"actions[{index}]: status is unresolved, so no action may be labelled recommended")
+
+
+def _check_actions(config: TriageConfig, parts: dict, findings: dict[str, dict], problems: list[str]) -> None:
+    causes = {cause.get("id"): cause for _, cause in parts["causes"]}
+    for index, action in parts["actions"]:
+        where = f"actions[{index}]"
+        cause = causes.get(action.get("cause"))
+        if cause is None:
+            problems.append(f"{where}.cause: {action.get('cause')!r} is not a cause id")
+        elif action.get("label") == "recommended" and cause.get("label") != "confirmed":
+            problems.append(f"{where}: recommended, but cause {action['cause']} is not labelled confirmed")
+        target = action.get("target") if isinstance(action.get("target"), dict) else {}
+        alias = target.get("account_alias")
+        if isinstance(alias, str) and alias.strip() and alias not in config.accounts:
+            problems.append(f"{where}.target.account_alias: {alias!r} is not an account in the config")
+        ids = action.get("finding_ids")
+        if isinstance(ids, list) and not any(i in findings for i in ids):
+            problems.append(f"{where}.finding_ids: needs at least one valid finding")
+
+
+def _check_typesafe(report: dict, parts: dict, problems: list[str]) -> None:
+    coverage = report.get("coverage") if isinstance(report.get("coverage"), dict) else {}
+    typesafe = coverage.get("typesafe")
+    if isinstance(typesafe, str) and typesafe.startswith(TYPESAFE_UNAVAILABLE_PREFIX):
+        for index, cause in parts["causes"]:
+            if cause.get("label") == "confirmed":
+                problems.append(f"causes[{index}]: TypeSafe was unavailable, so no cause may be labelled confirmed")
+
+
+def _check_judged_labels(case: dict, parts: dict, problems: list[str]) -> None:
+    path = Path(case.get("case_dir", "")) / "judgments" / SUMMARY_NAME
+    if not path.is_file():
+        return
+    try:
+        judged = json.loads(path.read_text())["causes"]
+        if not isinstance(judged, dict):
+            raise TypeError
+    except (OSError, ValueError, KeyError, TypeError):
+        problems.append(f"judgments/{SUMMARY_NAME}: cannot be read as a judgments summary, so labels cannot be checked")
+        return
+    for index, cause in parts["causes"]:
+        label, name = cause.get("label"), cause.get("id")
+        entry = judged.get(name)
+        if not isinstance(entry, dict):
+            if _strength(label) > 0:
+                problems.append(f"causes[{index}] ({name}): not in judgments/{SUMMARY_NAME}, so at most candidate; labelled {label}")
+        elif _strength(label) > _strength(entry.get("label")):
+            problems.append(f"causes[{index}] ({name}): labelled {label}, stronger than the judged label {entry.get('label')}")
+
+
+def _walk_text(value: Any, path: str):
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _walk_text(item, f"{path}.{key}" if path else str(key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _walk_text(item, f"{path}[{index}]")
+
+
+def _check_secrets(report: dict, problems: list[str]) -> None:
+    for path, text in _walk_text(report, ""):
+        categories = sorted({hit.category for hit in audit_text(text)})
+        if categories:
+            problems.append(f"{path}: contains what looks like a secret ({', '.join(categories)}); remove it")
+
+
+def validate_report(report: Any, case: dict, findings: dict[str, dict], config: TriageConfig) -> list[str]:
+    """Every problem that stops the report from being rendered. An empty list means it may be rendered."""
+    if not isinstance(report, dict):
+        return ["report: must be a JSON object"]
+    problems: list[str] = []
+    parts = _check_shape(report, problems)
+    _check_finding_ids(parts["causes"], "causes", ("supporting", "contradicting"), findings, problems)
+    _check_finding_ids(parts["hypotheses"], "hypotheses", ("finding_ids",), findings, problems)
+    _check_finding_ids(parts["actions"], "actions", ("finding_ids",), findings, problems)
+    _check_causes(parts, findings, problems)
+    _check_status(report, parts, problems)
+    _check_actions(config, parts, findings, problems)
+    _check_typesafe(report, parts, problems)
+    _check_judged_labels(case, parts, problems)
+    _check_secrets(report, problems)
+    return problems
+
+
+# --- work order ---------------------------------------------------------------------------
+
+def _top_cause(report: dict) -> dict | None:
+    top = report["summary"].get("top_cause")
+    return next((cause for cause in report["causes"] if cause["id"] == top), None) if top else None
+
+
+def build_work_order(report: dict, case: dict, now: datetime) -> dict:
+    """The machine-readable work order for an agent that never saw the investigation."""
+    incident = case["incident"]
+    top = _top_cause(report)
+    cause = (
+        {"statement": top["statement"], "label": top["label"], "finding_ids": list(top["supporting"])}
+        if top else {"statement": NO_CAUSE_TEXT, "label": "unresolved", "finding_ids": []}
+    )
+    gaps = [f"{entry['what']}: {entry['why']}" for entry in report["coverage"]["not_checked"]]
+    typesafe = report["coverage"]["typesafe"]
+    if typesafe.startswith(TYPESAFE_UNAVAILABLE_PREFIX):
+        gaps.append(f"TypeSafe {typesafe}")
+    return {
+        "incident": {"number": incident["number"], "title": incident["title"], "url": incident.get("url") or ""},
+        "generated_at": format_time(now),
+        "skill_version": case["skill_version"],
+        "cause": cause,
+        "actions": [{key: copy.deepcopy(value) for key, value in action.items() if key != "cause"}
+                    for action in report["actions"]],
+        "open_questions": list(report["open_questions"]),
+        "coverage_gaps": gaps,
+    }
+
+
+def validate_work_order(work_order: Any) -> list[str]:
+    """Check a work order against the structure in the design spec."""
+    if not isinstance(work_order, dict):
+        return ["work order: must be a JSON object"]
+    problems: list[str] = []
+    incident = _dict_field(work_order, "incident", "work order", problems)
+    if incident is not None:
+        _text_field(incident, "number", "incident", problems)
+        _text_field(incident, "title", "incident", problems)
+        _text_field(incident, "url", "incident", problems, required_text=False)
+    _text_field(work_order, "skill_version", "work order", problems)
+    if "generated_at" not in work_order:
+        problems.append("work order.generated_at: missing")
+    else:
+        try:
+            parse_time(work_order["generated_at"])
+        except WindowError:
+            problems.append("work order.generated_at: not a valid UTC time")
+    cause = _dict_field(work_order, "cause", "work order", problems)
+    if cause is not None:
+        _text_field(cause, "statement", "cause", problems)
+        _choice_field(cause, "label", WORK_ORDER_CAUSE_LABELS, "cause", problems)
+        _string_list_field(cause, "finding_ids", "cause", problems)
+    if "actions" not in work_order:
+        problems.append("work order.actions: missing")
+    elif not isinstance(work_order["actions"], list):
+        problems.append("work order.actions: must be a list")
+    else:
+        for index, action in enumerate(work_order["actions"]):
+            if not isinstance(action, dict):
+                problems.append(f"actions[{index}]: must be an object")
+                continue
+            _check_action_shape({**action, "cause": "-"}, f"actions[{index}]", problems)
+    for key in ("open_questions", "coverage_gaps"):
+        _string_list_field(work_order, key, "work order", problems)
+    return problems
+
+
+# --- evidence coverage --------------------------------------------------------------------
+
+TRUNCATED_CODE = "truncated"
+
+
+def coverage_from_evidence(case_dir: Path) -> list[dict]:
+    """Evidence errors grouped by code, then files marked truncated, as [{"code", "entries"}] sorted by code."""
+    groups: dict[str, list[dict]] = {}
+    for file_name, document in evidence_documents(case_dir):
+        for error in document.get("errors") or []:
+            if isinstance(error, dict):
+                groups.setdefault(str(error.get("code", "unknown")), []).append(
+                    {"file": file_name, "command": str(error.get("command", "")), "message": str(error.get("message", ""))})
+        if document.get("truncated"):
+            groups.setdefault(TRUNCATED_CODE, []).append(
+                {"file": file_name, "command": "", "message": "evidence was cut off at the fact limit; later facts are missing"})
+    return [{"code": code, "entries": groups[code]} for code in sorted(groups)]
+
+
+# --- rendering ----------------------------------------------------------------------------
+
+def _inline(value: Any) -> str:
+    """One line of text: whitespace collapsed so a field cannot start a heading or break a list."""
+    return " ".join(str(value).split())
+
+
+def _cell(value: Any) -> str:
+    return _inline(value).replace("|", "\\|")
+
+
+def _bullets(items: list[str]) -> list[str]:
+    return [f"- {_inline(item)}" for item in items] or ["None."]
+
+
+def _field(label: str, value: Any) -> str:
+    return f"- {label}: {_inline(value) if value not in (None, '') else '-'}"
+
+
+def _render_summary(report: dict) -> list[str]:
+    summary = report["summary"]
+    top = _top_cause(report)
+    lines = ["## 1. Summary", "", f"**What broke:** {_inline(summary['what_broke'])}", "",
+             f"**Impact:** {_inline(summary['impact'])}", "", f"**Scope:** {_inline(summary['scope'])}", "",
+             "**Symptoms:**", ""]
+    lines += _bullets(report["symptoms"])
+    lines.append("")
+    if top:
+        lines.append(f"**Top cause ({top['label']}):** {top['id']}: {_inline(top['statement'])}")
+    else:
+        lines.append(f"**Top cause:** {NO_CAUSE_TEXT}")
+    return lines
+
+
+def _render_incident(case: dict) -> list[str]:
+    incident, window, target = case["incident"], case["window"], case.get("target")
+    lines = ["## 2. Incident and window", "",
+             _field("Number", incident["number"]), _field("Title", incident["title"]), _field("Link", incident.get("url")),
+             _field("Severity", incident.get("severity")), _field("State", incident.get("state")),
+             _field("Impact started", incident.get("impact_started_at")), _field("Declared", incident.get("declared_at")),
+             _field("Resolved", incident.get("resolved_at")),
+             _field("Window examined", f"{window['start']} to {window['end']}")]
+    if target:
+        found = "from the service map" if target.get("source") == "map" else "found by discovery"
+        name = target.get("service") or "unnamed service"
+        lines.append(_field("Target", f"{name} in account {target['account']}, region {target['region']} ({found})"))
+    else:
+        lines.append(_field("Target", "none was chosen"))
+    return lines
+
+
+def _render_findings(findings: dict[str, dict], facts: dict[str, dict]) -> list[str]:
+    lines = ["## 4. Findings", ""]
+    if not findings:
+        return lines + ["None."]
+    by_analyst: dict[str, list[dict]] = {}
+    for finding in findings.values():
+        by_analyst.setdefault(finding.get("analyst", "unknown"), []).append(finding)
+    for analyst in sorted(by_analyst):
+        lines += [f"### {_inline(analyst)}", ""]
+        for finding in by_analyst[analyst]:
+            lines += [f"**{finding['id']}**: {_inline(finding['claim'])}", "",
+                      _field("Provenance", finding["provenance"]), _field("Confidence", finding["confidence"]),
+                      _field("Cited facts", ", ".join(finding["fact_ids"]))]
+            for fact_id in finding["fact_ids"]:
+                fact = facts.get(fact_id)
+                if fact is None:
+                    lines.append(f"  - {fact_id}: fact not found")
+                    continue
+                lines.append(f"  - {fact_id}: command `{_inline(fact.get('command') or '-')}`, resource {_inline(fact.get('resource') or '-')}, "
+                             f"time {fact.get('time') or '-'}, excerpt: {_inline(fact.get('excerpt') or fact.get('summary') or '-')}")
+            lines.append("")
+        lines.pop()
+    return lines
+
+
+def _hypothesis_table(hypotheses: list[dict]) -> list[str]:
+    lines = ["| Hypothesis | Prediction | Test | Result |", "| --- | --- | --- | --- |"]
+    for item in hypotheses:
+        lines.append(f"| {_cell(item['id'])}: {_cell(item['statement'])} | {_cell(item['prediction'])} | "
+                     f"{_cell(item['test'])} | {_cell(item['result'])} |")
+    return lines
+
+
+def _render_causes(report: dict) -> list[str]:
+    lines = ["## 5. Ranked causes", ""]
+    if not report["causes"]:
+        return lines + ["None."]
+    claimed: set[str] = set()
+    for rank, cause in enumerate(report["causes"], 1):
+        cited = set(cause["supporting"]) | set(cause["contradicting"])
+        tested = [h for h in report["hypotheses"] if cited & set(h["finding_ids"])]
+        claimed.update(h["id"] for h in tested)
+        lines += [f"### {rank}. {cause['id']} ({cause['label']}): {_inline(cause['statement'])}", "",
+                  _field("Supporting findings", ", ".join(cause["supporting"]) or "none"),
+                  _field("Contradicting findings", ", ".join(cause["contradicting"]) or "none"), ""]
+        lines += _hypothesis_table(tested) if tested else ["No hypothesis cites this cause's findings."]
+        lines.append("")
+    others = [h for h in report["hypotheses"] if h["id"] not in claimed]
+    if others:
+        lines += ["### Other hypotheses", ""] + _hypothesis_table(others) + [""]
+    return lines[:-1]
+
+
+def _render_action(action: dict) -> list[str]:
+    target = action["target"]
+    lines = [f"### {action['id']}: {_inline(action['title'])}", ""]
+    if action["label"] == "candidate":
+        lines += ["**Candidate: needs more evidence before anyone acts on it.**", ""]
+    lines += [_field("Type", action["type"]), _field("Label", action["label"]), _field("Cause", action["cause"]),
+              _field("Account", f"{target['account_alias']} ({target['account_id'] or '-'})"),
+              _field("Region", target["region"]), _field("Service", target["service"]),
+              _field("Resource", target["resource_id"]), _field("ARN", target["arn"]),
+              _field("Current state", action["current_state"]), _field("Required state", action["required_state"]),
+              _field("Change", action["change"]), _field("Rationale", action["rationale"]),
+              _field("Findings", ", ".join(action["finding_ids"])), _field("Risk", action["risk"]),
+              _field("Blast radius", action["blast_radius"])]
+    for key, label in (("preconditions", "Preconditions"), ("verification", "Verification"), ("rollback", "Rollback")):
+        lines.append(f"- {label}:")
+        lines += [f"  - {_inline(step)}" for step in action[key]] or ["  - None."]
+    return lines
+
+
+def _render_actions(report: dict) -> list[str]:
+    lines = ["## 6. Remediation work order", ""]
+    ordered = [a for kind in ACTION_TYPES for a in report["actions"] if a["type"] == kind]
+    if not ordered:
+        return lines + ["None."]
+    for action in ordered:
+        lines += _render_action(action) + [""]
+    return lines[:-1]
+
+
+def _rejected_findings(case: dict) -> list[dict]:
+    try:
+        checked = json.loads((Path(case["case_dir"]) / "findings" / "checked.json").read_text())
+    except (OSError, ValueError, KeyError):
+        return []
+    rejected = checked.get("rejected") if isinstance(checked, dict) else None
+    return [item for item in rejected or [] if isinstance(item, dict)]
+
+
+def _render_coverage(report: dict, case: dict, evidence_gaps: list[dict]) -> list[str]:
+    lines = ["## 7. Coverage notes", "", "**Not checked**", ""]
+    lines += _bullets([f"{e['what']}: {e['why']}" for e in report["coverage"]["not_checked"]])
+    lines += ["", "**Evidence errors**", ""]
+    entries = [f"{gap['code']}: `{_inline(e['command'] or e['file'])}` ({_inline(e['message'])})"
+               for gap in evidence_gaps for e in gap["entries"]]
+    lines += _bullets(entries)
+    typesafe = report["coverage"]["typesafe"]
+    lines += ["", "**TypeSafe**", "", "TypeSafe was available." if typesafe == "available" else f"TypeSafe {_inline(typesafe)}",
+              "", "**Rejected findings**", ""]
+    lines += _bullets([f"{r.get('analyst', '?')} {r.get('id')}: {'; '.join(map(str, r.get('reasons', [])))}"
+                       for r in _rejected_findings(case)])
+    lines += ["", "**Open questions**", ""] + _bullets(report["open_questions"])
+    return lines
+
+
+def _render_map_changes(report: dict) -> list[str]:
+    changes = [item if isinstance(item, str) else json.dumps(item, sort_keys=True) for item in report["map_changes"]]
+    return ["## 8. Proposed service map changes", ""] + _bullets(changes)
+
+
+def _render_run(report: dict, case: dict, now: datetime) -> list[str]:
+    run = report["run"]
+    return ["## 9. Run details", "", _field("Engineer", run["engineer"]),
+            _field("Duration", f"{run['duration_minutes']} minutes"), _field("Skill version", case["skill_version"]),
+            _field("Case folder", case["case_dir"]), _field("Report rendered", format_time(now))]
+
+
+def render_report(report: dict, case: dict, findings: dict[str, dict], timeline_rows: list[dict],
+                  evidence_gaps: list[dict], now: datetime) -> str:
+    """The fixed-format Markdown report. Facts and rejected findings are read from the case folder."""
+    from triage.timeline import render_rows
+
+    incident = case["incident"]
+    facts = load_facts(Path(case["case_dir"]))
+    blocks = [
+        [f"{REQUIRED_HEADINGS[0]} {_inline(incident['number'])} {_inline(incident['title'])}"],
+        _render_summary(report),
+        _render_incident(case),
+        ["## 3. Timeline", "", render_rows(timeline_rows) if timeline_rows else "None."],
+        _render_findings(findings, facts),
+        _render_causes(report),
+        _render_actions(report),
+        _render_coverage(report, case, evidence_gaps),
+        _render_map_changes(report),
+        _render_run(report, case, now),
+    ]
+    text = "\n\n".join("\n".join(block) for block in blocks) + "\n"
+    return Redactor().text(text)

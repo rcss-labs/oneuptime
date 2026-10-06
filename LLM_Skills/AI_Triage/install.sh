@@ -98,9 +98,13 @@ check_destination() {
   if [[ -L "${dest_dir}" ]]; then
     fail "${EXIT_FAILURE}" "${message}"
   fi
-  [[ -d "${dest_dir}" ]] || return 0
+  # Judge the nearest existing ancestor, so a linked ~/.claude is caught before the folder exists.
+  local nearest="${dest_dir}"
+  while [[ ! -d "${nearest}" ]]; do
+    nearest="$(dirname "${nearest}")"
+  done
   local physical_dest physical_source
-  physical_dest="$(cd "${dest_dir}" && pwd -P)"
+  physical_dest="$(cd "${nearest}" && pwd -P)"
   physical_source="$(cd "${source_dir}" && pwd -P)"
   if [[ "${physical_dest}" == "${physical_source}" || "${physical_dest}" == "${physical_source}/"* ]]; then
     fail "${EXIT_FAILURE}" "${message}"

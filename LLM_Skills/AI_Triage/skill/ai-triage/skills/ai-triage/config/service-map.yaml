@@ -1,0 +1,53 @@
+# Copy to service-map.yaml and replace with your services.
+# A match block on the service applies to every environment. An environment may
+# carry its own match block when monitors differ per environment.
+services:
+  checkout-api:
+    match:
+      labels: ["checkout"]
+    environments:
+      prod:
+        match:
+          monitors: ["Checkout API"]
+          hostnames: ["checkout.example.com"]
+        account: prod-main
+        region: eu-west-1
+        resources:
+          ecs_service: checkout/checkout-api
+          load_balancer: checkout-prod
+          rds: checkout-prod-db
+          elasticache: checkout-prod-redis
+          log_groups: ["/ecs/checkout-api"]
+          opensearch:
+            cluster: logs-prod
+            index_pattern: "app-logs-checkout-*"
+            filter: {service: checkout-api}
+        depends_on: ["payments-api"]
+      staging:
+        match:
+          monitors: ["Checkout API (staging)"]
+          hostnames: ["checkout.staging.example.com"]
+        account: staging
+        region: eu-west-1
+        resources:
+          ecs_service: checkout/checkout-api
+          log_groups: ["/ecs/checkout-api"]
+    source: confirmed          # confirmed | discovered
+    last_verified: 2026-10-04
+  payments-api:
+    match:
+      monitors: ["Payments API"]
+      hostnames: ["payments.example.com"]
+    environments:
+      prod:
+        account: prod-main
+        region: eu-west-1
+        resources:
+          eks:
+            cluster: platform-prod
+            namespace: payments
+            workloads: ["deployment/payments-api"]
+          dynamodb_tables: ["payments-ledger"]
+          sqs_queues: ["payments-events"]
+    source: discovered
+    last_verified: 2026-10-04

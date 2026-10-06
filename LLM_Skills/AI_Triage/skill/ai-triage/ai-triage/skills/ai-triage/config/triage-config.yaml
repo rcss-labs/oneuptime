@@ -1,0 +1,52 @@
+# Copy to triage-config.yaml and replace every value. This file holds no secrets.
+oneuptime:
+  url: https://oneuptime.example.com
+
+# Name of the IAM Identity Center permission set the triage profiles use.
+permission_set: ai-triage-read-only
+
+accounts:
+  prod-main:
+    account_id: "111111111111"
+    profile: triage-prod-main
+    regions: [eu-west-1, us-east-1]
+  staging:
+    account_id: "222222222222"
+    profile: triage-staging
+    regions: [eu-west-1]
+
+opensearch_clusters:
+  logs-prod:
+    account: prod-main
+    endpoint: https://opensearch.internal.example.com
+    allowed_index_patterns: ["app-logs-*"]
+    time_field: "@timestamp"
+    verify_tls: true
+
+eks_clusters:
+  platform-prod:
+    account: prod-main
+    region: eu-west-1
+    context: triage-platform-prod
+
+confluence:
+  space_key: OPS
+  parent_page_id: "123456"
+
+slack:
+  default_channel: "#incidents"
+
+cases_dir: ~/.ai-triage/cases
+
+limits:
+  max_window_hours: 6
+  logs_insights_max_log_groups: 5
+  opensearch_max_hits: 50
+  opensearch_timeout_seconds: 10
+
+typesafe:
+  model: jev-latest
+  thresholds:   # uncalibrated starting values
+    evidence_supports: 0.8
+    cause_top_probability: 0.6
+    ask_engineer_below: 0.5
