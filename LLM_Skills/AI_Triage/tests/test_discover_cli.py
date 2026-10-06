@@ -3,6 +3,7 @@ import json
 import pytest
 import yaml
 
+from triage import cli
 from triage.commands import discover
 from fakes import SSO_EXPIRED_ERROR, FakeAws
 from test_discover import HOSTNAME, dns_answers, full_walk, lb_answers
@@ -17,7 +18,8 @@ def skill_dir(tmp_path, config_data):
 
 
 def run(skill_dir, capsys, runner, *extra, hostname=HOSTNAME):
-    code = discover.main(["--hostname", hostname, "--skill-dir", str(skill_dir), *extra], runner=runner)
+    code = cli.run(lambda args: discover.main(args, runner=runner),
+                   ["--hostname", hostname, "--skill-dir", str(skill_dir), *extra], name="discover")
     captured = capsys.readouterr()
     return code, captured.out, captured.err
 

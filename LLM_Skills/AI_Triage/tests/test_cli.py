@@ -70,6 +70,21 @@ def test_config_case_and_map_errors_exit_2_with_their_lines(capsys):
         assert "Traceback" not in err and all(line in err for line in error.errors)
 
 
+def test_a_usage_error_exits_2_with_its_one_line(capsys):
+    def main(argv=None):
+        raise cli.UsageError("a: bad; b: bad")
+    assert cli.run(main, [], name="probe") == 2
+    assert capsys.readouterr().err == "a: bad; b: bad\n"
+
+
+def test_open_case_refuses_a_folder_outside_the_cases_root_in_one_line(skill_dir, tmp_path):
+    from triage.commands.common import load_skill_config, open_case
+
+    with pytest.raises(cli.UsageError) as raised:
+        open_case(tmp_path, load_skill_config(skill_dir))
+    assert str(raised.value) == f"{tmp_path}: not a case folder under {(tmp_path / 'cases').resolve()}"
+
+
 def test_an_os_error_exits_2_with_the_path_and_the_reason(capsys):
     def main(argv=None):
         raise PermissionError(13, "Permission denied", "/cases/inc/run/evidence/x.json")

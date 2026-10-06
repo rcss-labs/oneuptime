@@ -34,8 +34,7 @@ from triage.redact import Redactor
 from triage.service_map import MapError, ServiceMap, default_map_path, load_map
 from triage.window import WindowError
 from triage.cli import add_exit_codes
-from triage.commands.common import SKILL_DIR
-
+from triage.commands.common import SKILL_DIR, fail
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,11 +54,6 @@ def build_parser() -> argparse.ArgumentParser:
     adhoc.add_argument("--question-file", type=Path, required=True, help="JSON with id, reason, state, and question")
     add_exit_codes(parser)
     return parser
-
-
-def _fail(message: str, code: int) -> int:
-    print(message, file=sys.stderr)
-    return code
 
 
 def _session(args: argparse.Namespace, config, judge: Judge | None) -> JudgeSession:
@@ -125,10 +119,10 @@ def main(argv: list[str] | None = None, judge: Judge | None = None) -> int:
         check_replay(load_case(args.case_dir))
         return handler(args, config, judge)
     except (ConfigError, MapError, CaseError) as error:
-        return _fail("\n".join(error.errors), 2)
+        return fail("\n".join(error.errors), 2)
     except WindowError as error:
-        return _fail(str(error), 2)
+        return fail(str(error), 2)
     except DraftRuleError as error:
-        return _fail("\n".join(error.errors), 2)
+        return fail("\n".join(error.errors), 2)
     except (JudgmentError, QuestionError) as error:
-        return _fail("\n".join(error.errors), 1)
+        return fail("\n".join(error.errors), 1)

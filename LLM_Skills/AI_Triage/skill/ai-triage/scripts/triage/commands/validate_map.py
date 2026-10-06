@@ -14,7 +14,6 @@ from triage.cli import add_exit_codes
 from triage.commands.common import SKILL_DIR
 
 
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="run.py validate_map", description="Validate triage-config.yaml and service-map.yaml."

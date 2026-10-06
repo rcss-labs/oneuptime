@@ -6,15 +6,12 @@ Exit codes: 0 done, 2 usage or config error, 5 refused by the read policy, 6 clu
 from __future__ import annotations
 
 import argparse
-import json
 import shlex
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
-from triage.config import ConfigError, default_config_path, load_config
-from triage.case import CaseError, check_replay, resolve_case_dir
 from triage.evidence import Evidence, EvidenceExists
 from triage.fixtures import FixtureError, fixture_dir, replay_banner, transport_from_env
 from triage.opensearch import queries
@@ -23,14 +20,8 @@ from triage.opensearch.policy import Refused
 from triage.redact import Redactor
 from triage.window import Window, WindowError, make_window
 from triage.cli import add_exit_codes
-from triage.commands.common import SKILL_DIR
+from triage.commands.common import SKILL_DIR, fail, load_skill_config, open_case
 
-
-
-def _read_case(case_dir: Path) -> dict:
-    """case.json as a dict, so its replay state can be compared with the session's before anything is collected."""
-    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
-    return case if isinstance(case, dict) else {}
 INTERVALS = ("1m", "5m", "15m", "1h")
 STATE_WINDOW = timedelta(minutes=1)
 STATE_NOTE = "Reads the current state; takes no time range."
@@ -101,11 +92,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _fail(message: str, code: int) -> int:
-    print(message, file=sys.stderr)
-    return code
-
-
 def _window_for(args: argparse.Namespace, max_hours: int) -> Window:
     if getattr(args, "start", None):
         return make_window(args.start, args.end, max_hours)
@@ -165,44 +151,38 @@ def main(argv: list[str] | None = None, transport: Transport | None = None) -> i
     except FixtureError as error:
         print(error, file=sys.stderr)
         return 2
-    try:
-        config = load_config(default_config_path(args.skill_dir))
-    except ConfigError as error:
-        return _fail("; ".join(error.errors), 2)
+    config = load_skill_config(args.skill_dir)
     cluster = config.opensearch_clusters.get(args.cluster)
     if cluster is None:
-        return _fail(f"unknown cluster {args.cluster}; configured: {', '.join(config.opensearch_clusters) or 'none'}", 2)
+        return fail(f"unknown cluster {args.cluster}; configured: {', '.join(config.opensearch_clusters) or 'none'}", 2)
     try:
         window = _window_for(args, config.limits["max_window_hours"])
     except WindowError as error:
-        return _fail(str(error), 2)
+        return fail(str(error), 2)
     evidence = Evidence("opensearch", cluster.account, cluster.name, window, replay=replay is not None)
     if args.case_dir:
+        args.case_dir, _ = open_case(args.case_dir, config)
         try:
-            args.case_dir = resolve_case_dir(args.case_dir, config)
-            check_replay(_read_case(args.case_dir))
             evidence.ensure_new(args.case_dir, args.suffix)
-        except CaseError as error:
-            return _fail("; ".join(error.errors), 2)
         except (OSError, ValueError) as error:
-            return _fail(f"cannot read case.json in {args.case_dir}: {error}", 2)
+            return fail(f"cannot read case.json in {args.case_dir}: {error}", 2)
         except EvidenceExists as error:
-            return _fail(str(error), 2)
+            return fail(str(error), 2)
     client = OpenSearchClient(cluster, config.limits, transport=transport or urllib_transport)
     ctx = queries.QueryContext(client, cluster, config.limits, window, evidence, _invocation(args))
     try:
         _runner(args)(ctx)
     except Refused as refusal:
-        return _fail(f"refused by the read policy: {refusal}", 5)
+        return fail(f"refused by the read policy: {refusal}", 5)
     except OpenSearchError as error:
-        return _fail(f"OpenSearch error: {Redactor().text(str(error))}", 6)
+        return fail(f"OpenSearch error: {Redactor().text(str(error))}", 6)
     except (KeyError, TypeError, AttributeError, ValueError, IndexError, OverflowError, OSError) as error:
-        return _fail(f"unexpected response from the cluster ({type(error).__name__})", 6)
+        return fail(f"unexpected response from the cluster ({type(error).__name__})", 6)
     if args.case_dir:
         try:
             path = evidence.write_new(args.case_dir, args.suffix)
         except EvidenceExists as error:
-            return _fail(str(error), 2)
+            return fail(str(error), 2)
         print(f"{path} facts={len(evidence.facts)} errors={len(evidence.errors)} truncated={evidence.truncated}")
     else:
         print(evidence.to_json())

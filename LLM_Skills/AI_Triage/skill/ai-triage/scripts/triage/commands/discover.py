@@ -10,13 +10,13 @@ import sys
 from pathlib import Path
 
 from triage.awscli import Runner, subprocess_runner
-from triage.config import ConfigError, TriageConfig, default_config_path, load_config
+from triage.config import TriageConfig
 from triage.context import SignInExpired
 from triage.discover import discover_hostname
 from triage.service_map import MapError, parse_map
 from triage.fixtures import FixtureError, fixture_dir, replay_banner, kube_runner_from_env, runner_from_env
 from triage.cli import add_exit_codes
-from triage.commands.common import SKILL_DIR
+from triage.commands.common import SKILL_DIR, fail, load_skill_config
 
 INTAKE_DIR_NAME = "intake"
 OUTPUT_KEYS = {"discovery", "service_name", "proposed_entry", "validation"}
@@ -62,11 +62,6 @@ def _save_problem(path: Path, config: TriageConfig) -> str | None:
     return None
 
 
-def _fail(message: str, code: int) -> int:
-    print(message, file=sys.stderr)
-    return code
-
-
 def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runner: Runner | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -75,24 +70,21 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
             print(replay_banner(replay), file=sys.stderr)
         runner, kube_runner = runner or runner_from_env(), kube_runner or kube_runner_from_env()
     except FixtureError as error:
-        return _fail(str(error), 2)
-    try:
-        config = load_config(default_config_path(args.skill_dir))
-    except ConfigError as error:
-        return _fail("; ".join(error.errors), 2)
+        return fail(str(error), 2)
+    config = load_skill_config(args.skill_dir)
     unknown = [alias for alias in args.account if alias not in config.accounts]
     if unknown:
-        return _fail(f"unknown account {', '.join(unknown)}; configured: {', '.join(config.accounts)}", 2)
+        return fail(f"unknown account {', '.join(unknown)}; configured: {', '.join(config.accounts)}", 2)
     if args.save:
         problem = _save_problem(args.save, config)
         if problem:
-            return _fail(problem, 2)
+            return fail(problem, 2)
     try:
         discovery = discover_hostname(
             args.hostname, config, runner or subprocess_runner, args.account,
             kube_runner=kube_runner or subprocess_runner, skill_dir=args.skill_dir)
     except SignInExpired as expired:
-        return _fail(f"Sign-in expired. Run: aws sso login --profile {expired.profile}", 3)
+        return fail(f"Sign-in expired. Run: aws sso login --profile {expired.profile}", 3)
     found = bool(discovery.resources)
     entry = discovery.proposed_entry(args.monitor) if found else None
     problems = _validation_problems(entry, args.service_name or PLACEHOLDER_SERVICE_NAME, config) if entry else []

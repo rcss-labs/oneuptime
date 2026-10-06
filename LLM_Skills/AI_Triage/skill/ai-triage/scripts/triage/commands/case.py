@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,7 +27,7 @@ from triage.config import ConfigError, default_config_path, load_config
 from triage.service_map import MapError, ServiceMap, default_map_path, load_map
 from triage.window import WindowError, parse_time
 from triage.cli import add_exit_codes
-from triage.commands.common import SKILL_DIR
+from triage.commands.common import SKILL_DIR, fail
 
 SIGN_IN_EXPIRED = 3  # collect's exit code for an expired sign-in
 
@@ -75,11 +74,6 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--case-dir", type=Path, required=True)
     add_exit_codes(parser)
     return parser
-
-
-def _fail(message: str) -> int:
-    print(message, file=sys.stderr)
-    return 2
 
 
 def _read_json(path: Path):
@@ -167,8 +161,8 @@ def main(argv: list[str] | None = None) -> int:
                 check_replay(load_case(args.case_dir))
         return handler(args, config)
     except (ConfigError, MapError, CaseError) as error:
-        return _fail("; ".join(error.errors))
+        return fail("; ".join(error.errors), 2)
     except OSError as error:
-        return _fail(str(error).replace("\n", " "))
+        return fail(str(error).replace("\n", " "), 2)
     except WindowError as error:
-        return _fail(str(error))
+        return fail(str(error), 2)

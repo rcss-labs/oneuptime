@@ -35,7 +35,6 @@ from triage.cli import add_exit_codes
 from triage.commands.common import SKILL_DIR
 
 
-
 class InvalidReport(Exception):
     def __init__(self, problems: list[str]):
         self.problems = problems

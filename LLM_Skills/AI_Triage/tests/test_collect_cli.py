@@ -4,6 +4,7 @@ import textwrap
 import pytest
 import yaml
 
+from triage import cli
 from triage.commands import collect
 
 import triage.collectors as registry
@@ -11,6 +12,10 @@ from fakes import SSO_EXPIRED_ERROR, FakeAws
 from helpers import WINDOW_END, WINDOW_START
 from triage.collectors import Collector, all_collectors
 
+
+def run_collect(argv, **runners):
+    """collect's main through the command wrapper, as run.py calls it."""
+    return cli.run(lambda args: collect.main(args, **runners), argv, name="collect")
 
 
 @pytest.fixture
@@ -78,13 +83,13 @@ def test_registry_rejects_duplicate_names(tmp_path, monkeypatch):
 # command
 
 def test_list(capsys):
-    assert collect.main(["--list"]) == 0
+    assert run_collect(["--list"]) == 0
     out = capsys.readouterr().out
     assert any(line.startswith("ecs") and "cluster" in line and "service" in line for line in out.splitlines())
 
 
 def test_full_run_prints_json(skill_dir, fake_collector, capsys):
-    code = collect.main(args(skill_dir, "--target", "thing=x"), runner=FakeAws({}))
+    code = run_collect(args(skill_dir, "--target", "thing=x"), runner=FakeAws({}))
     assert code == 0
     document = json.loads(capsys.readouterr().out)
     assert document["collector"] == "fake"
@@ -94,18 +99,18 @@ def test_full_run_prints_json(skill_dir, fake_collector, capsys):
 
 
 def test_default_region_is_the_accounts_first(skill_dir, fake_collector):
-    collect.main(args(skill_dir, "--target", "thing=x"), runner=FakeAws({}))
+    run_collect(args(skill_dir, "--target", "thing=x"), runner=FakeAws({}))
     assert fake_collector[0][0].region == "eu-west-1"
 
 
 def test_region_option(skill_dir, fake_collector):
-    collect.main(args(skill_dir, "--target", "thing=x", "--region", "us-east-1"), runner=FakeAws({}))
+    run_collect(args(skill_dir, "--target", "thing=x", "--region", "us-east-1"), runner=FakeAws({}))
     assert fake_collector[0][0].region == "us-east-1"
 
 
 def test_case_dir_writes_a_file(skill_dir, fake_collector, tmp_path, capsys):
     case = case_folder(tmp_path)
-    code = collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case), "--suffix", "a b"), runner=FakeAws({}))
+    code = run_collect(args(skill_dir, "--target", "thing=x", "--case-dir", str(case), "--suffix", "a b"), runner=FakeAws({}))
     assert code == 0
     path = case / "evidence" / "fake-prod-main-eu-west-1-ab.json"
     assert path.exists()
@@ -113,42 +118,42 @@ def test_case_dir_writes_a_file(skill_dir, fake_collector, tmp_path, capsys):
 
 
 def test_unknown_collector(skill_dir, fake_collector, capsys):
-    assert collect.main(args(skill_dir, name="nope")) == 4
+    assert run_collect(args(skill_dir, name="nope")) == 4
     assert "fake" in capsys.readouterr().err
 
 
 def test_missing_target_key(skill_dir, fake_collector, capsys):
-    assert collect.main(args(skill_dir)) == 4
+    assert run_collect(args(skill_dir)) == 4
     assert "thing" in capsys.readouterr().err
 
 
 def test_undeclared_target_key(skill_dir, fake_collector, capsys):
-    assert collect.main(args(skill_dir, "--target", "thing=x", "--target", "bogus=1")) == 4
+    assert run_collect(args(skill_dir, "--target", "thing=x", "--target", "bogus=1")) == 4
     err = capsys.readouterr().err
     assert "bogus" in err and "thing" in err
 
 
 def test_optional_target_key_is_accepted(skill_dir, fake_collector):
-    assert collect.main(args(skill_dir, "--target", "thing=x", "--target", "extra=1"), runner=FakeAws({})) == 0
+    assert run_collect(args(skill_dir, "--target", "thing=x", "--target", "extra=1"), runner=FakeAws({})) == 0
     assert fake_collector[0][1] == {"thing": "x", "extra": "1"}
 
 
 def test_bad_window(skill_dir, fake_collector, capsys):
     argv = ["fake", "--account", "prod-main", "--start", WINDOW_END, "--end", WINDOW_START,
             "--skill-dir", str(skill_dir), "--target", "thing=x"]
-    assert collect.main(argv) == 2
+    assert run_collect(argv) == 2
     assert "after its start" in capsys.readouterr().err
 
 
 def test_unknown_account(skill_dir, fake_collector, capsys):
     argv = args(skill_dir, "--target", "thing=x")
     argv[argv.index("prod-main")] = "nowhere"
-    assert collect.main(argv) == 2
+    assert run_collect(argv) == 2
     assert "nowhere" in capsys.readouterr().err
 
 
 def test_sign_in_expired(skill_dir, fake_collector, capsys):
-    code = collect.main(args(skill_dir, "--target", "thing=x"), runner=FakeAws({"ecs list-clusters": SSO_EXPIRED_ERROR}))
+    code = run_collect(args(skill_dir, "--target", "thing=x"), runner=FakeAws({"ecs list-clusters": SSO_EXPIRED_ERROR}))
     assert code == 3
     assert "Sign-in expired. Run: aws sso login --profile triage-prod-main" in capsys.readouterr().err
 
@@ -156,12 +161,12 @@ def test_sign_in_expired(skill_dir, fake_collector, capsys):
 def test_bad_config_exits_2(tmp_path, fake_collector, capsys):
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "triage-config.yaml").write_text("accounts: nonsense\n")
-    assert collect.main(args(tmp_path, "--target", "thing=x")) == 2
+    assert run_collect(args(tmp_path, "--target", "thing=x")) == 2
     assert capsys.readouterr().err.strip()
 
 
 def test_missing_config_exits_2(tmp_path, fake_collector, capsys):
-    assert collect.main(args(tmp_path, "--target", "thing=x")) == 2
+    assert run_collect(args(tmp_path, "--target", "thing=x")) == 2
 
 
 # replay mode
@@ -186,7 +191,7 @@ def replay_dir(tmp_path, monkeypatch):
 
 
 def test_replay_mode_answers_from_fixtures_and_prints_the_banner_once(skill_dir, replay_dir, tmp_path, fake_collector, no_real_calls, capsys):
-    code = collect.main(args(skill_dir, "--target", "thing=x"))
+    code = run_collect(args(skill_dir, "--target", "thing=x"))
     captured = capsys.readouterr()
     assert code == 0
     assert json.loads(captured.out)["facts"][0]["summary"] == "hello x"
@@ -202,14 +207,14 @@ def test_replay_mode_also_replays_kubectl(skill_dir, replay_dir, no_real_calls, 
         ctx.evidence.add(kind="current", resource="r", summary=f"pods: {output}")
 
     monkeypatch.setattr(collect, "all_collectors", lambda: {"kube": Collector("kube", "Kube", (), (), run)})
-    code = collect.main(args(skill_dir, name="kube"))
+    code = run_collect(args(skill_dir, name="kube"))
     assert code == 0
     assert json.loads(capsys.readouterr().out)["facts"][0]["summary"] == "pods: pod-a"
 
 
 def test_an_injected_runner_wins_over_the_environment(skill_dir, replay_dir, fake_collector, capsys):
     fake = FakeAws({"ecs list-clusters": {"clusterArns": ["x"]}})
-    code = collect.main(args(skill_dir, "--target", "thing=x"), runner=fake, kube_runner=FakeAws({}))
+    code = run_collect(args(skill_dir, "--target", "thing=x"), runner=fake, kube_runner=FakeAws({}))
     assert code == 0
     assert fake.calls
     assert "REPLAY MODE" not in capsys.readouterr().err
@@ -217,7 +222,7 @@ def test_an_injected_runner_wins_over_the_environment(skill_dir, replay_dir, fak
 
 def test_a_bad_fixture_directory_exits_2_and_never_runs_the_real_tool(skill_dir, fake_collector, no_real_calls, monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(tmp_path / "nowhere"))
-    assert collect.main(args(skill_dir, "--target", "thing=x")) == 2
+    assert run_collect(args(skill_dir, "--target", "thing=x")) == 2
     assert "not a directory" in capsys.readouterr().err
 
 
@@ -232,21 +237,21 @@ def test_one_of_defaults_to_empty():
 
 
 def test_one_of_missing_exits_4(skill_dir, one_of_collector, capsys):
-    assert collect.main(args(skill_dir, name="pick")) == 4
+    assert run_collect(args(skill_dir, name="pick")) == 4
     err = capsys.readouterr().err
     assert "a" in err and "b" in err and "one of" in err
 
 
 def test_one_of_empty_value_counts_as_missing(skill_dir, one_of_collector):
-    assert collect.main(args(skill_dir, "--target", "a=", name="pick")) == 4
+    assert run_collect(args(skill_dir, "--target", "a=", name="pick")) == 4
 
 
 def test_one_of_satisfied(skill_dir, one_of_collector):
-    assert collect.main(args(skill_dir, "--target", "b=x", name="pick"), runner=FakeAws({})) == 0
+    assert run_collect(args(skill_dir, "--target", "b=x", name="pick"), runner=FakeAws({})) == 0
 
 
 def test_list_shows_one_of(one_of_collector, capsys):
-    assert collect.main(["--list"]) == 0
+    assert run_collect(["--list"]) == 0
     assert "one of: a, b" in capsys.readouterr().out
 
 
@@ -256,7 +261,7 @@ def test_collector_exception_keeps_the_evidence(skill_dir, monkeypatch, capsys):
         raise ZeroDivisionError("division by zero")
 
     monkeypatch.setattr(collect, "all_collectors", lambda: {"boom": Collector("boom", "d", (), (), run)})
-    assert collect.main(args(skill_dir, name="boom"), runner=FakeAws({})) == 0
+    assert run_collect(args(skill_dir, name="boom"), runner=FakeAws({})) == 0
     document = json.loads(capsys.readouterr().out)
     assert document["facts"][0]["summary"] == "before the crash"
     assert document["errors"][0]["code"] == "CollectorError"
@@ -269,12 +274,12 @@ def test_collector_exception_is_written_to_the_case_dir(skill_dir, monkeypatch, 
 
     monkeypatch.setattr(collect, "all_collectors", lambda: {"boom": Collector("boom", "d", (), (), run)})
     case = case_folder(tmp_path)
-    assert collect.main(args(skill_dir, "--case-dir", str(case), name="boom"), runner=FakeAws({})) == 0
+    assert run_collect(args(skill_dir, "--case-dir", str(case), name="boom"), runner=FakeAws({})) == 0
     assert any((case / "evidence").iterdir())
 
 
 def test_region_outside_the_account_is_rejected(skill_dir, fake_collector, capsys):
-    assert collect.main(args(skill_dir, "--target", "thing=x", "--region", "ap-south-1")) == 2
+    assert run_collect(args(skill_dir, "--target", "thing=x", "--region", "ap-south-1")) == 2
     err = capsys.readouterr().err
     assert "eu-west-1" in err and "us-east-1" in err
 
@@ -282,21 +287,21 @@ def test_region_outside_the_account_is_rejected(skill_dir, fake_collector, capsy
 def test_global_region_is_allowed_for_any_account(skill_dir, fake_collector):
     argv = args(skill_dir, "--target", "thing=x", "--region", "us-east-1")
     argv[argv.index("prod-main")] = "staging"
-    assert collect.main(argv, runner=FakeAws({})) == 0
+    assert run_collect(argv, runner=FakeAws({})) == 0
 
 
 def test_one_of_whitespace_value_counts_as_missing(skill_dir, one_of_collector):
-    assert collect.main(args(skill_dir, "--target", "a= ", name="pick")) == 4
+    assert run_collect(args(skill_dir, "--target", "a= ", name="pick")) == 4
 
 
 def test_duplicate_target_key_exits_4(skill_dir, fake_collector, capsys):
-    assert collect.main(args(skill_dir, "--target", "thing=a", "--target", "thing=b")) == 4
+    assert run_collect(args(skill_dir, "--target", "thing=a", "--target", "thing=b")) == 4
     assert "thing" in capsys.readouterr().err
 
 
 def test_empty_required_target_exits_4(skill_dir, fake_collector):
-    assert collect.main(args(skill_dir, "--target", "thing=")) == 4
-    assert collect.main(args(skill_dir, "--target", "thing=  ")) == 4
+    assert run_collect(args(skill_dir, "--target", "thing=")) == 4
+    assert run_collect(args(skill_dir, "--target", "thing=  ")) == 4
 
 
 def test_collector_error_has_no_command(skill_dir, monkeypatch, capsys):
@@ -305,23 +310,23 @@ def test_collector_error_has_no_command(skill_dir, monkeypatch, capsys):
         raise KeyError("unknown EKS cluster")
 
     monkeypatch.setattr(collect, "all_collectors", lambda: {"boom": Collector("boom", "d", (), (), run)})
-    collect.main(args(skill_dir, name="boom"), runner=FakeAws({}))
+    run_collect(args(skill_dir, name="boom"), runner=FakeAws({}))
     assert json.loads(capsys.readouterr().out)["errors"][0]["command"] == ""
 
 
 def test_context_gets_a_clock(skill_dir, fake_collector):
-    collect.main(args(skill_dir, "--target", "thing=x"), runner=FakeAws({}))
+    run_collect(args(skill_dir, "--target", "thing=x"), runner=FakeAws({}))
     assert fake_collector[0][0].now is not None
     assert fake_collector[0][0].now.tzinfo is not None
 
 
 @pytest.mark.parametrize("value", [" , ", ",", ",,  ,"])
 def test_one_of_comma_only_value_counts_as_missing(skill_dir, one_of_collector, value):
-    assert collect.main(args(skill_dir, "--target", f"a={value}", name="pick")) == 4
+    assert run_collect(args(skill_dir, "--target", f"a={value}", name="pick")) == 4
 
 
 def test_one_of_value_with_a_real_item_passes(skill_dir, one_of_collector):
-    assert collect.main(args(skill_dir, "--target", "a= , x", name="pick"), runner=FakeAws({})) == 0
+    assert run_collect(args(skill_dir, "--target", "a= , x", name="pick"), runner=FakeAws({})) == 0
 
 
 # Fix round 4
@@ -329,10 +334,10 @@ def test_one_of_value_with_a_real_item_passes(skill_dir, one_of_collector):
 def test_existing_evidence_file_is_not_overwritten(skill_dir, fake_collector, tmp_path, capsys):
     case = case_folder(tmp_path)
     argv = args(skill_dir, "--target", "thing=x", "--case-dir", str(case))
-    assert collect.main(argv, runner=FakeAws({})) == 0
+    assert run_collect(argv, runner=FakeAws({})) == 0
     capsys.readouterr()
     second_runner = FakeAws({})
-    assert collect.main(argv, runner=second_runner) == 2
+    assert run_collect(argv, runner=second_runner) == 2
     assert "--suffix" in capsys.readouterr().err
     assert len(fake_collector) == 1  # refused before the collector ran
     assert not second_runner.calls
@@ -340,13 +345,13 @@ def test_existing_evidence_file_is_not_overwritten(skill_dir, fake_collector, tm
 
 @pytest.mark.parametrize("value", [",", " , ", ",,  ,"])
 def test_comma_only_required_target_exits_4(skill_dir, fake_collector, value):
-    assert collect.main(args(skill_dir, "--target", f"thing={value}")) == 4
+    assert run_collect(args(skill_dir, "--target", f"thing={value}")) == 4
 
 
 def test_asked_holds_every_target_as_given(skill_dir, fake_collector, tmp_path):
     case = case_folder(tmp_path)
     argv = args(skill_dir, "--target", "thing=x", "--target", "extra=a, b", "--case-dir", str(case))
-    assert collect.main(argv, runner=FakeAws({})) == 0
+    assert run_collect(argv, runner=FakeAws({})) == 0
     document = json.loads(next((case / "evidence").iterdir()).read_text())
     assert document["asked"]["targets"] == {"thing": "x", "extra": "a, b"}
     # the fake collector declares no list targets, so a comma value is itemised as well
@@ -360,7 +365,7 @@ def test_asked_is_written_when_the_collector_fails(skill_dir, monkeypatch, tmp_p
 
     monkeypatch.setattr(collect, "all_collectors", lambda: {"boom": Collector("boom", "d", ("thing",), (), run)})
     case = case_folder(tmp_path)
-    assert collect.main(args(skill_dir, "--target", "thing=y", "--case-dir", str(case), name="boom"), runner=FakeAws({})) == 0
+    assert run_collect(args(skill_dir, "--target", "thing=y", "--case-dir", str(case), name="boom"), runner=FakeAws({})) == 0
     document = json.loads(next((case / "evidence").iterdir()).read_text())
     assert document["asked"]["targets"] == {"thing": "y"}
     assert document["errors"][0]["code"] == "CollectorError"
@@ -376,7 +381,7 @@ def test_asked_lists_items_only_for_targets_the_collector_declares_as_lists(skil
     monkeypatch.setattr(collect, "all_collectors", lambda: {"listy": entry})
     case = case_folder(tmp_path)
     argv = args(skill_dir, "--target", "groups=/aws/a", "--target", "pattern=ERROR, timeout", "--case-dir", str(case), name="listy")
-    assert collect.main(argv, runner=FakeAws({})) == 0
+    assert run_collect(argv, runner=FakeAws({})) == 0
     asked = json.loads(next((case / "evidence").iterdir()).read_text())["asked"]
     assert asked["targets"] == {"groups": "/aws/a", "pattern": "ERROR, timeout"}
     assert asked["target_items"] == {"groups": ["/aws/a"]}
@@ -385,7 +390,7 @@ def test_asked_lists_items_only_for_targets_the_collector_declares_as_lists(skil
 def test_replay_evidence_file_is_marked_and_the_banner_is_printed(skill_dir, replay_dir, tmp_path, fake_collector, no_real_calls, capsys):
     case = case_folder(tmp_path)
     (case / "case.json").write_text(json.dumps({"replay": True}))
-    assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case))) == 0
+    assert run_collect(args(skill_dir, "--target", "thing=x", "--case-dir", str(case))) == 0
     assert "REPLAY" in capsys.readouterr().err
     document = json.loads(next((case / "evidence").iterdir()).read_text())
     assert document["replay"] is True
@@ -394,7 +399,7 @@ def test_replay_evidence_file_is_marked_and_the_banner_is_printed(skill_dir, rep
 def test_live_evidence_file_has_no_replay_mark(skill_dir, fake_collector, tmp_path, monkeypatch):
     monkeypatch.delenv("AI_TRIAGE_FIXTURES", raising=False)
     case = case_folder(tmp_path)
-    assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case)), runner=FakeAws({})) == 0
+    assert run_collect(args(skill_dir, "--target", "thing=x", "--case-dir", str(case)), runner=FakeAws({})) == 0
     assert "replay" not in json.loads(next((case / "evidence").iterdir()).read_text())
 
 
@@ -402,7 +407,7 @@ def test_list_shows_optional_targets(monkeypatch, capsys):
     entry = Collector("logs", "Log lines", ("log_groups",), ("pattern",), lambda ctx, targets: None)
     bare = Collector("changes", "Recent changes", (), ("resource_names", "stack"), lambda ctx, targets: None)
     monkeypatch.setattr(collect, "all_collectors", lambda: {"logs": entry, "changes": bare})
-    assert collect.main(["--list"]) == 0
+    assert run_collect(["--list"]) == 0
     lines = capsys.readouterr().out.splitlines()
     logs_line = next(line for line in lines if line.startswith("logs"))
     changes_line = next(line for line in lines if line.startswith("changes"))
@@ -415,7 +420,7 @@ def test_list_shows_optional_targets(monkeypatch, capsys):
 
 def test_a_folder_outside_the_cases_root_is_refused_before_any_call(skill_dir, fake_collector, tmp_path, capsys):
     runner = FakeAws({})
-    code = collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(tmp_path / "elsewhere")), runner=runner)
+    code = run_collect(args(skill_dir, "--target", "thing=x", "--case-dir", str(tmp_path / "elsewhere")), runner=runner)
     assert code == 2
     assert "not a case folder under" in capsys.readouterr().err
     assert not fake_collector and not runner.calls
@@ -431,7 +436,7 @@ def test_the_evidence_file_is_written_only_when_it_is_new(skill_dir, fake_collec
         target.parent.mkdir(exist_ok=True)
         target.write_text("written by another run")
     monkeypatch.setattr(collect, "all_collectors", lambda: {"fake": Collector("fake", "d", ("thing",), (), run)})
-    assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case)), runner=FakeAws({})) == 2
+    assert run_collect(args(skill_dir, "--target", "thing=x", "--case-dir", str(case)), runner=FakeAws({})) == 2
     assert "already exists; pass another --suffix to keep both" in capsys.readouterr().err
     assert target.read_text() == "written by another run"
 
@@ -440,7 +445,7 @@ def test_the_evidence_file_is_written_only_when_it_is_new(skill_dir, fake_collec
 
 def test_recorded_evidence_is_never_written_into_a_live_case(skill_dir, replay_dir, tmp_path, fake_collector, no_real_calls, capsys):
     case = case_folder(tmp_path)
-    assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case))) == 2
+    assert run_collect(args(skill_dir, "--target", "thing=x", "--case-dir", str(case))) == 2
     assert "made from live systems" in capsys.readouterr().err
     assert fake_collector == [] and not (case / "evidence").exists()
 
@@ -449,6 +454,6 @@ def test_live_evidence_is_never_written_into_a_replay_case(skill_dir, fake_colle
     monkeypatch.delenv("AI_TRIAGE_FIXTURES", raising=False)
     case = case_folder(tmp_path)
     (case / "case.json").write_text(json.dumps({"replay": True}))
-    assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case)), runner=FakeAws({})) == 2
+    assert run_collect(args(skill_dir, "--target", "thing=x", "--case-dir", str(case)), runner=FakeAws({})) == 2
     assert "made in replay mode" in capsys.readouterr().err
     assert fake_collector == [] and not (case / "evidence").exists()

@@ -19,7 +19,6 @@ from triage.cli import add_exit_codes
 from triage.commands.common import SKILL_DIR
 
 
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="run.py verify_access", description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", type=Path, default=default_config_path(SKILL_DIR), help="path to the config file")

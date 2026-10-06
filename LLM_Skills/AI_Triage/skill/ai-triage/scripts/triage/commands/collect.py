@@ -6,7 +6,6 @@ A collector that raises is recorded as a CollectorError evidence error and the e
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,22 +13,14 @@ from pathlib import Path
 from triage.awscli import Runner, subprocess_runner
 from triage.collectors import Collector, all_collectors
 from triage.collectors.common import split_csv
-from triage.config import ConfigError, default_config_path, load_config
 from triage.context import CollectContext, SignInExpired
-from triage.case import CaseError, check_replay, resolve_case_dir
 from triage.evidence import Evidence, EvidenceExists
 from triage.fixtures import FixtureError, fixture_dir, kube_runner_from_env, replay_banner, runner_from_env
 from triage.window import WindowError, make_window
 from triage.cli import add_exit_codes
-from triage.commands.common import SKILL_DIR
+from triage.commands.common import SKILL_DIR, fail, load_skill_config, open_case
 
 GLOBAL_REGION = "us-east-1"  # hosts the global services
-
-
-def _read_case(case_dir: Path) -> dict:
-    """case.json as a dict, so its replay state can be compared with the session's before anything is collected."""
-    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
-    return case if isinstance(case, dict) else {}
 
 
 def _list_line(collector: Collector) -> str:
@@ -97,11 +88,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _fail(message: str, code: int) -> int:
-    print(message, file=sys.stderr)
-    return code
-
-
 def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runner: Runner | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -117,47 +103,41 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
             print(replay_banner(replay), file=sys.stderr)
         runner, kube_runner = runner or runner_from_env(), kube_runner or kube_runner_from_env()
     except FixtureError as error:
-        return _fail(str(error), 2)
-    try:
-        config = load_config(default_config_path(args.skill_dir))
-    except ConfigError as error:
-        return _fail("; ".join(error.errors), 2)
+        return fail(str(error), 2)
+    config = load_skill_config(args.skill_dir)
     collector = collectors.get(args.name)
     if collector is None:
-        return _fail(f"unknown collector {args.name}; available: {', '.join(sorted(collectors))}", 4)
+        return fail(f"unknown collector {args.name}; available: {', '.join(sorted(collectors))}", 4)
     parsed = _parse_targets(args.target)
     if parsed is None:
-        return _fail("--target must look like KEY=VALUE", 2)
+        return fail("--target must look like KEY=VALUE", 2)
     targets, repeated = parsed
     if repeated:
-        return _fail(f"target {', '.join(repeated)} was given more than once", 4)
+        return fail(f"target {', '.join(repeated)} was given more than once", 4)
     problem = _target_problem(collector, targets)
     if problem:
-        return _fail(problem, 4)
+        return fail(problem, 4)
     account = config.accounts.get(args.account)
     if account is None:
-        return _fail(f"unknown account {args.account}; configured: {', '.join(config.accounts)}", 2)
+        return fail(f"unknown account {args.account}; configured: {', '.join(config.accounts)}", 2)
     try:
         window = make_window(args.start, args.end, config.limits["max_window_hours"])
     except WindowError as error:
-        return _fail(str(error), 2)
+        return fail(str(error), 2)
     region = args.region or account.regions[0]
     allowed_regions = (*account.regions, GLOBAL_REGION) if GLOBAL_REGION not in account.regions else account.regions
     if region not in allowed_regions:
-        return _fail(f"region {region} is not allowed for {account.alias}; use one of: {', '.join(allowed_regions)}", 2)
+        return fail(f"region {region} is not allowed for {account.alias}; use one of: {', '.join(allowed_regions)}", 2)
     evidence = Evidence(collector.name, account.alias, region, window, replay=replay is not None)
     evidence.set_asked(dict(targets), {"start": args.start, "end": args.end}, _asked_items(collector, targets))
     if args.case_dir:
+        args.case_dir, _ = open_case(args.case_dir, config)
         try:
-            args.case_dir = resolve_case_dir(args.case_dir, config)
-            check_replay(_read_case(args.case_dir))
             evidence.ensure_new(args.case_dir, args.suffix)
-        except CaseError as error:
-            return _fail("; ".join(error.errors), 2)
         except (OSError, ValueError) as error:
-            return _fail(f"cannot read case.json in {args.case_dir}: {error}", 2)
+            return fail(f"cannot read case.json in {args.case_dir}: {error}", 2)
         except EvidenceExists as error:
-            return _fail(str(error), 2)
+            return fail(str(error), 2)
     ctx = CollectContext(
         config, account, region, window, evidence, args.skill_dir,
         runner=runner or subprocess_runner, kube_runner=kube_runner or subprocess_runner,
@@ -166,14 +146,14 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     try:
         collector.run(ctx, targets)
     except SignInExpired as expired:
-        return _fail(f"Sign-in expired. Run: aws sso login --profile {expired.profile}", 3)
+        return fail(f"Sign-in expired. Run: aws sso login --profile {expired.profile}", 3)
     except Exception as error:  # noqa: BLE001 - one bad field must not cost the evidence already collected
         evidence.add_error("", "CollectorError", f"{type(error).__name__}: {error}")
     if args.case_dir:
         try:
             path = evidence.write_new(args.case_dir, args.suffix)
         except EvidenceExists as error:
-            return _fail(str(error), 2)
+            return fail(str(error), 2)
         print(f"{path} facts={len(evidence.facts)} errors={len(evidence.errors)} truncated={evidence.truncated}")
     else:
         print(evidence.to_json())

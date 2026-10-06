@@ -38,7 +38,6 @@ from triage.cli import add_exit_codes
 from triage.commands.common import SKILL_DIR
 
 
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="run.py publish", description=__doc__.split("\n\n")[0], allow_abbrev=False)
     parser.add_argument("--skill-dir", type=Path, default=SKILL_DIR, help=argparse.SUPPRESS)

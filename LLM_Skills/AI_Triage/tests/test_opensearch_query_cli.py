@@ -5,6 +5,7 @@ from urllib.parse import parse_qsl, urlsplit
 import pytest
 import yaml
 
+from triage import cli
 from triage.commands import opensearch_query
 from triage.config import parse_config
 from triage.opensearch.policy import Request, check_request
@@ -60,9 +61,8 @@ def skill_dir(tmp_path, config_data):
 
 def run(skill_dir, *argv, cluster="logs-prod", transport=None):
     transport = transport or FakeTransport()
-    code = opensearch_query.main(
-        [argv[0], "--cluster", cluster, *argv[1:], "--skill-dir", str(skill_dir)], transport=transport
-    )
+    code = cli.run(lambda args: opensearch_query.main(args, transport=transport),
+                   [argv[0], "--cluster", cluster, *argv[1:], "--skill-dir", str(skill_dir)], name="opensearch_query")
     return code, transport
 
 

@@ -30,6 +30,10 @@ USAGE_OR_FILE = 2
 UNEXPECTED = 1
 
 
+class UsageError(Exception):
+    """A usage, config or case folder problem that a command reports in one line; run prints it and exits 2."""
+
+
 def add_exit_codes(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """End the parser's --help with the exit-code table."""
     parser.epilog = EXIT_CODES
@@ -49,6 +53,9 @@ def run(main: Callable[..., int], argv: list[str] | None = None, *, name: str | 
     script = name or Path(sys.argv[0]).stem or "script"
     try:
         return main(argv) if argv is not None else main()
+    except UsageError as error:
+        _say(str(error))
+        return USAGE_OR_FILE
     except (ConfigError, CaseError, MapError) as error:
         for line in error.errors:
             _say(line)
