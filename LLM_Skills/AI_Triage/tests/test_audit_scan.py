@@ -1109,3 +1109,16 @@ def test_a_cloudtrail_lookup_attribute_is_not_read_as_a_secret(line):
 )
 def test_the_lookup_exemption_does_not_hide_other_keys(line):
     assert scan(line), line
+
+
+# session 6 ruling (A8): a value on the line after a secret word that ends its line
+
+@pytest.mark.parametrize("source", ["key:\n abcd1234efgh5678", "api key:\n  " + "q8Zr2mX7wK4pT3vN9x",
+                                    "token =\n\t" + "0123456789abcdef" * 2, "| key |\n| abcd1234efgh5678 |"])
+def test_a_value_on_the_next_line_after_a_secret_word_is_flagged(source):
+    assert "secret_word_value" in [hit.kind for hit in scan(source)]
+
+
+@pytest.mark.parametrize("source", ["key rotation enabled\nabcd1234efgh5678 is the build", "the key:\n\nabcd1234efgh5678"])
+def test_only_the_line_right_after_a_word_that_ends_its_line_is_read(source):
+    assert "secret_word_value" not in [hit.kind for hit in scan(source)]
