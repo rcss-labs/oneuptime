@@ -19,7 +19,7 @@ wrote its file for the account and region, as every planned run has.
 | The web ACL guards a load balancer or API stage | `run collect cloudfront_waf ... --case-dir <case> --target resource_arn=<load balancer ARN or stage ARN> --suffix <word>` |
 | The origin is a load balancer | `run collect edge ... --case-dir <case> --target load_balancer=<name> --suffix <word>` |
 | The origin is an API | `run collect apigateway ... --case-dir <case> --target api_id=<api id> --suffix <word>` |
-| A distribution or rule change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<distribution id or web ACL name> --suffix <word>` |
+| A distribution or rule change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<distribution id or web ACL name> --target event_sources=cloudfront.amazonaws.com --suffix <word>` (searched in us-east-1, where CloudFront records its changes) |
 
 ## What the facts mean
 

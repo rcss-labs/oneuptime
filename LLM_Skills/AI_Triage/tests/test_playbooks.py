@@ -308,3 +308,10 @@ def test_cloudwatch_says_the_plan_reads_alarms_in_alarm_when_none_are_mapped():
     text = " ".join((PLAYBOOKS_DIR / "cloudwatch.md").read_text().split())
     assert "skipped `alarms` line" not in text
     assert "in_alarm=true" in text
+
+
+def test_cloudfront_change_lookup_searches_the_cloudfront_event_source():
+    """CloudFront records its events in us-east-1; the event_sources search is what reaches them."""
+    text = (PLAYBOOKS_DIR / "cloudfront-waf.md").read_text()
+    line = next(line for line in text.splitlines() if "`run collect changes" in line)
+    assert "--target event_sources=cloudfront.amazonaws.com" in line and "--suffix" in line
