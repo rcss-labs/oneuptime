@@ -9,15 +9,17 @@ connection errors, timeouts, slow queries, a failover, or a full disk.
 
 The plan already runs `rds` for the mapped database (an instance, or a cluster whose
 member instances it then describes). Pass `incident_start` (an ISO time with a timezone) so the collector
-reads the log file that covers it and keeps the lines around it (up to 6 files). Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
+reads the log file that covers it and keeps the lines around it (up to 6 files). Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
 | A reader or replica is involved, or lag is reported | `run collect rds ... --case-dir <case> --suffix reader --target db=<reader instance id>` |
-| The state is `inaccessible-encryption-credentials`, or the storage is encrypted | `run collect access ... --case-dir <case> --target kms_key=<key id of the instance>` |
-| The application times out (not "refused") | `run collect vpc ... --case-dir <case> --target security_group_ids=<groups of the database and of the client>` |
-| A parameter, class, or version change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name>` and read `cloudtrail.md` |
-| The application's own errors are needed | `run collect logs ... --case-dir <case> --target log_groups=<application log group>` |
+| The state is `inaccessible-encryption-credentials`, or the storage is encrypted | `run collect access ... --case-dir <case> --target kms_key=<key id of the instance> --suffix <word>` |
+| The application times out (not "refused") | `run collect vpc ... --case-dir <case> --target security_group_ids=<groups of the database and of the client> --suffix <word>` |
+| A parameter, class, or version change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name> --suffix <word>` and read `cloudtrail.md` |
+| The application's own errors are needed | `run collect logs ... --case-dir <case> --target log_groups=<application log group> --suffix <word>` |
 
 ## What the facts mean
 

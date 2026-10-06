@@ -10,16 +10,18 @@ policy is in question.
 
 The plan already runs `autoscaling` for the mapped group. For ECS service scaling the
 same collector also needs `ecs_cluster` and `ecs_service`; add them when the plan did
-not. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
+not. Take the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| An ECS service scales by policy | `run collect autoscaling ... --case-dir <case> --target group=<capacity provider group, or the service name> --target ecs_cluster=<cluster> --target ecs_service=<service>` |
-| Launches fail or instances are unhealthy | `run collect ec2 ... --case-dir <case> --target instance_ids=<ids from the activities or the group>` |
-| Launches fail on a network error | `run collect vpc ... --case-dir <case> --target subnet_ids=<the group's subnets>` |
-| A launch failed on a key or role | `run collect access ... --case-dir <case> --target kms_key=<key id>` or `--target role=<role name>` |
-| A load balancer health check replaces instances | `run collect edge ... --case-dir <case> --target load_balancer=<load balancer name>`; see `edge.md` |
-| The group, template, or policy was edited | `run collect changes ... --case-dir <case> --target resource_names=<group name> --target incident_start=<time>` |
+| An ECS service scales by policy | `run collect autoscaling ... --case-dir <case> --target group=<capacity provider group, or the service name> --target ecs_cluster=<cluster> --target ecs_service=<service> --suffix <word>` |
+| Launches fail or instances are unhealthy | `run collect ec2 ... --case-dir <case> --target instance_ids=<ids from the activities or the group> --suffix <word>` |
+| Launches fail on a network error | `run collect vpc ... --case-dir <case> --target subnet_ids=<the group's subnets> --suffix <word>` |
+| A launch failed on a key or role | `run collect access ... --case-dir <case> --target kms_key=<key id> --suffix <word>` or `--target role=<role name>` |
+| A load balancer health check replaces instances | `run collect edge ... --case-dir <case> --target load_balancer=<load balancer name> --suffix <word>`; see `edge.md` |
+| The group, template, or policy was edited | `run collect changes ... --case-dir <case> --target resource_names=<group name> --target incident_start=<time> --suffix <word>` |
 
 ## What the facts mean
 

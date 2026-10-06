@@ -294,3 +294,17 @@ def run_command_lines(path):
 def test_run_commands_carry_the_case_folder(path):
     missing = [f"{path.name}:{n}: {c}" for n, c in run_command_lines(path) if "--case-dir <case>" not in c]
     assert not missing, "\n" + "\n".join(missing)
+
+
+@pytest.mark.parametrize("path", PLAYBOOKS, ids=IDS)
+def test_every_run_collect_command_carries_a_suffix(path):
+    """The plan already ran each collector once with no suffix, so a run by hand without one exits 2."""
+    text = " ".join(path.read_text().split())
+    missing = [match.group(0) for match in COLLECT_RE.finditer(text) if "--suffix" not in match.group(2)]
+    assert not missing, "\n" + "\n".join(missing)
+
+
+def test_cloudwatch_says_the_plan_reads_alarms_in_alarm_when_none_are_mapped():
+    text = " ".join((PLAYBOOKS_DIR / "cloudwatch.md").read_text().split())
+    assert "skipped `alarms` line" not in text
+    assert "in_alarm=true" in text

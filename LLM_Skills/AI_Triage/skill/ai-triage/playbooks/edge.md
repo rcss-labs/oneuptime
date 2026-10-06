@@ -8,16 +8,18 @@ target group, listener, certificate, or a host name served through one.
 ## Collect
 
 The plan already runs `edge` for the mapped load balancer. Add these when they apply;
-take the account, region, and window from the plan's own lines; `<case>` is the case folder.
+take the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| You know the public host name and need to know whether DNS points at this balancer | `run collect edge ... --case-dir <case> --target load_balancer=<name> --target hostname=<host name>` (use a `--suffix` for the second run) |
-| Targets are ECS tasks that fail health checks | `run collect ecs ... --case-dir <case> --target cluster=<cluster> --target service=<service>` |
-| Targets are instances that are unhealthy or were replaced | `run collect ec2 ... --case-dir <case> --target instance_ids=<target ids>` |
-| Targets cannot be reached on the health check port | `run collect vpc ... --case-dir <case> --target security_group_ids=<balancer and target groups>` |
-| The balancer sits behind CloudFront or a web ACL | `run collect cloudfront_waf ... --case-dir <case> --target resource_arn=<load balancer ARN>` |
-| A listener, rule, or certificate may have been changed | `run collect changes ... --case-dir <case> --target resource_names=<load balancer name>` |
+| You know the public host name and need to know whether DNS points at this balancer | `run collect edge ... --case-dir <case> --target load_balancer=<name> --target hostname=<host name> --suffix <word>` |
+| Targets are ECS tasks that fail health checks | `run collect ecs ... --case-dir <case> --target cluster=<cluster> --target service=<service> --suffix <word>` |
+| Targets are instances that are unhealthy or were replaced | `run collect ec2 ... --case-dir <case> --target instance_ids=<target ids> --suffix <word>` |
+| Targets cannot be reached on the health check port | `run collect vpc ... --case-dir <case> --target security_group_ids=<balancer and target groups> --suffix <word>` |
+| The balancer sits behind CloudFront or a web ACL | `run collect cloudfront_waf ... --case-dir <case> --target resource_arn=<load balancer ARN> --suffix <word>` |
+| A listener, rule, or certificate may have been changed | `run collect changes ... --case-dir <case> --target resource_names=<load balancer name> --suffix <word>` |
 
 ## What the facts mean
 

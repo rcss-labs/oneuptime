@@ -10,15 +10,17 @@ message is ever received or read.
 
 The plan already runs `messaging` for the mapped queues and topics. It follows each
 queue's redrive policy to its dead letter queue and reads that too (up to 10 targets).
-A topic must be given as an ARN. Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
+A topic must be given as an ARN. Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| A consumer is a Lambda function | `run collect lambda ... --case-dir <case> --target function=<name>` and read `lambda.md` (its event source mapping facts) |
-| A consumer is a service or pod | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s>` (or `eks` with `cluster=<name>`); read `ecs.md` or `eks.md` |
+| A consumer is a Lambda function | `run collect lambda ... --case-dir <case> --target function=<name> --suffix <word>` and read `lambda.md` (its event source mapping facts) |
+| A consumer is a service or pod | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s> --suffix <word>` (or `eks` with `cluster=<name>`); read `ecs.md` or `eks.md` |
 | A second queue or a topic's subscribed queue is involved | `run collect messaging ... --case-dir <case> --suffix <name> --target queues=<queue names, comma separated>` |
-| A topic's failures need a reason | `run collect logs ... --case-dir <case> --target log_groups=<the topic's delivery status log group>` and read `cloudwatch.md` |
-| A policy or redrive change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name>` and read `cloudtrail.md` |
+| A topic's failures need a reason | `run collect logs ... --case-dir <case> --target log_groups=<the topic's delivery status log group> --suffix <word>` and read `cloudwatch.md` |
+| A policy or redrive change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name> --suffix <word>` and read `cloudtrail.md` |
 
 ## What the facts mean
 

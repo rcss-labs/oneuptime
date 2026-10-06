@@ -8,15 +8,17 @@ tag or digest, or a deployment that started the wrong image.
 ## Collect
 
 The plan already runs `ecr` for the mapped repository. Add these when they apply; take
-the account, region, and window from the plan's own lines; `<case>` is the case folder.
+the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
 | The image the workload runs is known by tag | `run collect ecr ... --case-dir <case> --target repository=<repository name> --target image_tag=<tag> --suffix tag` |
 | The image is known by digest (from a task, pod, or function) | `run collect ecr ... --case-dir <case> --target repository=<repository name> --target image_digest=<sha256:...> --suffix digest` |
-| The pull was denied rather than the image missing | `run collect access ... --case-dir <case> --target role=<execution or node role name>` |
-| A deployment used the image | `run collect changes ... --case-dir <case> --target resource_names=<repository name> --target incident_start=<time>` |
-| The workload runs on ECS | `run collect ecs ... --case-dir <case> --target cluster=<cluster> --target service=<service>`; see `ecs.md` |
+| The pull was denied rather than the image missing | `run collect access ... --case-dir <case> --target role=<execution or node role name> --suffix <word>` |
+| A deployment used the image | `run collect changes ... --case-dir <case> --target resource_names=<repository name> --target incident_start=<time> --suffix <word>` |
+| The workload runs on ECS | `run collect ecs ... --case-dir <case> --target cluster=<cluster> --target service=<service> --suffix <word>`; see `ecs.md` |
 
 Without `image_tag` or `image_digest` the collector lists only the five newest
 images and runs no scan lookup.

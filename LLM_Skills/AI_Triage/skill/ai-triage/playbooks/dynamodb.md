@@ -10,14 +10,16 @@ change. No item is ever read.
 
 The plan already runs `dynamodb` for the mapped table. It reads table state, scaling
 activity, four table-level metrics, and three per-operation metrics for nine operations.
-Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
+Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| The table's clients are a compute service | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s>` (or `lambda` with `function=<name>`, `eks` with `cluster=<name>`); read `ecs.md`, `lambda.md`, or `eks.md` |
-| Calls are denied rather than throttled | `run collect access ... --case-dir <case> --target role=<role that calls the table>` and read `access.md` |
-| A capacity or scaling setting change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name>` and read `cloudtrail.md` |
-| The application's own errors are needed | `run collect logs ... --case-dir <case> --target log_groups=<application log group>` |
+| The table's clients are a compute service | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s> --suffix <word>` (or `lambda` with `function=<name>`, `eks` with `cluster=<name>`); read `ecs.md`, `lambda.md`, or `eks.md` |
+| Calls are denied rather than throttled | `run collect access ... --case-dir <case> --target role=<role that calls the table> --suffix <word>` and read `access.md` |
+| A capacity or scaling setting change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name> --suffix <word>` and read `cloudtrail.md` |
+| The application's own errors are needed | `run collect logs ... --case-dir <case> --target log_groups=<application log group> --suffix <word>` |
 | A second table is involved (a stream consumer, a replica) | `run collect dynamodb ... --case-dir <case> --suffix <name> --target table=<other table>` |
 
 ## What the facts mean

@@ -9,15 +9,17 @@ a task or pod that cannot mount, slow file operations, or a stalled mount.
 
 The plan already runs `efs` for the mapped file system. It lists mount targets (up to
 20), whether their security groups allow NFS, access points that are not available,
-and five metrics. Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
+and five metrics. Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| A mount target's security groups need reading in full | `run collect vpc ... --case-dir <case> --target security_group_ids=<groups of the mount target>` |
-| The client is in a subnet with no mount target, or routes are suspected | `run collect vpc ... --case-dir <case> --target subnet_ids=<client subnets and mount target subnets>` |
-| The client is a task, instance, or pod | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s>` (or `ec2` with `instance_ids=<ids>`, `eks` with `cluster=<name>`); read `ecs.md`, `ec2.md`, or `eks.md` |
-| The file system is encrypted and the mount fails | `run collect access ... --case-dir <case> --target kms_key=<key id>` |
-| A throughput mode or mount target change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name>` and read `cloudtrail.md` |
+| A mount target's security groups need reading in full | `run collect vpc ... --case-dir <case> --target security_group_ids=<groups of the mount target> --suffix <word>` |
+| The client is in a subnet with no mount target, or routes are suspected | `run collect vpc ... --case-dir <case> --target subnet_ids=<client subnets and mount target subnets> --suffix <word>` |
+| The client is a task, instance, or pod | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s> --suffix <word>` (or `ec2` with `instance_ids=<ids>`, `eks` with `cluster=<name>`); read `ecs.md`, `ec2.md`, or `eks.md` |
+| The file system is encrypted and the mount fails | `run collect access ... --case-dir <case> --target kms_key=<key id> --suffix <word>` |
+| A throughput mode or mount target change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name> --suffix <word>` and read `cloudtrail.md` |
 
 ## What the facts mean
 

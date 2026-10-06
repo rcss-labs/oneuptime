@@ -10,14 +10,16 @@ incident.
 
 The plan already runs `platform` for the account and region. It reads AWS Health
 events and the service quotas of `ecs`, `lambda`, `ec2`, `rds`, and
-`elasticloadbalancing`. Add these when they apply; take the account, region, and window from the plan's own lines; `<case>` is the case folder.
+`elasticloadbalancing`. Add these when they apply; take the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| The limit that was hit is of another service | `run collect platform ... --case-dir <case> --target service_codes=<code1>,<code2>` (for example `dynamodb,sqs`; use a `--suffix`) |
-| A quota is named in an error message | `run collect platform ... --case-dir <case> --target service_codes=<service code of that quota>` |
+| The limit that was hit is of another service | `run collect platform ... --case-dir <case> --target service_codes=<code1>,<code2> --suffix <word>` (for example `dynamodb,sqs`) |
+| A quota is named in an error message | `run collect platform ... --case-dir <case> --target service_codes=<service code of that quota> --suffix <word>` |
 | One service fails, others are fine | the playbook of that service, not this one |
-| The limit is Lambda's account concurrency | `run collect lambda ... --case-dir <case> --target function=<function name>` shows the account limit |
+| The limit is Lambda's account concurrency | `run collect lambda ... --case-dir <case> --target function=<function name> --suffix <word>` shows the account limit |
 
 ## What the facts mean
 

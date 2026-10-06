@@ -10,18 +10,20 @@ credential that stopped working. The collector reads metadata only.
 
 The plan does not run this: no service-map key feeds `access`. Run it when evidence
 names a role, a key, or a secret, for example
-`run collect access ... --case-dir <case> --target role=<role name>`. Take the account,
-region, and window from the plan's own lines; `<case>` is the case folder. To get a
+`run collect access ... --case-dir <case> --target role=<role name> --suffix <word>`. Take the account,
+region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has. To get a
 simulation, give it both an `action` and the role; `resource_arn` is optional.
 
 | When | Command |
 |---|---|
-| An error names a role and an action | `run collect access ... --case-dir <case> --target role=<role name> --target action=<service:Action> --target resource_arn=<arn from the error>` |
-| An error names a key, or an encrypted resource cannot be used | `run collect access ... --case-dir <case> --target kms_key=<key id or alias>` |
-| Credentials stopped working, or a rotation is involved | `run collect access ... --case-dir <case> --target secret=<secret name>` |
-| Who changed the policy, key, or secret, and when | `run collect changes ... --case-dir <case> --target resource_names=<name>` and read `cloudtrail.md` |
-| The role belongs to a task, function, or pod that failed | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s>` (or `lambda` with `function=<name>`, `eks` with `cluster=<name>`) for it |
-| The error text is needed | `run collect logs ... --case-dir <case> --target log_groups=<log group with the error>` |
+| An error names a role and an action | `run collect access ... --case-dir <case> --target role=<role name> --target action=<service:Action> --target resource_arn=<arn from the error> --suffix <word>` |
+| An error names a key, or an encrypted resource cannot be used | `run collect access ... --case-dir <case> --target kms_key=<key id or alias> --suffix <word>` |
+| Credentials stopped working, or a rotation is involved | `run collect access ... --case-dir <case> --target secret=<secret name> --suffix <word>` |
+| Who changed the policy, key, or secret, and when | `run collect changes ... --case-dir <case> --target resource_names=<name> --suffix <word>` and read `cloudtrail.md` |
+| The role belongs to a task, function, or pod that failed | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s> --suffix <word>` (or `lambda` with `function=<name>`, `eks` with `cluster=<name>`) for it |
+| The error text is needed | `run collect logs ... --case-dir <case> --target log_groups=<log group with the error> --suffix <word>` |
 
 Never read a secret's value, a parameter with decryption, or decrypt anything. The
 evidence needed (state, times, policy names, a decision) is in the metadata.

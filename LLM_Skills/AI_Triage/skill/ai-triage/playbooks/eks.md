@@ -9,17 +9,19 @@ pod, or a Kubernetes workload.
 
 The plan already runs `eks` for the mapped cluster. The collector reads pods, warning
 events, workloads, and logs only when it gets a `namespace`; add it when the plan did
-not. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
+not. Take the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| The namespace is known and pods are involved | `run collect eks ... --case-dir <case> --target cluster=<cluster> --target namespace=<namespace> --target workloads=deployment/<name>` |
+| The namespace is known and pods are involved | `run collect eks ... --case-dir <case> --target cluster=<cluster> --target namespace=<namespace> --target workloads=deployment/<name> --suffix <word>` |
 | A second namespace is involved | the same command with another `namespace` and `--suffix <namespace>` |
-| Nodes are unhealthy or missing | `run collect ec2 ... --case-dir <case> --target instance_ids=<node instance ids>` |
-| The nodegroup did not scale or replace nodes | `run collect autoscaling ... --case-dir <case> --target group=<Auto Scaling group of the nodegroup>` |
-| Pods cannot pull an image | `run collect ecr ... --case-dir <case> --target repository=<repository name>` |
-| Pods cannot reach a dependency | `run collect vpc ... --case-dir <case> --target security_group_ids=<node or pod groups>` |
-| The control plane logs are enabled | `run collect logs ... --case-dir <case> --target log_groups=/aws/eks/<cluster>/cluster` |
+| Nodes are unhealthy or missing | `run collect ec2 ... --case-dir <case> --target instance_ids=<node instance ids> --suffix <word>` |
+| The nodegroup did not scale or replace nodes | `run collect autoscaling ... --case-dir <case> --target group=<Auto Scaling group of the nodegroup> --suffix <word>` |
+| Pods cannot pull an image | `run collect ecr ... --case-dir <case> --target repository=<repository name> --suffix <word>` |
+| Pods cannot reach a dependency | `run collect vpc ... --case-dir <case> --target security_group_ids=<node or pod groups> --suffix <word>` |
+| The control plane logs are enabled | `run collect logs ... --case-dir <case> --target log_groups=/aws/eks/<cluster>/cluster --suffix <word>` |
 
 ## What the facts mean
 
@@ -48,7 +50,7 @@ Changes made inside the cluster (`kubectl set resources`, an edited ConfigMap, a
 scale) are not in CloudTrail, so `changes` shows nothing for them. Look at the
 ReplicaSet creation times and the `kubernetes.io/change-cause` annotation (lead
 below), and, when control-plane logging is on, the audit log: `run collect logs ... --case-dir <case>
---target log_groups=/aws/eks/<cluster>/cluster --target pattern=<resource name>`.
+--target log_groups=/aws/eks/<cluster>/cluster --target pattern=<resource name> --suffix <word>`.
 
 ## Common causes
 

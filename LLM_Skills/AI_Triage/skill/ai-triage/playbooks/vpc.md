@@ -10,17 +10,19 @@ address, or a NAT or endpoint problem.
 
 The plan does not run this: no service-map key feeds `vpc`. Run it when a lead needs
 it, with the ids that the compute and edge evidence name, for example
-`run collect vpc ... --case-dir <case> --target security_group_ids=<the service's groups>`.
+`run collect vpc ... --case-dir <case> --target security_group_ids=<the service's groups> --suffix <word>`.
 Take the account, region, and window from the plan's own lines; `<case>` is the case
-folder. More runs, when they apply:
+folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has. More runs, when they apply:
 
 | When | Command |
 |---|---|
-| The ids found are a service's groups and the subnets are not yet checked | `run collect vpc ... --case-dir <case> --target subnet_ids=<subnets of the service>` |
-| Only a subnet is known and you need the NAT gateways and endpoints | `run collect vpc ... --case-dir <case> --target vpc_id=<vpc id>` |
-| Another group is the source in a rule you read | `run collect vpc ... --case-dir <case> --target security_group_ids=<that group>` (use a `--suffix`) |
-| A subnet ran out of addresses and tasks or pods are pending | `run collect ecs ... --case-dir <case> --target cluster=<cluster> --target service=<service>` or `run collect eks ... --case-dir <case> --target cluster=<cluster>` |
-| A change to a group, route, or ACL is suspected | `run collect changes ... --case-dir <case> --target resource_names=<group, route table, or ACL id>` |
+| The ids found are a service's groups and the subnets are not yet checked | `run collect vpc ... --case-dir <case> --target subnet_ids=<subnets of the service> --suffix <word>` |
+| Only a subnet is known and you need the NAT gateways and endpoints | `run collect vpc ... --case-dir <case> --target vpc_id=<vpc id> --suffix <word>` |
+| Another group is the source in a rule you read | `run collect vpc ... --case-dir <case> --target security_group_ids=<that group> --suffix <word>` |
+| A subnet ran out of addresses and tasks or pods are pending | `run collect ecs ... --case-dir <case> --target cluster=<cluster> --target service=<service> --suffix <word>` or `run collect eks ... --case-dir <case> --target cluster=<cluster> --suffix <word>` |
+| A change to a group, route, or ACL is suspected | `run collect changes ... --case-dir <case> --target resource_names=<group, route table, or ACL id> --suffix <word>` |
 
 ## What the facts mean
 

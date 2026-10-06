@@ -7,15 +7,17 @@ The target has an `ecs_service`, or evidence names an ECS cluster, service, or t
 ## Collect
 
 The plan already runs `ecs` for the mapped service. Add these when they apply; take
-the account, region, and window from the plan's own lines; `<case>` is the case folder.
+the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| The service scales by policy, or tasks were replaced | `run collect autoscaling ... --case-dir <case> --target group=<Auto Scaling group of the capacity provider>` |
-| A task could not pull its image, or the image changed | `run collect ecr ... --case-dir <case> --target repository=<repository name>` |
-| Tasks run on EC2 instances and several stopped together | `run collect ec2 ... --case-dir <case> --target instance_ids=<ids from the stopped tasks>` |
-| Tasks cannot reach a dependency | `run collect vpc ... --case-dir <case> --target security_group_ids=<the service's groups>` |
-| The task role was denied something | `run collect access ... --case-dir <case> --target role=<task role name>` |
+| The service scales by policy, or tasks were replaced | `run collect autoscaling ... --case-dir <case> --target group=<Auto Scaling group of the capacity provider> --suffix <word>` |
+| A task could not pull its image, or the image changed | `run collect ecr ... --case-dir <case> --target repository=<repository name> --suffix <word>` |
+| Tasks run on EC2 instances and several stopped together | `run collect ec2 ... --case-dir <case> --target instance_ids=<ids from the stopped tasks> --suffix <word>` |
+| Tasks cannot reach a dependency | `run collect vpc ... --case-dir <case> --target security_group_ids=<the service's groups> --suffix <word>` |
+| The task role was denied something | `run collect access ... --case-dir <case> --target role=<task role name> --suffix <word>` |
 
 ## What the facts mean
 

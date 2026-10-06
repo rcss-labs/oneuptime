@@ -7,17 +7,20 @@ read a metric comparison that any collector wrote (CPU, errors, latency, depth).
 
 ## Collect
 
-The plan runs `alarms` only when the service map lists alarm names (`alarms`), and
-`logs` for the mapped log groups (`log_groups`). With no alarm names mapped the plan
-prints a skipped `alarms` line: find names with the first lead below, then run the
-command here. The metric facts come with every service collector. Take the account,
-region, and window from the plan's own lines; `<case>` is the case folder.
+The plan runs `alarms` for the alarm names the service map lists (`alarms`), and
+`logs` for the mapped log groups (`log_groups`). With no alarm names mapped it runs
+`alarms --target in_alarm=true` instead: the alarms in ALARM now (up to 50). Alarms that
+fired and cleared in the window need their names: find them with the first lead below,
+then run the command here. The metric facts come with every service collector. Take the account,
+region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| Alarm names are known | `run collect alarms ... --case-dir <case> --target alarm_names=<name1>,<name2>` |
-| An alarm family shares a prefix | `run collect alarms ... --case-dir <case> --target name_prefix=<prefix>` |
-| Log lines should show when the problem began | `run collect logs ... --case-dir <case> --target log_groups=<group1>,<group2>` |
+| Alarm names are known | `run collect alarms ... --case-dir <case> --target alarm_names=<name1>,<name2> --suffix <word>` |
+| An alarm family shares a prefix | `run collect alarms ... --case-dir <case> --target name_prefix=<prefix> --suffix <word>` |
+| Log lines should show when the problem began | `run collect logs ... --case-dir <case> --target log_groups=<group1>,<group2> --suffix <word>` |
 | The default pattern is too broad or too narrow | `run collect logs ... --case-dir <case> --target log_groups=<group> --target pattern=<regular expression> --suffix <word>` |
 | The first alarm points at a service | the playbook of that service; its collector writes the metric facts |
 

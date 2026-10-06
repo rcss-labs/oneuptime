@@ -9,15 +9,17 @@ The target has a CloudFront distribution or a web ACL, or evidence shows 403, 50
 
 The plan already runs `cloudfront_waf` for the mapped distribution or web ACL. Add
 these when they apply; take the account, region, and window from the
-plan's own lines; `<case>` is the case folder.
+plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| The web ACL is known but not the distribution | `run collect cloudfront_waf ... --case-dir <case> --target web_acl_arn=<web ACL ARN>` |
-| The web ACL guards a load balancer or API stage | `run collect cloudfront_waf ... --case-dir <case> --target resource_arn=<load balancer ARN or stage ARN>` |
-| The origin is a load balancer | `run collect edge ... --case-dir <case> --target load_balancer=<name>` |
-| The origin is an API | `run collect apigateway ... --case-dir <case> --target api_id=<api id>` |
-| A distribution or rule change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<distribution id or web ACL name>` |
+| The web ACL is known but not the distribution | `run collect cloudfront_waf ... --case-dir <case> --target web_acl_arn=<web ACL ARN> --suffix <word>` |
+| The web ACL guards a load balancer or API stage | `run collect cloudfront_waf ... --case-dir <case> --target resource_arn=<load balancer ARN or stage ARN> --suffix <word>` |
+| The origin is a load balancer | `run collect edge ... --case-dir <case> --target load_balancer=<name> --suffix <word>` |
+| The origin is an API | `run collect apigateway ... --case-dir <case> --target api_id=<api id> --suffix <word>` |
+| A distribution or rule change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<distribution id or web ACL name> --suffix <word>` |
 
 ## What the facts mean
 

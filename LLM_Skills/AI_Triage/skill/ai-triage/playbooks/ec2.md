@@ -8,15 +8,17 @@ check, a scheduled event, or an unreachable host.
 ## Collect
 
 The plan already runs `ec2` for the mapped instances. Add these when they apply; take
-the account, region, and window from the plan's own lines; `<case>` is the case folder.
+the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| The instance belongs to a group and was replaced or is missing | `run collect autoscaling ... --case-dir <case> --target group=<Auto Scaling group name>` |
-| The instance cannot be reached or reach a dependency | `run collect vpc ... --case-dir <case> --target security_group_ids=<the instance's groups>` |
-| The application on the host logs to CloudWatch | `run collect logs ... --case-dir <case> --target log_groups=<log group of the host>` |
-| The instance profile was denied something | `run collect access ... --case-dir <case> --target role=<instance profile role name>` |
-| A change to the instance or its group is suspected | `run collect changes ... --case-dir <case> --target resource_names=<instance id> --target incident_start=<time>` |
+| The instance belongs to a group and was replaced or is missing | `run collect autoscaling ... --case-dir <case> --target group=<Auto Scaling group name> --suffix <word>` |
+| The instance cannot be reached or reach a dependency | `run collect vpc ... --case-dir <case> --target security_group_ids=<the instance's groups> --suffix <word>` |
+| The application on the host logs to CloudWatch | `run collect logs ... --case-dir <case> --target log_groups=<log group of the host> --suffix <word>` |
+| The instance profile was denied something | `run collect access ... --case-dir <case> --target role=<instance profile role name> --suffix <word>` |
+| A change to the instance or its group is suspected | `run collect changes ... --case-dir <case> --target resource_names=<instance id> --target incident_start=<time> --suffix <word>` |
 
 ## What the facts mean
 

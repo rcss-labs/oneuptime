@@ -10,17 +10,19 @@ pipeline, or a resource that AWS Config records. Plain CloudTrail events are
 
 The plan already runs `changes` with CloudTrail write events (by resource name and by
 event source). The other sources need their own targets, and the incident start in
-`incident_start` so each fact states its gap. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
+`incident_start` so each fact states its gap. Take the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| A CloudFormation stack deploys the service | `run collect changes ... --case-dir <case> --target stack=<stack name> --target incident_start=<ISO time with Z>` |
-| A pipeline deploys the service | `run collect changes ... --case-dir <case> --target pipeline=<pipeline name> --target incident_start=<ISO time with Z>` |
-| You need what a resource looked like before and after | `run collect changes ... --case-dir <case> --target config_resource=<resource type>/<resource id> --target incident_start=<ISO time with Z>` |
-| Changes to specific resources (up to 10) | `run collect changes ... --case-dir <case> --target resource_names=<name1>,<name2> --target incident_start=<ISO time with Z>` |
+| A CloudFormation stack deploys the service | `run collect changes ... --case-dir <case> --target stack=<stack name> --target incident_start=<ISO time with Z> --suffix <word>` |
+| A pipeline deploys the service | `run collect changes ... --case-dir <case> --target pipeline=<pipeline name> --target incident_start=<ISO time with Z> --suffix <word>` |
+| You need what a resource looked like before and after | `run collect changes ... --case-dir <case> --target config_resource=<resource type>/<resource id> --target incident_start=<ISO time with Z> --suffix <word>` |
+| Changes to specific resources (up to 10) | `run collect changes ... --case-dir <case> --target resource_names=<name1>,<name2> --target incident_start=<ISO time with Z> --suffix <word>` |
 | A change is found and you need what it did | the playbook of the changed service, for example `ecs.md` or `lambda.md` |
 
-Give each extra run its own `--suffix`.
+Give each extra run its own `--suffix` word.
 
 ## What the facts mean
 

@@ -8,16 +8,18 @@ a timeout, throttling, or a queue or stream that stopped being consumed.
 ## Collect
 
 The plan already runs `lambda` for the mapped function. Add these when they apply; take
-the account, region, and window from the plan's own lines; `<case>` is the case folder.
+the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| The function logs errors or timeouts | `run collect logs ... --case-dir <case> --target log_groups=/aws/lambda/<function name>` |
-| The function failed to read a queue | `run collect messaging ... --case-dir <case> --target queues=<queue name>`; see `messaging.md` |
-| The function failed to reach a database, cache, or API | `run collect rds ... --case-dir <case> --target db=<identifier>`, or the matching collector from `rds.md`, `elasticache.md`, `dynamodb.md` |
-| The execution role was denied something | `run collect access ... --case-dir <case> --target role=<execution role name>` |
-| The function runs in a VPC and calls time out | `run collect vpc ... --case-dir <case> --target subnet_ids=<the function's subnets>` |
-| A deployment or configuration change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<function name> --target incident_start=<time>` |
+| The function logs errors or timeouts | `run collect logs ... --case-dir <case> --target log_groups=/aws/lambda/<function name> --suffix <word>` |
+| The function failed to read a queue | `run collect messaging ... --case-dir <case> --target queues=<queue name> --suffix <word>`; see `messaging.md` |
+| The function failed to reach a database, cache, or API | `run collect rds ... --case-dir <case> --target db=<identifier> --suffix <word>`, or the matching collector from `rds.md`, `elasticache.md`, `dynamodb.md` |
+| The execution role was denied something | `run collect access ... --case-dir <case> --target role=<execution role name> --suffix <word>` |
+| The function runs in a VPC and calls time out | `run collect vpc ... --case-dir <case> --target subnet_ids=<the function's subnets> --suffix <word>` |
+| A deployment or configuration change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<function name> --target incident_start=<time> --suffix <word>` |
 
 ## What the facts mean
 

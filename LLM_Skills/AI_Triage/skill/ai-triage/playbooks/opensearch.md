@@ -8,12 +8,14 @@ logs are kept there and must be searched.
 
 ## Collect
 
-The plan runs `opensearch_domain` for the service map's `opensearch_domain` (command:
-`run collect opensearch_domain ... --case-dir <case> --target domain=<domain name>`) and
+The plan runs `opensearch_domain` for the service map's `opensearch_domain` (to run it again:
+`run collect opensearch_domain ... --case-dir <case> --target domain=<domain name> --suffix <word>`) and
 the query tool for the mapped `opensearch` entry. The collector reads the AWS
 control plane only: no document and no node is queried. The query tool reads the
 cluster itself; its cluster name comes from the config, not from the domain name. Take the
-account, region, and window from the plan's own lines; `<case>` is the case folder.
+account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|

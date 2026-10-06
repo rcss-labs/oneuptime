@@ -12,16 +12,18 @@ exactly and also looks up the CloudTrail event sources of the mapped resource ki
 (`event_sources`, for example `ecs.amazonaws.com`), keeping events whose record names
 one of the names. For each dependency of the service it runs `changes` again with the
 suffix `dep-<service>`. This playbook covers the CloudTrail part. Take the account,
-region, and window from the plan's lines; `<case>` is the case folder.
+region, and window from the plan's lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| A specific resource is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name1>,<name2> --target incident_start=<ISO time>` |
-| No resource is suspected | `run collect changes ... --case-dir <case> --target incident_start=<ISO time>` |
+| A specific resource is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name1>,<name2> --target incident_start=<ISO time> --suffix <word>` |
+| No resource is suspected | `run collect changes ... --case-dir <case> --target incident_start=<ISO time> --suffix <word>` |
 | The absence fact says "looked up by resource name only" | `run collect changes ... --case-dir <case> --target resource_names=<name1>,<name2> --target event_sources=<source>.amazonaws.com --target incident_start=<ISO time> --suffix sources` |
 | A deployment may be behind the change | the same command with `--target stack=<stack name>` or `--target pipeline=<pipeline name>`; see `deployments.md` |
 | The resource is recorded by AWS Config | the same command with `--target config_resource=<resource type>/<resource id>` |
-| The change was an identity or key change | `run collect access ... --case-dir <case> --target role=<role name>`; see `access.md` |
+| The change was an identity or key change | `run collect access ... --case-dir <case> --target role=<role name> --suffix <word>`; see `access.md` |
 
 Give up to ten names, and always give `incident_start`: without it the gap to the
 incident is not written and the lookup covers the whole window.

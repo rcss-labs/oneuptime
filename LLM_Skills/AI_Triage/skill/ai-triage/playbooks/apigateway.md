@@ -8,16 +8,18 @@ stage, or 429, 502, 503, or 504 responses from an API URL.
 ## Collect
 
 The plan already runs `apigateway` for the mapped API. Add these when they apply; take
-the account, region, and window from the plan's own lines; `<case>` is the case folder.
+the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| The API is an HTTP API | `run collect apigateway ... --case-dir <case> --target api_id=<api id> --target kind=http` (REST is the default) |
-| Only one stage matters | `run collect apigateway ... --case-dir <case> --target api_id=<api id> --target stage=<stage name>` |
-| The integration is a Lambda function | `run collect lambda ... --case-dir <case> --target function=<function name>` |
-| The integration is a load balancer or service behind a VPC link | `run collect edge ... --case-dir <case> --target load_balancer=<name>` |
-| The API sits behind CloudFront or a web ACL | `run collect cloudfront_waf ... --case-dir <case> --target resource_arn=<stage ARN or distribution ARN>` |
-| A stage or route changed outside a deployment | `run collect changes ... --case-dir <case> --target resource_names=<api id>` |
+| The API is an HTTP API | `run collect apigateway ... --case-dir <case> --target api_id=<api id> --target kind=http --suffix <word>` (REST is the default) |
+| Only one stage matters | `run collect apigateway ... --case-dir <case> --target api_id=<api id> --target stage=<stage name> --suffix <word>` |
+| The integration is a Lambda function | `run collect lambda ... --case-dir <case> --target function=<function name> --suffix <word>` |
+| The integration is a load balancer or service behind a VPC link | `run collect edge ... --case-dir <case> --target load_balancer=<name> --suffix <word>` |
+| The API sits behind CloudFront or a web ACL | `run collect cloudfront_waf ... --case-dir <case> --target resource_arn=<stage ARN or distribution ARN> --suffix <word>` |
+| A stage or route changed outside a deployment | `run collect changes ... --case-dir <case> --target resource_names=<api id> --suffix <word>` |
 
 ## What the facts mean
 

@@ -8,15 +8,17 @@ replication group: cache timeouts, evictions, a failover, or "OOM command not al
 ## Collect
 
 The plan already runs `elasticache` for the mapped replication group. It reports
-every member (up to 10) with events and metrics per member. Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder.
+every member (up to 10) with events and metrics per member. Add these when they apply. Take the account, region, and window from the plan's own lines; `<case>` is the case folder. `<word>` is a
+short `--suffix` of your choice: a run without one stops when that collector already
+wrote its file for the account and region, as every planned run has.
 
 | When | Command |
 |---|---|
-| Clients time out rather than get an error reply | `run collect vpc ... --case-dir <case> --target security_group_ids=<groups of the cache and of the client>` |
-| The cache is encrypted and calls fail with a key error | `run collect access ... --case-dir <case> --target kms_key=<key id>` |
-| The clients are a compute service | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s>` (or `lambda` with `function=<name>`, `eks` with `cluster=<name>`); read `ecs.md`, `lambda.md`, or `eks.md` |
-| The application's own errors are needed | `run collect logs ... --case-dir <case> --target log_groups=<application log group>` |
-| A setting change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name>` and read `cloudtrail.md` |
+| Clients time out rather than get an error reply | `run collect vpc ... --case-dir <case> --target security_group_ids=<groups of the cache and of the client> --suffix <word>` |
+| The cache is encrypted and calls fail with a key error | `run collect access ... --case-dir <case> --target kms_key=<key id> --suffix <word>` |
+| The clients are a compute service | `run collect ecs ... --case-dir <case> --target cluster=<c> --target service=<s> --suffix <word>` (or `lambda` with `function=<name>`, `eks` with `cluster=<name>`); read `ecs.md`, `lambda.md`, or `eks.md` |
+| The application's own errors are needed | `run collect logs ... --case-dir <case> --target log_groups=<application log group> --suffix <word>` |
+| A setting change is suspected | `run collect changes ... --case-dir <case> --target resource_names=<name> --suffix <word>` and read `cloudtrail.md` |
 
 ## What the facts mean
 
