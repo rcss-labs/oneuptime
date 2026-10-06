@@ -187,16 +187,39 @@ def _credentials_in_environment(env: Mapping[str, str]) -> Check | None:
     )
 
 
+CONFIG_LOCATION_VARIABLES = ("AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE")
+
+
+def _relocated_config(env: Mapping[str, str]) -> Check | None:
+    """The AWS CLI reads profiles from these files when the variables are set, so the triage profile may mean
+    something else than in ~/.aws. Names and paths only."""
+    found = [f"{name}={env[name]}" for name in CONFIG_LOCATION_VARIABLES if env.get(name)]
+    if not found:
+        return None
+    return Check(
+        "AWS config location", WARN,
+        f"{', '.join(found)} is set, so the triage profile is read from that file, not from ~/.aws",
+        "Unset it unless that file is where your triage profile is meant to come from.",
+    )
+
+
 def _alias_names(text: str) -> list[str]:
-    """Names defined in the [toplevel] section of an AWS CLI alias file."""
+    """Names defined in an AWS CLI alias file: [toplevel] aliases, and "<service> <name>" for each
+    [command <service>] section (sub-command aliases)."""
     names: list[str] = []
-    in_toplevel = False
+    section: str | None = None
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("["):
-            in_toplevel = stripped == "[toplevel]"
-        elif in_toplevel and line == line.lstrip() and "=" in stripped and not stripped.startswith(("#", ";")):
-            names.append(stripped.split("=", 1)[0].strip())
+            words = stripped.strip("[]").split()
+            if words == ["toplevel"]:
+                section = ""
+            elif len(words) >= 2 and words[0] == "command":
+                section = " ".join(words[1:]) + " "
+            else:
+                section = None
+        elif section is not None and line == line.lstrip() and "=" in stripped and not stripped.startswith(("#", ";")):
+            names.append(section + stripped.split("=", 1)[0].strip())
     return names
 
 
@@ -255,7 +278,7 @@ def run_preflight(
                 checks.append(Check(name, FAIL, identity.detail, f"Check the profile {account.profile} in your AWS config."))
 
     home = env.get("HOME") or os.path.expanduser("~")
-    for problem in (_credentials_in_environment(env), _cli_aliases(home)):
+    for problem in (_credentials_in_environment(env), _relocated_config(env), _cli_aliases(home)):
         if problem:
             checks.append(problem)
 

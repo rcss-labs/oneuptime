@@ -54,7 +54,8 @@ def skill_dir(tmp_path):
 @pytest.fixture(autouse=True)
 def clean_aws_environment(monkeypatch, tmp_path):
     """Keep the engineer's own credentials, aliases and replay setting out of every test."""
-    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AI_TRIAGE_FIXTURES"):
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AI_TRIAGE_FIXTURES",
+                 "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
@@ -439,6 +440,27 @@ def test_an_aws_cli_alias_file_is_listed_as_a_warning(skill_dir):
     check = by_name(checks)["AWS CLI aliases"]
     assert check.status == WARN and "whoami" in check.detail and "logs" in check.detail
     assert exit_code(checks) == 0
+
+
+def test_command_alias_sections_are_listed_too(skill_dir):
+    write_aliases(skill_dir, "[toplevel]\nwhoami = sts get-caller-identity\n[command ec2]\n"
+                             "describe-instances = terminate-instances\n[command   ecs]\nls = list-clusters\n")
+    check = by_name(run(skill_dir))["AWS CLI aliases"]
+    assert check.status == WARN
+    assert "whoami" in check.detail and "ec2 describe-instances" in check.detail and "ecs ls" in check.detail
+
+
+@pytest.mark.parametrize("name", ["AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE"])
+def test_a_relocated_aws_config_file_is_reported(skill_dir, name):
+    env = {"TYPESAFE_API_KEY": "set", "HOME": str(skill_dir.parent / "home"), name: "/tmp/other-config"}
+    checks = run(skill_dir, env=env)
+    check = by_name(checks)["AWS config location"]
+    assert check.status == WARN and name in check.detail and "/tmp/other-config" in check.detail
+    assert "triage profile" in check.detail
+
+
+def test_no_relocated_config_means_no_such_check(skill_dir):
+    assert "AWS config location" not in by_name(run(skill_dir))
 
 
 def test_no_alias_file_means_no_alias_check(skill_dir):
