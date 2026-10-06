@@ -2402,7 +2402,7 @@ WINDOW_TEMPLATES = [
     "Key: `{v}`",
     "token `{v}`",
     "key **{v}**",
-    "passwordless login used {v}",
+    "password reset used {v}",
     "Authorization header carried {v}",
     "key (`{v}`)",
 ]
@@ -2449,7 +2449,7 @@ def test_the_mask_keeps_the_opening_parenthesis():
         "apiKey expired yesterday",
         "S3 key logs/2026/10/04/app.log uploaded",
         "KMS key alias/payments-prod is disabled",
-        "key arn:aws:kms:us-east-1:111122223333:key/abcd1234-ab12-cd34-ef56-abcdef123456 is disabled",
+        "key arn:aws:kms:us-east-1:111111111111:key/abcd1234-ab12-cd34-ef56-abcdef123456 is disabled",
         "token (expired)",
     ],
 )
@@ -2496,3 +2496,46 @@ def test_a_value_on_the_next_line_after_a_secret_word_is_masked(source):
 )
 def test_next_line_judging_leaves_readable_lines_alone(source):
     assert Redactor().text(source) == source
+
+
+
+# Session 6, A round 2 (N1): the next-line rule accepts CRLF line ends
+
+CRLF_NEXT_LINE = {
+    "password:\r\nq8Zr2mX7wK4p": "q8Zr2mX7wK4p",
+    "token =\r\n9f8e7d6c-1234-4abc-9def-0123456789ab": "9f8e7d6c-1234-4abc-9def-0123456789ab",
+    "client_secret:\r\n  0123456789abcdef0123456789abcdef": "0123456789abcdef0123456789abcdef",
+    "client_secret:\r\n  q8Zr2mX7wK4p": "q8Zr2mX7wK4p",
+    "2026-10-05T10:00:01Z ERROR failed to load the api_key:\r\n  q8Zr2mX7wK4p": "q8Zr2mX7wK4p",
+}
+
+
+@pytest.mark.parametrize("source", sorted(CRLF_NEXT_LINE))
+def test_a_next_line_value_after_a_crlf_is_masked(source):
+    out = Redactor().text(source)
+    assert CRLF_NEXT_LINE[source] not in out, repr(out)
+
+
+# Session 6, A round 2 (N3): the window opens only on a word whose secret stem stands as its own part
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "monkey patching requestId 4f1c2b9a8e7d6c5b",
+        "hockey 1234abcd5678efgh",
+        "turkey sandwich order 4f1c2b9a8e7d6c5b9",
+        "whiskey batch 0123456789abcdef0123456789abcdef",
+    ],
+)
+def test_a_word_that_merely_ends_in_key_opens_no_window(source):
+    assert Redactor().text(source) == source
+
+
+@pytest.mark.parametrize(
+    "word", ["apiKey", "X-Api-Key", "client_secret", "access_key", "keys", "apikey", "accesskey", "secretkey",
+             "privatekey", "authtoken", "accesstoken", "session.token", "API_KEYS", "masterKey"],
+)
+def test_a_secret_stem_as_its_own_part_still_opens_the_window(word):
+    value = "0123456789abcdef" * 2
+    out = Redactor().text(f"{word} for build is {value}")
+    assert value not in out, out

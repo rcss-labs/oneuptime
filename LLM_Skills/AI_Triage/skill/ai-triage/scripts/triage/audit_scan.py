@@ -523,14 +523,14 @@ def _wrapped_vendor_candidates(text: str):
 
 
 _SECRET_WORD_RE = re.compile(
-    r"(?:api[ _-]?key|access[ _-]?key|key|token|secret|credential|passphrase|lease)s?"
+    r"(?:api[ _-]?key|access[ _-]?key|key|token|secret|credential|passphrase|lease|password|passwd)s?"
     r"(?=$|[\s|,;\"'`()\[\]{}:=<>*.!?])",
     re.IGNORECASE,
 )
 _AFTER_WORD_RE = re.compile(r"<[A-Z][A-Z0-9_]*(?:-[A-Z0-9_]+)*>|[^\s|,;\"'`()\[\]{}:=<>*]+")
 MIN_VALUE_AFTER_WORD = 16
 MIN_MIXED_NEXT_LINE = 8
-_SEPARATOR_ONLY_RE = re.compile(r"[\"'`]?[ \t]*[:=][ \t]*")
+_SEPARATOR_ONLY_RE = re.compile(r"[\"'`]?[ \t]*[:=][ \t]*\r?")
 _MIXED_RE = re.compile(r"(?=.*[A-Za-z])(?=.*\d)")
 
 

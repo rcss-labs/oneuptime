@@ -1594,8 +1594,9 @@ def _readable_after_secret_word(value: str) -> bool:
 
 
 def _names_a_secret(word: str) -> bool:
-    """key, tokens, secret ... alone, or a compound name ending in one that reads as a secret name."""
-    return bool(_BARE_SECRET_WORD_RE.fullmatch(word)) or looks_secret_key(word)
+    """key, tokens, secret ... alone, or a compound name ending in one that reads as a secret name and holds
+    the stem as its own part (apiKey, client_secret; not monkey or hockey)."""
+    return bool(_BARE_SECRET_WORD_RE.fullmatch(word)) or (looks_secret_key(word) and _holds_secret_word(word))
 
 
 def _secret_word_value_spans(text: str) -> list[Span]:
@@ -1629,23 +1630,32 @@ def _secret_word_value_spans(text: str) -> list[Span]:
 # and digits. Readable shapes stay (ARNs, plain paths, names made of plain words and short numbers).
 SECRET_WINDOW_TOKENS = 4
 _WINDOW_TOKEN_RE = re.compile(r"[^\s\"'`,;()\[\]{}<>|*]+")
-_WINDOW_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+_WINDOW_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*")
 _HEX32_RE = re.compile(r"[0-9a-fA-F]{32,}")
 _UUID_SHAPE_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _MIXED_TOKEN_RE = re.compile(r"[A-Za-z0-9_+/=.~-]{16,}")
-_WINDOW_SHORT_STEMS = frozenset({"key", "keys", "pwd", "pw", "psw", "pswd", "psk", "tok", "jwt", "otp", "passcode",
-                                 "pincode"})
+# A secret stem counts only as its own part of a name (split on _ - . and camel case, trailing digits dropped):
+# the word or its plural, or one of the joined compounds below. "monkey", "hockey" and "passwordless" open nothing.
+SECRET_STEM_PARTS = frozenset({
+    "key", "keys", "pwd", "pw", "psw", "pswd", "psk", "tok", "jwt", "otp", "passcode", "pincode",
+    "password", "passwords", "passwd", "pass", "passphrase", "passphrases", "secret", "secrets", "token", "tokens",
+    "credential", "credentials", "cred", "creds", "cookie", "cookies", "bearer", "signature", "signatures", "sig",
+    "hmac", "auth", "oauth", "authorization", "authentication", "apikey", "apikeys",
+}) | SESSION_SECRET_WORDS
+JOINED_SECRET_COMPOUNDS = frozenset({
+    "accesskey", "accesskeys", "secretkey", "secretkeys", "privatekey", "privatekeys", "authkey", "masterkey",
+    "signingkey", "encryptionkey", "secretaccesskey", "xapikey", "authtoken", "accesstoken", "accesstokens",
+    "refreshtoken", "refreshtokens", "idtoken", "apitoken", "bearertoken", "securitytoken", "sastoken", "clienttoken",
+    "usertoken", "oauthtoken", "clientsecret", "appsecret", "apisecret", "webhooksecret", "dbpassword", "rootpassword",
+    "adminpassword", "masterpassword",
+})
 
 
 @functools.lru_cache(maxsize=8192)
 def _holds_secret_word(word: str) -> bool:
-    """Whether a word holds a secret stem anywhere: key, apiKey, X-Api-Key, passwordless, Authorization."""
-    for part in _name_parts(word) or ():
-        if part in _WINDOW_SHORT_STEMS or _holds_secret_stem(part) or part in SESSION_SECRET_WORDS:
-            return True
-        if any(part.endswith(stem) and len(part) > len(stem) for stem in END_SECRET_STEMS):
-            return True
-    return False
+    """Whether a word holds a secret stem as its own part: key, keys, apiKey, X-Api-Key, client_secret,
+    session.token, Authorization, apikey, accesstoken. Not monkey, hockey or passwordless."""
+    return any(part in SECRET_STEM_PARTS or part in JOINED_SECRET_COMPOUNDS for part in _name_parts(word) or ())
 
 
 _TIMESTAMP_SHAPE_RE = re.compile(
@@ -1707,7 +1717,7 @@ def _secret_window_spans(text: str) -> list[Span]:
 
 # A line ending in a secret word (any form the rules above accept) and ":" or "=" has its value judged on the
 # next non-empty line: the first token there is redacted as if it stood after the separator on the same line.
-_WORD_THEN_SEPARATOR_RE = re.compile(r"""(?P<word>[A-Za-z][\w.-]*)["']?[ \t]*(?P<sep>[:=])[ \t]*$""")
+_WORD_THEN_SEPARATOR_RE = re.compile(r"""(?P<word>[A-Za-z][\w.-]*)["']?[ \t]*(?P<sep>[:=])[ \t]*\r?$""")
 _NEXT_LINE_TOKEN_RE = re.compile(r"[ \t]*(?P<token>\S+)")
 _CODE_BEFORE_WORD_RE = re.compile(r"[()\[\]{}<>,;=]")
 _NEXT_LINE_CORE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_+/=.~-]*[A-Za-z0-9=]|[A-Za-z0-9]")
@@ -1732,7 +1742,8 @@ def _next_line_value_spans(text: str) -> list[Span]:
         if not match:
             continue
         word = match.group("word")
-        if not (_holds_secret_word(word) or _names_a_secret(word) or looks_secret_key(word)):
+        if not (_holds_secret_word(word) or _names_a_secret(word)
+                or (looks_secret_key(word) and any(part in SHORT_SECRET_STEMS for part in _name_parts(word)))):
             continue
         following = next(((start, body) for start, body in lines[index + 1:] if body.strip()), None)
         if following is None:

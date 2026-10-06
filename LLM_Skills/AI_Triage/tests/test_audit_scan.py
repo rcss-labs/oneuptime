@@ -1135,3 +1135,12 @@ def test_a_short_mixed_value_on_the_next_line_is_flagged(source):
                                     "key rotation\nq8Zr2mX7wK4p"])
 def test_the_short_next_line_rule_needs_word_then_separator_and_a_mixed_value(source):
     assert "secret_word_value" not in [hit.kind for hit in scan(source)]
+
+
+
+# Session 6, A round 2 (N1): CRLF line ends in the next-line rule
+
+@pytest.mark.parametrize("source", ["password:\r\nq8Zr2mX7wK4p", "token =\r\n9f8e7d6c-1234-4abc-9def-0123456789ab",
+                                    "client_secret:\r\n  0123456789abcdef0123456789abcdef", "key:\r\n q8Zr2mX7wK4p"])
+def test_a_next_line_value_after_a_crlf_is_flagged(source):
+    assert [hit.kind for hit in scan(source)] != []
