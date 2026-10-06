@@ -1546,13 +1546,23 @@ def _table_spans(text: str) -> list[Span]:
 
 # --- values right after a secret word in prose (final review C2) ---------------------------
 
-# key, api key, access key, token, secret, credential(s), passphrase, lease (and compounds such as
-# "gateway key" or "client secret"), joined to the value by a space, ":", "=", "is"/"was", or quotes.
+# The word: key, token, secret, credential, passphrase or lease, singular or plural, alone or ending a compound name
+# (access_key, client_secret, apiKey, X-Api-Key). A compound must read as a secret name (looks_secret_key), so
+# PartitionKey and cache_key stay out. The joiner is any short run of separators (space, ":", "=", "-", "->",
+# an arrow, ",", "[", "(", a table bar, quotes, backticks, Markdown emphasis) with an optional "is"/"was"/"were".
+_SECRET_WORD_BARE = r"(?:key|token|secret|credential|passphrase|lease)s?"
 SECRET_WORD_VALUE_RE = re.compile(
-    r"""(?i)(?<![\w:/.-])(?:key|token|secret|credentials?|passphrase|lease)(?![\w-])"""
-    r"""(?:["']?[ \t]*[:=][ \t]*["']?|[ \t]+(?:(?:is|was)[ \t]+)?["']?|["'])"""
-    r"""(?P<value>[^\s"'`,;)\]}<>{\[|]+)"""
+    r"""(?i)(?<![\w:/.])(?P<word>[A-Za-z0-9_-]{0,60}?""" + _SECRET_WORD_BARE + r""")(?![\w-])"""
+    r"""(?P<join>[ \t"'`*_|:=,(\[\u2192-]*(?:(?<![\w])(?:is|was|were)(?![\w])[ \t"'`*_|:=,(\[\u2192>-]*)?)"""
+    r"""(?<=[ \t"'`*_|:=,(\[\u2192>-])(?P<value>[^\s"'`,;()\]}<>{\[|*]+)"""
 )
+_BARE_SECRET_WORD_RE = re.compile(r"(?i)" + _SECRET_WORD_BARE)
+# The shapes the rule had before session 6: a singular word (or "credentials") joined by a space, ":", "=",
+# "is"/"was" or a quote. Any value there that is not readable is masked; with the other words and joiners
+# (plurals, compound names, backticks, commas, dashes, arrows, brackets, table bars) only a value that mixes
+# letters and digits is, so lists of names ("DescribeDimensionKeys, GetDimensionKeyDetails") stay readable.
+_CLASSIC_WORD_RE = re.compile(r"(?i)key|token|secret|credentials?|passphrase|lease")
+_CLASSIC_JOIN_RE = re.compile(r"""["']?[ \t]*[:=][ \t]*["']?|[ \t]+(?:(?:is|was)[ \t]+)?["']?|["']""", re.IGNORECASE)
 _WORD_PART_SEPARATORS_RE = re.compile(r"[-_./:@]+")
 MIN_MASKED_AFTER_WORD = 8      # shorter values after a secret word stay readable
 MAX_PLAIN_WORD = 15            # a single letter-only word up to this length reads as English
@@ -1583,8 +1593,13 @@ def _readable_after_secret_word(value: str) -> bool:
     )
 
 
+def _names_a_secret(word: str) -> bool:
+    """key, tokens, secret ... alone, or a compound name ending in one that reads as a secret name."""
+    return bool(_BARE_SECRET_WORD_RE.fullmatch(word)) or looks_secret_key(word)
+
+
 def _secret_word_value_spans(text: str) -> list[Span]:
-    """The value right after a secret word in prose, whatever its shape (unless it is readable)."""
+    """The value right after a secret word in prose, whatever its shape and separator (unless it is readable)."""
     arns = [m.span() for m in _ARN_RE.finditer(text)] if "arn:" in text else []
     arn_starts = [start for start, _ in arns]
     spans = []
@@ -1593,12 +1608,106 @@ def _secret_word_value_spans(text: str) -> list[Span]:
         index = bisect.bisect_right(arn_starts, match.start()) - 1
         if index >= 0 and match.start() < arns[index][1]:
             continue  # "secret" inside an ARN
+        if "\n" in match.group("join") or not _names_a_secret(match.group("word")):
+            continue
         start, end = match.span("value")
-        while end > start and text[end - 1] in ".:!?":
+        while end > start and text[end - 1] in ".:!?_":
             end -= 1
-        if end > start and not _readable_after_secret_word(text[start:end]):
+        value = text[start:end]
+        if end <= start or _readable_after_secret_word(value):
+            continue
+        classic = _CLASSIC_WORD_RE.fullmatch(match.group("word")) and _CLASSIC_JOIN_RE.fullmatch(match.group("join"))
+        if classic or (any(c.isalpha() for c in value) and any(c.isdigit() for c in value)):
             spans.append((start, end))
     return [span for span in spans if _usable(text, span)]
+
+
+# --- token-shaped values near any word holding a secret stem (session 6 ruling on A-C2) -----
+
+# On one line, a token-shaped value within the next few tokens after any word that holds a secret stem is
+# masked whatever separates them. Token-shaped: 32+ hex digits, a UUID, or 16+ characters mixing letters
+# and digits. Readable shapes stay (ARNs, plain paths, names made of plain words and short numbers).
+SECRET_WINDOW_TOKENS = 4
+_WINDOW_TOKEN_RE = re.compile(r"[^\s\"'`,;()\[\]{}<>|*]+")
+_WINDOW_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+_HEX32_RE = re.compile(r"[0-9a-fA-F]{32,}")
+_UUID_SHAPE_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_MIXED_TOKEN_RE = re.compile(r"[A-Za-z0-9_+/=.~-]{16,}")
+_WINDOW_SHORT_STEMS = frozenset({"key", "keys", "pwd", "pw", "psw", "pswd", "psk", "tok", "jwt", "otp", "passcode",
+                                 "pincode"})
+
+
+@functools.lru_cache(maxsize=8192)
+def _holds_secret_word(word: str) -> bool:
+    """Whether a word holds a secret stem anywhere: key, apiKey, X-Api-Key, passwordless, Authorization."""
+    for part in _name_parts(word) or ():
+        if part in _WINDOW_SHORT_STEMS or _holds_secret_stem(part) or part in SESSION_SECRET_WORDS:
+            return True
+        if any(part.endswith(stem) and len(part) > len(stem) for stem in END_SECRET_STEMS):
+            return True
+    return False
+
+
+_TIMESTAMP_SHAPE_RE = re.compile(
+    r"\d{4}-?\d{2}-?\d{2}(?:T\d{2}:?\d{2}(?::?\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?")
+_HOSTNAME_SHAPE_RE = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}\.?")
+
+
+def _token_shaped(value: str) -> bool:
+    if PLACEHOLDER_RE.search(value) or value.lower().startswith("arn:") or "://" in value:
+        return False
+    if _HEX32_RE.search(value) or _UUID_SHAPE_RE.search(value):
+        return True
+    if not _MIXED_TOKEN_RE.fullmatch(value) or not any(c.isalpha() for c in value) or not any(c.isdigit() for c in value):
+        return False
+    if _TIMESTAMP_SHAPE_RE.fullmatch(value) or _HOSTNAME_SHAPE_RE.fullmatch(value):
+        return False  # 20261005T100000Z, 111111111111.dkr.ecr.eu-west-1.amazonaws.com
+    return not _readable_after_secret_word(value)
+
+
+def _window_value_span(text: str, start: int, end: int) -> Span | None:
+    """The secret part of a token: a name=value or name:value token gives its value; trailing punctuation is cut."""
+    token = text[start:end]
+    if token.lower().startswith("arn:") or "://" in token:
+        return None
+    cut = max(token.rfind("="), token.rfind(":"))
+    if cut >= 0:
+        start += cut + 1
+    while end > start and text[end - 1] in ".:!?_":
+        end -= 1
+    return (start, end) if end > start else None
+
+
+def _secret_window_spans(text: str) -> list[Span]:
+    spans = []
+    # A mask already in the text (<SECRET-1>) is neither a secret word nor a value.
+    blanked = PLACEHOLDER_RE.sub(lambda m: " " * len(m.group()), text) if "<" in text else text
+    for line_start, line in _lines_with_offsets(blanked):
+        tokens = [m.span() for m in _WINDOW_TOKEN_RE.finditer(line)]
+        remaining = 0
+        for token_start, token_end in tokens:
+            _tick()
+            raw = line[token_start:token_end]
+            if remaining:
+                span = _window_value_span(line, token_start, token_end)
+                if span and _token_shaped(line[span[0]:span[1]]):
+                    spans.append((line_start + span[0], line_start + span[1]))
+                remaining -= 1
+            words = [w.group() for w in _WINDOW_WORD_RE.finditer(raw)] if not raw.lower().startswith("arn:") else []
+            if words and "://" not in raw and _holds_secret_word(words[0]):
+                if len(words) > 1 or "=" in raw or ":" in raw:
+                    span = _window_value_span(line, token_start, token_end)
+                    if span and span[0] > token_start and _token_shaped(line[span[0]:span[1]]):
+                        spans.append((line_start + span[0], line_start + span[1]))
+                remaining = SECRET_WINDOW_TOKENS
+    return [span for span in spans if _usable(text, span)]
+
+
+def _lines_with_offsets(text: str):
+    position = 0
+    for line in text.split("\n"):
+        yield position, line
+        position += len(line) + 1
 
 
 # --- schemeless userinfo and Windows shapes ------------------------------------------------
@@ -1678,6 +1787,7 @@ SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("secret_key_value", _key_value_spans),
     ("secret_name_value", _name_value_spans),
     ("secret_after_word", _secret_word_value_spans),
+    ("secret_near_word", _secret_window_spans),
     ("cli_shorthand", _shorthand_spans),
     ("secret_loose_name_value", lambda text: _merge(_loose_name_value_spans(text) + _yaml_item_spans(text))),
     ("secret_sentence", _sentence_spans),

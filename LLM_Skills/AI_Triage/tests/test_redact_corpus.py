@@ -328,6 +328,14 @@ LEAKS = [
     ("c2-secret-rejected", "secret " + _random(72, 20) + " was rejected", _random(72, 20)),
     ("c2-credential-passphrase", "gateway rejected credential " + "Winter" + "2026!" + "Kassa#9", "Kassa#9"),
     ("c2-lease", "vault lease " + _hex(73, 32) + " expired", _hex(73, 32)),
+    # session 6 A-C2: the separator-agnostic window (re-review t7 shapes)
+    ("a6-backtick-api-key", "Invalid API key `" + _hex(74, 32) + "`", _hex(74, 32)),
+    ("a6-plural-keys-uuid", "keys: 9f8e7d6c-" + "1234-4abc-9def-" + "0123456789ab", "0123456789ab"),
+    ("a6-client-secret", "client_secret " + _hex(75, 32), _hex(75, 32)),
+    ("a6-x-api-key", "X-Api-Key " + _hex(76, 32), _hex(76, 32)),
+    ("a6-table-cell", "| key | 9f8e7d6c-" + "1234-4abc-9def-" + "0123456789ab |", "0123456789ab"),
+    ("a6-comma-prose", "The new key, " + _random(77, 20) + ", was rotated", _random(77, 20)),
+    ("a6-short-after-word", "key: `" + "q8Zr2mX7" + "wK4p`", "q8Zr2mX7" + "wK4p"),
     # follow-up after round 5
     ("go-mysql-dsn", "dial failed: app:" + PWP + "@tcp(db.internal:3306)/orders", PWP),
     ("oracle-bare-host", "sqlplus -s scott/" + PWP + "@//orcldb:1521/ORCL", PWP),

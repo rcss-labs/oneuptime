@@ -2365,3 +2365,93 @@ def test_passphrase_like_value_after_a_secret_word_is_masked(template):
 )
 def test_readable_values_after_secret_words_are_kept(source):
     assert Redactor().text(source) == source
+
+
+# ---------------------------------------------------------------------------
+# Session 6 A-C2 ruling: separator-agnostic window. A token-shaped value (32+ hex, UUID, or 16+
+# characters mixing letters and digits) within the next few tokens after any word holding a
+# secret stem is masked, whatever joins them; 8-15 character values after an exact secret word
+# (plurals and compound names ending in one included) are masked too.
+# ---------------------------------------------------------------------------
+WINDOW_VALUES = {
+    "hex32": "0123456789abcdef" + "0123456789abcdef",
+    "uuid": "9f8e7d6c-1234-" + "4abc-9def-0123456789ab",
+    "mixed16": "q8Zr2mX7wK4p" + "T3vN",
+}
+WINDOW_TEMPLATES = [
+    "Invalid API key `{v}`",
+    "keys: {v}",
+    "keys={v}",
+    "tokens {v}",
+    "access_key {v}",
+    "apiKey {v}",
+    "client_secret {v}",
+    "X-Api-Key {v}",
+    "AccessKey {v}",
+    "secret_access_key {v}",
+    "api_token {v}",
+    "key is: {v}",
+    "key - {v}",
+    "key → {v}",
+    "api_key → {v}",
+    "key [{v}]",
+    "key,{v}",
+    "| key | {v} |",
+    "The new key, {v}, was rotated",
+    "the key for prod is {v}",
+    "Key: `{v}`",
+    "token `{v}`",
+    "key **{v}**",
+    "passwordless login used {v}",
+    "Authorization header carried {v}",
+    "key (`{v}`)",
+]
+
+
+@pytest.mark.parametrize("template", WINDOW_TEMPLATES)
+@pytest.mark.parametrize("shape", sorted(WINDOW_VALUES))
+def test_token_shaped_value_near_a_secret_word_is_masked_whatever_the_separator(shape, template):
+    value = WINDOW_VALUES[shape]
+    out = Redactor().text(template.format(v=value))
+    assert value not in out, out
+    assert "<SECRET-1>" in out
+
+
+SHORT_MIXED = "q8Zr2mX7" + "wK4p"  # 12 characters: below the token window, caught by the exact-word rule
+SHORT_TEMPLATES = [
+    "key: `{v}`", "keys: {v}", "tokens {v}", "access_key {v}", "apiKey {v}", "api_token {v}",
+    "key is: {v}", "key → {v}", "key - {v}", "key [{v}]", "key,{v}", "Key `{v}`", "client_secret {v}",
+    "session token {v}", "x-api-key: {v}", "AccessKey {v}", "secret_access_key {v}", "token `{v}`",
+    "key **{v}**", "key _{v}_", "| key | {v} |", "key ({v})", "secrets: {v}",
+]
+
+
+@pytest.mark.parametrize("template", SHORT_TEMPLATES)
+def test_short_mixed_value_after_an_exact_secret_word_is_masked(template):
+    out = Redactor().text(template.format(v=SHORT_MIXED))
+    assert SHORT_MIXED not in out, out
+
+
+def test_the_mask_keeps_the_opening_parenthesis():
+    assert Redactor().text("key (" + SHORT_MIXED + ")") == "key (<SECRET-1>)"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "key, which is rotated daily",
+        "tokens: 512 used of 4096",
+        "key - see the runbook",
+        "keys: 3 active, 1 pending",
+        "the key for prod is payments",
+        "| key | rotated |",
+        "access_key rotation enabled",
+        "apiKey expired yesterday",
+        "S3 key logs/2026/10/04/app.log uploaded",
+        "KMS key alias/payments-prod is disabled",
+        "key arn:aws:kms:us-east-1:111122223333:key/abcd1234-ab12-cd34-ef56-abcdef123456 is disabled",
+        "token (expired)",
+    ],
+)
+def test_readable_text_near_secret_words_is_kept(source):
+    assert Redactor().text(source) == source
