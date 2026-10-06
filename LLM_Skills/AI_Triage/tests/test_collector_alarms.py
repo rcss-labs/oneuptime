@@ -370,3 +370,39 @@ def test_in_alarm_other_than_true_is_not_used(config_data, tmp_path):
     ctx, aws = run(config_data, tmp_path, {}, {"in_alarm": "false"})
     assert not aws.calls
     assert ctx.evidence.errors[0]["code"] == "InvalidTarget"
+
+
+def _denied():
+    return (254, "An error occurred (AccessDeniedException) when calling the DescribeAlarms operation: not authorized")
+
+
+def test_failed_describe_is_not_reported_as_absence(config_data, tmp_path):
+    for targets in ({"name_prefix": "checkout"}, {"in_alarm": "true"}, {"alarm_names": "cpu-high"}):
+        ctx, _ = run(config_data, tmp_path, {"cloudwatch describe-alarms": _denied()}, targets)
+        assert ctx.evidence.errors, targets
+        assert not any("No alarms" in s for s in fact_summaries(ctx)), targets
+        failed = [f for f in ctx.evidence.facts if "could not be read" in f.summary]
+        assert len(failed) == 1, targets
+        assert "cloudwatch describe-alarms" in failed[0].command
+
+
+def test_one_failed_query_beside_an_empty_one_states_no_absence(config_data, tmp_path):
+    def runner(argv, timeout):
+        if "--state-value" in argv:
+            return _denied()[0], "", _denied()[1]
+        return 0, json.dumps({"MetricAlarms": []}), ""
+
+    ctx, _, _ = make_context(config_data, tmp_path, {}, collector="alarms")
+    ctx.runner = runner
+    COLLECTOR.run(ctx, {"name_prefix": "checkout", "in_alarm": "true"})
+    assert ctx.evidence.errors
+    assert not any("No alarms" in s for s in fact_summaries(ctx))
+    assert any("could not be read" in s for s in fact_summaries(ctx))
+
+
+def test_absence_fact_carries_the_command_and_names_the_in_alarm_search(config_data, tmp_path):
+    ctx, _ = run(config_data, tmp_path, {"cloudwatch describe-alarms": {"MetricAlarms": []}}, {"in_alarm": "true"})
+    [fact] = [f for f in ctx.evidence.facts if f.summary.startswith("No alarms")]
+    assert "cloudwatch describe-alarms" in fact.command
+    assert "ALARM state" in fact.summary
+    assert "names or prefix" not in fact.summary

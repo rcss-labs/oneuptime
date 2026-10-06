@@ -46,6 +46,11 @@ TARGETS = {
     "vpc": {"vpc_id": "vpc-0abc"},
 }
 
+# Further target sets for a collector whose targets take different paths (name, then the variant label).
+VARIANTS: dict[str, tuple[str, dict]] = {
+    "alarms[in_alarm]": ("alarms", {"in_alarm": "true"}),
+}
+
 # Operations known to word an absence about a failed read. Each is a gap for the collector's owner to fix.
 KNOWN_GAPS: dict[tuple[str, str], str] = {}
 
@@ -121,8 +126,10 @@ def _config() -> dict:
     return copy.deepcopy(yaml.safe_load(Path(EXAMPLE_CONFIG).read_text()))
 
 
-def _run(tmp_path, name, overrides):
+def _run(tmp_path, name, overrides, variant=None):
     targets, answers, kube = _seed(name)
+    if variant:
+        name, targets = VARIANTS[variant][0], dict(VARIANTS[variant][1])
     answers = {**answers, **overrides}
     collector = all_collectors()[name]
     ctx, aws, _ = make_context(_config(), tmp_path, answers, collector=name, kube_answers=kube)
@@ -133,13 +140,14 @@ def _run(tmp_path, name, overrides):
     return ctx, aws
 
 
-def _operations(name: str) -> list[tuple[str, str]]:
+def _operations(name: str, variant=None) -> list[tuple[str, str]]:
     with tempfile.TemporaryDirectory() as tmp:
-        _, aws = _run(Path(tmp), name, {})
+        _, aws = _run(Path(tmp), name, {}, variant)
     return sorted({(call[1], call[2]) for call in aws.calls})
 
 
-CASES = [(name, service, operation) for name in sorted(TARGETS) for service, operation in _operations(name)]
+RUNS = [(name, None) for name in sorted(TARGETS)] + [(VARIANTS[v][0], v) for v in sorted(VARIANTS)]
+CASES = [(name, variant, service, operation) for name, variant in RUNS for service, operation in _operations(name, variant)]
 
 
 def test_every_registered_collector_has_a_target():
@@ -147,8 +155,11 @@ def test_every_registered_collector_has_a_target():
 
 
 def _absence_claims(ctx, service: str, operation: str) -> list[str]:
+    """Absence facts built from the failed call, and absence facts that carry no command at all
+    (those cannot be told apart from one built on the failed call)."""
     marker = f" {service} {operation} "
-    return [f.summary for f in ctx.evidence.facts if marker in f" {f.command} " and ABSENCE.search(f.summary)]
+    return [f.summary for f in ctx.evidence.facts
+            if (marker in f" {f.command} " or not f.command.strip()) and ABSENCE.search(f.summary)]
 
 
 def test_the_check_catches_an_absence_claim_about_a_failed_read(tmp_path):
@@ -167,9 +178,20 @@ def test_the_seeds_reach_past_the_first_call():
     assert {"ecs", "access", "rds", "vpc", "eks", "edge", "lambda", "changes"} <= deep
 
 
-@pytest.mark.parametrize("name,service,operation", CASES, ids=[f"{n}:{s}.{o}" for n, s, o in CASES])
-def test_failed_read_is_not_reported_as_absence(tmp_path, name, service, operation):
-    ctx, _ = _run(tmp_path, name, {f"{service} {operation}": access_denied(operation)})
+def test_the_check_catches_an_absence_claim_with_no_command(tmp_path):
+    ctx, _, _ = make_context(_config(), tmp_path, {}, collector="alarms")
+    ctx.evidence.add(kind="current", resource="alarms", summary="No alarms were found")
+    assert _absence_claims(ctx, "cloudwatch", "describe-alarms") == ["No alarms were found"]
+
+
+def test_the_in_alarm_variant_is_covered():
+    assert ("alarms", "alarms[in_alarm]", "cloudwatch", "describe-alarms") in CASES
+
+
+@pytest.mark.parametrize("name,variant,service,operation", CASES,
+                         ids=[f"{v or n}:{s}.{o}" for n, v, s, o in CASES])
+def test_failed_read_is_not_reported_as_absence(tmp_path, name, variant, service, operation):
+    ctx, _ = _run(tmp_path, name, {f"{service} {operation}": access_denied(operation)}, variant)
     assert ctx.evidence.errors, "the failed call must be recorded as an error"
     claims = _absence_claims(ctx, service, operation)
     if claims and (name, f"{service}.{operation}") in KNOWN_GAPS:

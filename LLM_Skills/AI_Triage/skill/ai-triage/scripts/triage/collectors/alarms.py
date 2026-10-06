@@ -19,9 +19,14 @@ MAX_HISTORY_PAGES = 5
 ALARM_TYPES = ["--alarm-types", "CompositeAlarm", "MetricAlarm"]
 
 
-def _describe(ctx: CollectContext, names: list[str], prefix: str | None, in_alarm: bool = False) -> list[tuple[dict, str]]:
-    """The alarms found, each with the command that returned it."""
+def _describe(
+    ctx: CollectContext, names: list[str], prefix: str | None, in_alarm: bool = False,
+) -> tuple[list[tuple[dict, str]], list[str], str]:
+    """The alarms found, each with the command that returned it; the commands that failed; and
+    the last command that answered (empty when none did)."""
     alarms: dict[str, tuple[dict, str]] = {}
+    failed: list[str] = []
+    answered = ""
     queries = []
     if names:
         queries.append(["--alarm-names", *names[:MAX_ALARMS]])
@@ -31,6 +36,10 @@ def _describe(ctx: CollectContext, names: list[str], prefix: str | None, in_alar
         queries.append(["--state-value", "ALARM", "--max-items", str(MAX_ALARMS)])
     for args in queries:
         reply = ctx.aws("cloudwatch", "describe-alarms", [*args, *ALARM_TYPES])
+        if reply is None:
+            failed.append(ctx.last_command)
+            continue
+        answered = ctx.last_command
         if (reply or {}).get("NextToken") and "--alarm-name-prefix" in args:
             ctx.evidence.add(
                 kind=DERIVED, resource="alarms", command=ctx.last_command,
@@ -43,7 +52,19 @@ def _describe(ctx: CollectContext, names: list[str], prefix: str | None, in_alar
             )
         for alarm in (reply or {}).get("MetricAlarms", []) + (reply or {}).get("CompositeAlarms", []):
             alarms.setdefault(alarm.get("AlarmName", ""), (alarm, ctx.last_command))
-    return list(alarms.values())
+    return list(alarms.values()), failed, answered
+
+
+def _searched(names: list[str], prefix: str | None, in_alarm: bool) -> str:
+    """How the alarms were looked up, for the absence fact."""
+    ways = []
+    if names:
+        ways.append(f"by name ({', '.join(names[:MAX_ALARMS])})")
+    if prefix:
+        ways.append(f"by name prefix {prefix}")
+    if in_alarm:
+        ways.append("in the ALARM state")
+    return ways[0] if len(ways) == 1 else ", ".join(ways[:-1]) + " or " + ways[-1]
 
 
 def _add_current(ctx: CollectContext, alarm: dict, command: str) -> None:
@@ -150,9 +171,19 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
             ctx.evidence.add_error("", INVALID_TARGET, f"target {key} has no usable value, so it was not used")
     if not any(usable.values()):
         return
-    alarms = _describe(ctx, names, prefix, in_alarm)
+    alarms, failed, answered = _describe(ctx, names, prefix, in_alarm)
+    for command in failed:
+        # Never an absence: the list was not read, so whether alarms exist is unknown.
+        ctx.evidence.add(
+            kind=DERIVED, resource="alarms", command=command,
+            summary="The alarm list could not be read (see errors); alarms that this lookup would have returned are unknown",
+        )
     if not alarms:
-        ctx.evidence.add(kind=CURRENT, resource="alarms", summary="No alarms were found for the given names or prefix")
+        if not failed:
+            ctx.evidence.add(
+                kind=CURRENT, resource="alarms", command=answered,
+                summary=f"No alarms were found {_searched(names, prefix, in_alarm)}",
+            )
         return
     for alarm, command in alarms:
         _add_current(ctx, alarm, command)
