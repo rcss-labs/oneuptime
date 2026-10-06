@@ -2168,3 +2168,11 @@ def test_making_hypothesis_results_agree_after_judging_is_not_an_edit(case_dir, 
         r["hypotheses"][0]["result"] = "inconclusive"
     assert problems_for(mutated(draft, step_nine), case, findings, config) == []
 
+
+@pytest.mark.parametrize("key,field", [("findings", "id"), ("findings", "claim"), ("findings", "quote"),
+                                       ("findings", "provenance"), ("causes", "id"), ("causes", "statement")])
+def test_work_order_cause_and_finding_text_must_not_be_blank(case, key, field):
+    order = build_work_order(VALID_REPORT, case, RENDERED_AT)
+    order["findings"] = [{"id": "compute-1", "claim": "c", "quote": "q", "provenance": "p"}]
+    order[key][0][field] = "  "
+    assert_problem(validate_work_order(order), f"{key}[0]", field)

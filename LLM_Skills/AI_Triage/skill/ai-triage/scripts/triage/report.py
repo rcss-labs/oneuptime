@@ -971,7 +971,7 @@ def _check_work_order_causes(work_order: dict, problems: list[str]) -> None:
                     continue
                 _only_keys(entry, text_keys + (("label", "finding_ids") if key == "causes" else ()), where, problems)
                 for text_key in text_keys:
-                    _text_field(entry, text_key, where, problems, required_text=text_key != "quote" and text_key != "claim" or True)
+                    _text_field(entry, text_key, where, problems)  # every one must be non-empty text
                 if key == "causes":
                     _choice_field(entry, "label", LABEL_ORDER, where, problems)
                     _string_list_field(entry, "finding_ids", where, problems)
