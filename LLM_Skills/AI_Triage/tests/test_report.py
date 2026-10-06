@@ -2197,3 +2197,12 @@ def test_names_keys_arns_and_values_in_a_map_change_are_not_label_words(findings
 def test_a_label_word_in_the_reason_of_a_map_change_is_refused(findings, config, change, path):
     report = mutated(VALID_REPORT, lambda r: r["map_changes"].append(change))
     assert any(problem.startswith(path + ": labels are printed") for problem in check_draft(report, findings, config))
+
+
+@pytest.mark.parametrize("change,path", [
+    ({"summary": "root cause confirmed by TypeSafe"}, "map_changes[0].summary"),
+    ({"service": "orders", "details": {"text": "the probable fault"}}, "map_changes[0].details.text"),
+])
+def test_any_prose_value_of_a_map_change_object_is_checked_whatever_its_key(findings, config, change, path):
+    report = mutated(VALID_REPORT, lambda r: r["map_changes"].append(change))
+    assert any(problem.startswith(path + ": labels are printed") for problem in check_draft(report, findings, config))

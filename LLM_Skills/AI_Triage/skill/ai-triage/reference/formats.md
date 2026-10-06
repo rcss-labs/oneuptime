@@ -224,9 +224,9 @@ Before judging write placeholders in the fields marked after, because `judge.py 
 Label words. No text you write in the draft may contain `confirmed`, `probable`, `candidate`, `recommended`, `root cause`, or
 `TypeSafe` as a whole word: the summary text, symptoms, cause statements, every hypothesis and action field, open questions,
 `coverage.not_checked`, and the prose of `map_changes` (every field the draft digest covers). Ids, `type`, `target`, the finding
-id lists, and the fields marked after are not checked. In a map change only a text item and the `note`, `reason`, `why`,
-`description`, `comment`, and `rationale` fields of an object item are checked, and a word joined to a name by `-`, `_`, `.`, `/`,
-or `:` (`candidate-api`, an ARN) counts as the name. Validation lists each one as
+id lists, and the fields marked after are not checked. In a map change a text item is checked, and so is every
+string value of an object item that contains whitespace, whatever its key; a value without whitespace (a name, a map key,
+an ARN) is not. A word joined to a name by `-`, `_`, `.`, `/`, or `:` (`candidate-api`, an ARN) counts as the name. Validation lists each one as
 `<path>: labels are printed from the judgments; describe what happened without them`.
 
 Ids. A cause, hypothesis, or action id matches `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`; ids are unique within their list.

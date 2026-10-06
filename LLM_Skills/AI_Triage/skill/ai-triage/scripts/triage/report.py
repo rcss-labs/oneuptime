@@ -681,8 +681,7 @@ def _too_deep(value: Any) -> bool:
 
 # Keys whose values are ids or allowed values, not prose; a resource may be named "candidate-api".
 IDENTIFIER_KEYS = frozenset({"id", "cause", "supporting", "contradicting", "finding_ids", "target", "type"})
-# A map change holds resource names, map keys, and ARNs; only these fields of an object item are prose.
-MAP_CHANGE_TEXT_KEYS = frozenset({"note", "reason", "why", "description", "comment", "rationale"})
+# A map change holds resource names, map keys, and ARNs; in an object item only a value with whitespace is prose.
 # In a map change a label word joined to a name (candidate-api, probable.orders, arn:...:confirmed) is a name.
 NAME_SAFE_LABEL_WORD_RE = re.compile(
     r"(?<![\w./:-])(?:confirmed|probable|candidate|recommended|root\s+cause|typesafe)(?![\w./-])(?!:\S)", re.IGNORECASE)
@@ -703,14 +702,26 @@ def _free_text(value: Any, path: str):
 
 
 def _map_change_text(changes: Any):
-    """Yield (path, text) for the prose of each map change: a text item, or the note fields of an object item."""
+    """Yield (path, text) for the prose of each map change: a text item, or any string value of an object item
+    that contains whitespace, whatever its key. A value without whitespace is a name, a key, or an ARN."""
     for index, item in enumerate(changes if isinstance(changes, list) else []):
         if isinstance(item, str):
             yield f"map_changes[{index}]", item
-        elif isinstance(item, dict):
-            for key, value in item.items():
-                if key in MAP_CHANGE_TEXT_KEYS:
-                    yield from _free_text(value, f"map_changes[{index}].{key}")
+        elif isinstance(item, (dict, list)):
+            for path, text in _all_strings(item, f"map_changes[{index}]"):
+                if any(char.isspace() for char in text.strip()):
+                    yield path, text
+
+
+def _all_strings(value: Any, path: str):
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _all_strings(item, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _all_strings(item, f"{path}[{index}]")
 
 
 def _check_label_words(report: dict, problems: list[str]) -> None:
