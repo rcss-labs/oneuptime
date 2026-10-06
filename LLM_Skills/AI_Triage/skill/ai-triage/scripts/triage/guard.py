@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from triage.commands import COMMANDS
 from triage.config import TriageConfig
 from triage.guard_aws import check_aws
 from triage.guard_kubectl import check_kubectl
@@ -16,26 +17,12 @@ from triage.verdict import ALLOW, ASK, DENY, PASS, Verdict, strictest
 SENSITIVE_WORD_RE = re.compile(
     r"(?<![A-Za-z0-9_])(aws|awscli|kubectl|eksctl|helm|boto3|botocore)(?![A-Za-z0-9_])"
 )
-OPENSEARCH_SCRIPT = "opensearch_query.py"
+OPENSEARCH_COMMAND = "opensearch_query"
 KUBECONFIG_NAME = "kubeconfig"
-# The scripts the skill ships. A new script is not trusted until it is added here.
-OWN_SCRIPTS = frozenset(
-    {
-        "preflight.py",
-        "validate_map.py",
-        "verify_access.py",
-        "opensearch_query.py",
-        "collect.py",
-        "discover.py",
-        "case.py",
-        "findings.py",
-        "timeline.py",
-        "report.py",
-        "judge.py",
-        "publish.py",
-        "map_suggest.py",
-    }
-)
+# The skill's one entry point, scripts/run.py, and the commands it runs. A new command is not trusted until it is
+# added to triage.commands.COMMANDS (a fixed list, which a test pins).
+RUN_SCRIPT = "run.py"
+OWN_COMMANDS = frozenset(COMMANDS)
 
 ACCEPT_HITS_FLAG = "--accept-hits"
 SKILL_DIR_FLAG = "--skill-dir"
@@ -83,18 +70,17 @@ def _same_path(word: str, expected: str) -> bool:
     return os.path.normpath(word) == os.path.normpath(expected)
 
 
-def _own_script(argv: tuple[str, ...], context: GuardContext) -> str | None:
-    """Return the script name when argv runs a listed skill script with the skill's Python."""
-    if len(argv) < 2:
+def _own_command(argv: tuple[str, ...], context: GuardContext) -> str | None:
+    """Return the command name when argv runs the skill's scripts/run.py with a listed command and the skill's
+    Python. The command must be the word right after run.py, spelled exactly."""
+    if len(argv) < 3:
         return None
     interpreters = (os.path.join(context.skill_dir, ".venv", "bin", name) for name in ("python", "python3"))
     if not any(_same_path(argv[0], interpreter) for interpreter in interpreters):
         return None
-    scripts_dir = os.path.join(context.skill_dir, "scripts")
-    name = os.path.basename(os.path.normpath(argv[1]))
-    if name in OWN_SCRIPTS and _same_path(argv[1], os.path.join(scripts_dir, name)):
-        return name
-    return None
+    if not _same_path(argv[1], os.path.join(context.skill_dir, "scripts", RUN_SCRIPT)):
+        return None
+    return argv[2] if argv[2] in OWN_COMMANDS else None
 
 
 def _mentions_host(text: str, hosts: frozenset[str]) -> bool:
@@ -199,13 +185,13 @@ def _check_segment(segment: Segment, context: GuardContext) -> Verdict:
     if not segment.argv:
         return Verdict(PASS)
     text = " ".join(segment.env + segment.argv)
-    own_script = _own_script(segment.argv, context)
+    own_command = _own_command(segment.argv, context)
     if _mentions_host(text, context.opensearch_hosts):
-        if own_script == OPENSEARCH_SCRIPT:
-            return _never_allow_with_env(_own_script_verdict(segment, own_script), segment)
+        if own_command == OPENSEARCH_COMMAND:
+            return _never_allow_with_env(_own_command_verdict(segment, own_command), segment)
         return Verdict(DENY, "OpenSearch clusters may only be reached through the opensearch_query tool")
-    if own_script is not None:
-        return _own_script_verdict(segment, own_script)
+    if own_command is not None:
+        return _own_command_verdict(segment, own_command)
     command = segment.argv[0]
     if command == "aws":
         return _never_allow_with_env(check_aws(segment.argv, segment.env, context.profiles), segment)
@@ -225,7 +211,7 @@ def _is_accept_hits(arg: str) -> bool:
     return arg.startswith(ACCEPT_HITS_FLAG) or (len(head) > 2 and ACCEPT_HITS_FLAG.startswith(head))
 
 
-# Own-script options that point a script at other inputs or past a safety check; the engineer decides.
+# Own-command options that point a command at other inputs or past a safety check; the engineer decides.
 REDIRECTING_FLAGS = {
     SKILL_DIR_FLAG: "points the script at another skill folder, with its own config and service map",
     "--config": "points the script at another config",
@@ -246,24 +232,24 @@ def _is_apply(arg: str) -> bool:
 
 
 def _engineer_must_approve(name: str, args: tuple[str, ...]) -> str:
-    """The reason an own-script call always needs the engineer, or "" when it does not."""
-    if name == "map_suggest.py" and any(_is_apply(arg) for arg in args):
-        return "map_suggest.py apply writes an entry to your service map"
-    if name == "publish.py" and any(_is_accept_hits(arg) for arg in args):
-        return "publish.py --accept-hits publishes although the audit found possible secrets"
+    """The reason an own-command call always needs the engineer, or "" when it does not. args follow the command."""
+    if name == "map_suggest" and any(_is_apply(arg) for arg in args):
+        return "run.py map_suggest apply writes an entry to your service map"
+    if name == "publish" and any(_is_accept_hits(arg) for arg in args):
+        return "run.py publish --accept-hits publishes although the audit found possible secrets"
     for flag, effect in REDIRECTING_FLAGS.items():
         if any(_carries_flag(arg, flag) for arg in args):
-            return f"{name} {flag} {effect}"
+            return f"run.py {name} {flag} {effect}"
     return ""
 
 
-def _own_script_verdict(segment: Segment, name: str) -> Verdict:
+def _own_command_verdict(segment: Segment, name: str) -> Verdict:
     if segment.env or segment.reads_file:
-        return Verdict(ASK, f"triage script {name} is run with environment variables or an input redirect")
-    approval = _engineer_must_approve(name, segment.argv[2:])
+        return Verdict(ASK, f"triage script run.py {name} is run with environment variables or an input redirect")
+    approval = _engineer_must_approve(name, segment.argv[3:])
     if approval:
         return Verdict(ASK, approval)
-    return Verdict(ALLOW, f"triage script {name}" if name != OPENSEARCH_SCRIPT else "OpenSearch query through the triage tool")
+    return Verdict(ALLOW, f"triage script run.py {name}" if name != OPENSEARCH_COMMAND else "OpenSearch query through the triage tool")
 
 
 def decide(command: str, context: GuardContext | None, context_error: str = "", cwd: str = "") -> Verdict:

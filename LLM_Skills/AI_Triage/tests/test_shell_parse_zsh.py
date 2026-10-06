@@ -269,8 +269,8 @@ SHADOW_COMMANDS = {
     "cut": AWS_READ + " | cut -d , -f 1",
     "tr": AWS_READ + " | tr a b",
     "column": AWS_READ + " | column -t",
-    "venv python": "{skill}/.venv/bin/python {skill}/scripts/preflight.py",
-    "venv python3": "{skill}/.venv/bin/python3 {skill}/scripts/preflight.py",
+    "venv python": "{skill}/.venv/bin/python {skill}/scripts/run.py preflight",
+    "venv python3": "{skill}/.venv/bin/python3 {skill}/scripts/run.py preflight",
 }
 SHADOW_STAND_INS = ("aws", "kubectl", "jq", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "column")
 

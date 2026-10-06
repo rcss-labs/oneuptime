@@ -4,7 +4,7 @@
   starts with get, list or count and holds no write word, or oneuptime_whoami) are allowed; the rest is denied.
 - Slack: anything that sends or changes something asks; reads pass.
 - Confluence (Atlassian): a page create or update is allowed only with the exact body, the title and (for an update)
-  the page that publish.py recorded in <cases root>/.publish-state.json less than 30 minutes ago; any other write
+  the page that run.py publish recorded in <cases root>/.publish-state.json less than 30 minutes ago; any other write
   asks; reads pass.
 - Every other connector tool passes to the normal permission flow.
 Operation names are compared by words (split on separators and camel case), without letter case.
@@ -118,13 +118,13 @@ def _page_write_verdict(words: list[str], tool_input: Any, cases_dir: str, now: 
         return Verdict(ASK, BODY_REASON)
     titles = [value for value in _keyed_values(tool_input, frozenset({"title"}))]
     if not titles or any(value != audited["title"] for value in titles):
-        return Verdict(ASK, "the page title is not the title publish.py recorded")
+        return Verdict(ASK, "the page title is not the title run.py publish recorded")
     page_ids = [str(value) for value in _keyed_values(tool_input, PAGE_ID_KEYS)]
     if any(value != audited["page_id"] for value in page_ids):
-        return Verdict(ASK, "the page is not the page publish.py recorded for this incident")
+        return Verdict(ASK, "the page is not the page run.py publish recorded for this incident")
     if PAGE_UPDATE_WORDS.intersection(words) and "create" not in words and not page_ids:
-        return Verdict(ASK, "an update must name the page publish.py recorded for this incident")
-    return Verdict(ALLOW, "the page body, title and page are what publish.py audited and recorded")
+        return Verdict(ASK, "an update must name the page run.py publish recorded for this incident")
+    return Verdict(ALLOW, "the page body, title and page are what run.py publish audited and recorded")
 
 
 def _confluence_verdict(name: str, tool_input: Any, cases_dir: str, now: datetime) -> Verdict:

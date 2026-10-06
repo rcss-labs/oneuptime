@@ -34,26 +34,26 @@ FILE_TOOLS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path
 DEFAULT_CASES_DIR = "~/.ai-triage/cases"
 INSTALLED_SKILL_DIR = "~/.claude/skills/ai-triage"
 SKILL_FOLDER_REASON = ("files in the installed skill folder are changed only by install.sh; "
-                       "use map_suggest.py apply instead to change the service map")
-# Inside a run folder (<cases_dir>/<case>/<run>/): folder or file -> the script that writes it.
-RUN_FOLDERS = {"evidence": "collect.py", "judgments": "judge.py"}
+                       "use run.py map_suggest apply instead to change the service map")
+# Inside a run folder (<cases_dir>/<case>/<run>/): folder or file -> the run.py command that writes it.
+RUN_FOLDERS = {"evidence": "collect", "judgments": "judge"}
 RUN_FILES = {
-    ("findings", "checked.json"): "findings.py",
-    ("audit.json",): "publish.py audit",
-    ("case.json",): "case.py",
-    ("case.md",): "case.py",
-    ("incident.json",): "case.py",
-    ("render.json",): "report.py",
-    ("timeline.json",): "timeline.py",
-    ("report.md",): "report.py",
-    ("work-order.json",): "report.py",
-    ("slack-message.md",): "publish.py slack-message",
+    ("findings", "checked.json"): "findings",
+    ("audit.json",): "publish audit",
+    ("case.json",): "case",
+    ("case.md",): "case",
+    ("incident.json",): "case",
+    ("render.json",): "report",
+    ("timeline.json",): "timeline",
+    ("report.md",): "report",
+    ("work-order.json",): "report",
+    ("slack-message.md",): "publish slack-message",
 }
 STALE_SUFFIX = ".stale"
-STALE_WRITER = "judge.py"
+STALE_WRITER = "judge"
 RUN_DEPTH = 2  # <case>/<run>
-# Directly under the cases root: what publish.py records for the connector check (guard_mcp).
-PUBLISH_STATE = (".publish-state.json", "publish.py")
+# Directly under the cases root: what run.py publish records for the connector check (guard_mcp).
+PUBLISH_STATE = (".publish-state.json", "publish")
 REDIRECT_OPERATORS = frozenset({">", ">>", "&>", "&>>"})
 # The shell scanner refuses ">|" (clobber); the tripwire reads such a command with ">" in its place.
 CLOBBER_OPERATOR = ">|"
@@ -121,7 +121,7 @@ def _parts_below(path: str, root: str) -> list[str] | None:
 
 
 def _script_owned_writer(parts: list[str]) -> str:
-    """The script that owns a path below the cases root, or "". Names count at any depth, not only in a run
+    """The run.py command that owns a path below the cases root, or "". Names count at any depth, not only in a run
     folder, so that a copy of a run elsewhere under the root cannot be edited by hand either."""
     if parts == [PUBLISH_STATE[0]]:
         return PUBLISH_STATE[1]
@@ -147,7 +147,7 @@ def protected_reason(resolved: str, roots: ProtectedRoots) -> str:
     writer = _script_owned_writer(parts)
     if not writer:
         return ""
-    return f"{'/'.join(parts[-2:])} under the cases root is written only by the skill's scripts; use {writer} instead"
+    return f"{'/'.join(parts[-2:])} under the cases root is written only by the skill's scripts; use run.py {writer} instead"
 
 
 def decide_file_tool(tool: str, tool_input: object, cwd: object, roots: ProtectedRoots) -> Verdict:

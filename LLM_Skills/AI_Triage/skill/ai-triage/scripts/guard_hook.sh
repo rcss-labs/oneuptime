@@ -2,7 +2,7 @@
 # PreToolUse hook wrapper for the AI Triage guard.
 # Runs guard_hook.py with the skill's own Python. If that Python is missing or
 # the script fails, a text-only fallback denies:
-#   - any payload that mentions aws or kubectl, opensearch_query.py, or a configured OpenSearch host;
+#   - any payload that mentions aws or kubectl, opensearch_query, or a configured OpenSearch host;
 #   - the file tools on any path under the cases root or a skill folder;
 #   - every OneUptime, Slack, Atlassian or Confluence connector tool, reads included.
 # What the fallback cannot cover: aws or kubectl reached without those words (a script
@@ -57,7 +57,7 @@ contains() {
 }
 
 fallback_reason_for_payload() {
-  if printf '%s' "${plain}" | grep -Eq 'aws|kubectl|opensearch_query\.py'; then
+  if printf '%s' "${plain}" | grep -Eq 'aws|kubectl|opensearch_query'; then
     return 0
   fi
   if [[ -r "${config_file}" ]]; then

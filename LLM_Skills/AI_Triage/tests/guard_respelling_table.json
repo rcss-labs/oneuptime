@@ -1,0 +1,1612 @@
+[
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/preflight.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script preflight.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/opensearch_query.py --cluster logs-prod health",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "OpenSearch query through the triage tool",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"/home/eng/.claude/skills/ai-triage/.venv/bin/python\" \"/home/eng/.claude/skills/ai-triage/scripts/validate_map.py\"",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script validate_map.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/preflight.py https://opensearch.internal.example.com",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "deny",
+  "reason": "OpenSearch clusters may only be reached through the opensearch_query tool",
+  "unknown_kind": "deny",
+  "unknown_reason": "OpenSearch clusters may only be reached through the opensearch_query tool"
+ },
+ {
+  "command": "/usr/bin/python3 /home/eng/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"/Users/First Last/.claude/skills/ai-triage/.venv/bin/python\" \"/Users/First Last/.claude/skills/ai-triage/scripts/preflight.py\" --json",
+  "cwd": "",
+  "skill_dir": "/Users/First Last/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script preflight.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/preflight.py\"",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script preflight.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "~/.claude/skills/ai-triage/.venv/bin/python ~/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "PYTHONPATH=/tmp/evil /home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "triage script preflight.py is run with environment variables or an input redirect",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "AWS_CONFIG_FILE=/tmp/cfg /home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/verify_access.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "triage script verify_access.py is run with environment variables or an input redirect",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "FOO=1 /home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/validate_map.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "triage script validate_map.py is run with environment variables or an input redirect",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "PYTHONPATH=/tmp/evil /home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/opensearch_query.py --cluster logs-prod health",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "triage script opensearch_query.py is run with environment variables or an input redirect",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/preflight.py < /home/eng/.ssh/id_example",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "python3 /home/eng/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python3.11 /home/eng/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/pythonw /home/eng/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/../scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/sub/../preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/../bin/python /home/eng/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python ./scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "'$HOME/.claude/skills/ai-triage/.venv/bin/python' '$HOME/.claude/skills/ai-triage/scripts/preflight.py'",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "'~/.claude/skills/ai-triage/.venv/bin/python' '~/.claude/skills/ai-triage/scripts/preflight.py'",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python '$HOME/.claude/skills/ai-triage/scripts/preflight.py'",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/validate_map.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script validate_map.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/verify_access.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script verify_access.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/opensearch_query.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "OpenSearch query through the triage tool",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/collect.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/discover.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script discover.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/case.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script case.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/findings.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script findings.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/timeline.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script timeline.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/report.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script report.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/judge.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script judge.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py --json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script map_suggest.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts//preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script preflight.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/./preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script preflight.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "$HOME/.claude/skills/ai-triage/.venv/bin/python $HOME/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script preflight.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python3 /home/eng/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script preflight.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script preflight.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "FOO=1 /home/eng/.claude/skills/ai-triage/.venv/bin/python3 /home/eng/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "triage script preflight.py is run with environment variables or an input redirect",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/../.venv/bin/python3 /home/eng/.claude/skills/ai-triage/scripts/preflight.py",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py apply --case-dir /tmp/c --service-name s",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "map_suggest.py apply writes an entry to your service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py apply",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "map_suggest.py apply writes an entry to your service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py --skill-dir /x apply --case-dir c --service-name s",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "map_suggest.py apply writes an entry to your service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py app --case-dir c --service-name s",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "map_suggest.py apply writes an entry to your service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py propose --case-dir /tmp/c --service-name s",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script map_suggest.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py slack-message --case-dir c --accept-hits=abababababababababababababababababababababababababababababababab",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --accept-hits publishes although the audit found possible secrets",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py slack-message --case-dir c --accept-hits abababababababababababababababababababababababababababababababab",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --accept-hits publishes although the audit found possible secrets",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py confluence --accept-hits abababababababababababababababababababababababababababababababab --case-dir c",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --accept-hits publishes although the audit found possible secrets",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py slack-message --case-dir c --confluence-url u --accept-hits=abababababababababababababababababababababababababababababababab",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --accept-hits publishes although the audit found possible secrets",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py confluence --case-dir c --accept=abababababababababababababababababababababababababababababababab",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --accept-hits publishes although the audit found possible secrets",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py confluence --case-dir c --accept-h abababababababababababababababababababababababababababababababab",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --accept-hits publishes although the audit found possible secrets",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py confluence --accept-hits",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --accept-hits publishes although the audit found possible secrets",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py audit --case-dir c",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py slack-message --case-dir c --confluence-url u",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/publish.py\" confluence --case-dir c --accept-hits abababababababababababababababababababababababababababababababab",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --accept-hits publishes although the audit found possible secrets",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/collect.py --case-dir /home/eng/.ai-triage/cases/INC-1/20261004-101500 2>/dev/null",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/findings.py add --text \"cp fails because the ln target is missing\"",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script findings.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/findings.py check --case-dir \"$HOME/.ai-triage/cases/INC-1/20261004-101500\" --note \"latency > 2s\"",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script findings.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py --skill-dir /tmp/other propose --case-dir c --service-name s",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "map_suggest.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py --skill-dir /tmp/other propose --case-dir c --service-name s",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/preflight.py --skill-dir /tmp/other propose --case-dir c --service-name s",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "preflight.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py propose --skill-dir=/tmp/other --case-dir c",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "map_suggest.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py propose --skill-dir=/tmp/other --case-dir c",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/preflight.py propose --skill-dir=/tmp/other --case-dir c",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "preflight.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py --skill /tmp/other propose",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "map_suggest.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py --skill /tmp/other propose",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/preflight.py --skill /tmp/other propose",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "preflight.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py --sk=/tmp/other propose",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "map_suggest.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py --sk=/tmp/other propose",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/preflight.py --sk=/tmp/other propose",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "preflight.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py --json --skill-dir x",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "map_suggest.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py --json --skill-dir x",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/preflight.py --json --skill-dir x",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "preflight.py --skill-dir points the script at another skill folder, with its own config and service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/map_suggest.py propose --case-dir c --service-name s",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "allow",
+  "reason": "triage script map_suggest.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/verify_access.py --config /tmp/other.yaml",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "verify_access.py --config points the script at another config",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/validate_map.py --config /tmp/other.yaml",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "validate_map.py --config points the script at another config",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py --config /tmp/other.yaml",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --config points the script at another config",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/verify_access.py --config=/tmp/x",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "verify_access.py --config points the script at another config",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/validate_map.py --config=/tmp/x",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "validate_map.py --config points the script at another config",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py --config=/tmp/x",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --config points the script at another config",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/verify_access.py --map /tmp/map.yaml",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "verify_access.py --map points the script at another service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/validate_map.py --map /tmp/map.yaml",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "validate_map.py --map points the script at another service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py --map /tmp/map.yaml",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --map points the script at another service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/verify_access.py --map=/x",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "verify_access.py --map points the script at another service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/validate_map.py --map=/x",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "validate_map.py --map points the script at another service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py --map=/x",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --map points the script at another service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/verify_access.py --allow-replay",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "verify_access.py --allow-replay publishes a replay run, whose evidence comes from recordings",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/validate_map.py --allow-replay",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "validate_map.py --allow-replay publishes a replay run, whose evidence comes from recordings",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py --allow-replay",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --allow-replay publishes a replay run, whose evidence comes from recordings",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/verify_access.py slack-message --case-dir c --allow-replay",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "verify_access.py --allow-replay publishes a replay run, whose evidence comes from recordings",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/validate_map.py slack-message --case-dir c --allow-replay",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "validate_map.py --allow-replay publishes a replay run, whose evidence comes from recordings",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "/home/eng/.claude/skills/ai-triage/.venv/bin/python /home/eng/.claude/skills/ai-triage/scripts/publish.py slack-message --case-dir c --allow-replay",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "",
+  "kind": "ask",
+  "reason": "publish.py --allow-replay publishes a replay run, whose evidence comes from recordings",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/case.py\" init --incident /home/user/oneuptime/LLM_Skills/AI_Triage/tests/replay/ecs-bad-deploy/incident.json --now 2026-10-04T11:10:00Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script case.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/case.py\" target --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --service checkout-api --environment prod",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script case.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/case.py\" plan --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script case.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" ecs --account prod-main --region eu-west-1 --start 2026-10-04T09:42:00Z --end 2026-10-04T11:10:00Z --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --target cluster=checkout --target service=checkout-api",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" edge --account prod-main --region eu-west-1 --start 2026-10-04T09:42:00Z --end 2026-10-04T11:10:00Z --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --target load_balancer=checkout-prod --target hostname=checkout.example.com",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" rds --account prod-main --region eu-west-1 --start 2026-10-04T09:42:00Z --end 2026-10-04T11:10:00Z --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --target db=checkout-prod-db --target incident_start=2026-10-04T10:42:00Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" elasticache --account prod-main --region eu-west-1 --start 2026-10-04T09:42:00Z --end 2026-10-04T11:10:00Z --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --target replication_group=checkout-prod-redis",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" logs --account prod-main --region eu-west-1 --start 2026-10-04T09:42:00Z --end 2026-10-04T11:10:00Z --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --target log_groups=/ecs/checkout-api",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/opensearch_query.py\" histogram --cluster logs-prod --index 'app-logs-checkout-*' --start 2026-10-04T09:42:00Z --end 2026-10-04T11:10:00Z --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --filter service=checkout-api --suffix=histogram",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "OpenSearch query through the triage tool",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/opensearch_query.py\" top-messages --cluster logs-prod --index 'app-logs-checkout-*' --start 2026-10-04T09:42:00Z --end 2026-10-04T11:10:00Z --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --filter service=checkout-api --suffix=top-messages",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "OpenSearch query through the triage tool",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/opensearch_query.py\" search --cluster logs-prod --index 'app-logs-checkout-*' --start 2026-10-04T09:42:00Z --end 2026-10-04T11:10:00Z --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --filter service=checkout-api --suffix=search",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "OpenSearch query through the triage tool",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" alarms --account prod-main --region eu-west-1 --start 2026-10-04T09:42:00Z --end 2026-10-04T11:10:00Z --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --target in_alarm=true",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" changes --account prod-main --region eu-west-1 --start 2026-10-04T09:42:00Z --end 2026-10-04T11:10:00Z --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --target resource_names=checkout-api,checkout-prod,checkout-prod-db,checkout-prod-redis --target event_sources=ecs.amazonaws.com,application-autoscaling.amazonaws.com,elasticloadbalancing.amazonaws.com,rds.amazonaws.com,elasticache.amazonaws.com --target incident_start=2026-10-04T10:42:00Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" platform --account prod-main --region eu-west-1 --start 2026-10-04T09:42:00Z --end 2026-10-04T11:10:00Z --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/findings.py\" check --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script findings.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/timeline.py\" --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script timeline.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/judge.py\" run --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script judge.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/report.py\" render --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --now 2026-10-04T11:10:00Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script report.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/publish.py\" audit --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/publish.py\" confluence --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/publish.py\" slack-message --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/map_suggest.py\" apply --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000 --service-name checkout-api",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "ask",
+  "reason": "map_suggest.py apply writes an entry to your service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/case.py\" init --incident /home/user/oneuptime/LLM_Skills/AI_Triage/tests/replay/cert-expired/incident.json --now 2026-10-04T12:30:00Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script case.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/case.py\" target --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000 --service checkout-api --environment prod",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script case.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/case.py\" plan --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script case.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" ecs --account prod-main --region eu-west-1 --start 2026-10-04T11:00:05Z --end 2026-10-04T12:30:00Z --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000 --target cluster=checkout --target service=checkout-api",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" edge --account prod-main --region eu-west-1 --start 2026-10-04T11:00:05Z --end 2026-10-04T12:30:00Z --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000 --target load_balancer=checkout-prod --target hostname=checkout.example.com",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" rds --account prod-main --region eu-west-1 --start 2026-10-04T11:00:05Z --end 2026-10-04T12:30:00Z --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000 --target db=checkout-prod-db --target incident_start=2026-10-04T12:00:05Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" elasticache --account prod-main --region eu-west-1 --start 2026-10-04T11:00:05Z --end 2026-10-04T12:30:00Z --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000 --target replication_group=checkout-prod-redis",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" logs --account prod-main --region eu-west-1 --start 2026-10-04T11:00:05Z --end 2026-10-04T12:30:00Z --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000 --target log_groups=/ecs/checkout-api",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" alarms --account prod-main --region eu-west-1 --start 2026-10-04T11:00:05Z --end 2026-10-04T12:30:00Z --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000 --target in_alarm=true",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" changes --account prod-main --region eu-west-1 --start 2026-10-04T11:00:05Z --end 2026-10-04T12:30:00Z --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000 --target resource_names=checkout-api,checkout-prod,checkout-prod-db,checkout-prod-redis --target event_sources=ecs.amazonaws.com,application-autoscaling.amazonaws.com,elasticloadbalancing.amazonaws.com,rds.amazonaws.com,elasticache.amazonaws.com --target incident_start=2026-10-04T12:00:05Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" platform --account prod-main --region eu-west-1 --start 2026-10-04T11:00:05Z --end 2026-10-04T12:30:00Z --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/findings.py\" check --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script findings.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/timeline.py\" --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script timeline.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/judge.py\" run --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script judge.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/report.py\" render --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000 --now 2026-10-04T12:30:00Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script report.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/publish.py\" audit --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/publish.py\" confluence --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/publish.py\" slack-message --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/map_suggest.py\" apply --case-dir /home/eng/.ai-triage/cases/INC-1043/20261004-123000 --service-name checkout-api",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "ask",
+  "reason": "map_suggest.py apply writes an entry to your service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/case.py\" init --incident /home/user/oneuptime/LLM_Skills/AI_Triage/tests/replay/eks-oom-discovered/incident.json --now 2026-10-04T14:50:00Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script case.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/discover.py\" --hostname orders.example.com",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script discover.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/case.py\" target --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000 --discovery /home/eng/.ai-triage/intake/discovery-for-target.json",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script case.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/case.py\" plan --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script case.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" eks --account prod-apps --region eu-central-1 --start 2026-10-04T13:20:00Z --end 2026-10-04T14:50:00Z --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000 --target cluster=platform-prod --target namespace=orders --target workloads=deployment/orders-api",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" edge --account prod-apps --region eu-central-1 --start 2026-10-04T13:20:00Z --end 2026-10-04T14:50:00Z --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000 --target load_balancer=orders-prod-alb --target hostname=orders.example.com",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" rds --account prod-apps --region eu-central-1 --start 2026-10-04T13:20:00Z --end 2026-10-04T14:50:00Z --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000 --target db=orders-prod-db --target incident_start=2026-10-04T14:20:00Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" alarms --account prod-apps --region eu-central-1 --start 2026-10-04T13:20:00Z --end 2026-10-04T14:50:00Z --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000 --target in_alarm=true",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" changes --account prod-apps --region eu-central-1 --start 2026-10-04T13:20:00Z --end 2026-10-04T14:50:00Z --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000 --target resource_names=platform-prod,orders-prod-alb,orders-prod-db --target event_sources=elasticloadbalancing.amazonaws.com,rds.amazonaws.com,eks.amazonaws.com --target incident_start=2026-10-04T14:20:00Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" platform --account prod-apps --region eu-central-1 --start 2026-10-04T13:20:00Z --end 2026-10-04T14:50:00Z --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/findings.py\" check --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script findings.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/timeline.py\" --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script timeline.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/judge.py\" run --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script judge.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/report.py\" render --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000 --now 2026-10-04T14:50:00Z",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script report.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/publish.py\" audit --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/publish.py\" confluence --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/publish.py\" slack-message --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script publish.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/map_suggest.py\" propose --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000 --service-name orders-api",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script map_suggest.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/map_suggest.py\" apply --case-dir /home/eng/.ai-triage/cases/INC-1051/20261004-145000 --service-name checkout-api",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "ask",
+  "reason": "map_suggest.py apply writes an entry to your service map",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/collect.py\" --list",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/root/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script collect.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "~/.claude/skills/ai-triage/.venv/bin/python\" ~/.claude/skills/ai-triage/scripts/collect.py --list",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/root/.ai-triage/cases",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"~/.claude/skills/ai-triage/.venv/bin/python\" \"~/.claude/skills/ai-triage/scripts/collect.py\" --list",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"${SKILL_HOME}/.claude/skills/ai-triage/.venv/bin/python\" \"${SKILL_HOME}/.claude/skills/ai-triage/scripts/collect.py\" --list",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$SKILL_HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$SKILL_HOME/.claude/skills/ai-triage/scripts/collect.py\" --list",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "pass",
+  "reason": "",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/discover.py\" --hostname app.example.com --save \"$HOME/.ai-triage/intake/1234-discovery.json\"",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/root/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script discover.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ },
+ {
+  "command": "\"$HOME/.claude/skills/ai-triage/.venv/bin/python\" \"$HOME/.claude/skills/ai-triage/scripts/case.py\" collect --case-dir /home/eng/.ai-triage/cases/INC-1042/20261004-111000",
+  "cwd": "",
+  "skill_dir": "/home/eng/.claude/skills/ai-triage",
+  "cases_dir": "/home/eng/.ai-triage/cases",
+  "kind": "allow",
+  "reason": "triage script case.py",
+  "unknown_kind": "pass",
+  "unknown_reason": ""
+ }
+]

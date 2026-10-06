@@ -402,6 +402,7 @@ def test_the_fallback_stays_silent_for_other_file_paths(broken_guard):
 
 
 @pytest.mark.parametrize("command", ["python3 opensearch_query.py --cluster logs-prod health",
+                                     "python3 scripts/run.py opensearch_query --cluster logs-prod health",
                                      "curl -X DELETE https://opensearch.internal.example.com/app-logs-1",
                                      "curl https://OPENSEARCH.internal.example.com/_cat/indices"])
 def test_the_fallback_denies_the_opensearch_tool_and_hosts(broken_guard, command):

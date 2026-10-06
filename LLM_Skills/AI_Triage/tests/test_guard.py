@@ -29,9 +29,9 @@ def kind(command, context=CONTEXT):
         f"aws ecs list-tasks --cluster a {AWS_OK} 2>/dev/null | head -20",
         f"aws ecs list-clusters {AWS_OK} && aws rds describe-db-instances {AWS_OK}",
         f"kubectl {KUBE_OK} get pods -o wide | tail -20",
-        f"{PY} {SKILL}/scripts/preflight.py --json",
-        f"{PY} {SKILL}/scripts/opensearch_query.py --cluster logs-prod health",
-        f'"{PY}" "{SKILL}/scripts/validate_map.py"',
+        f"{PY} {SKILL}/scripts/run.py preflight --json",
+        f"{PY} {SKILL}/scripts/run.py opensearch_query --cluster logs-prod health",
+        f'"{PY}" "{SKILL}/scripts/run.py" validate_map',
     ],
 )
 def test_validated_reads_are_approved(command):
@@ -47,7 +47,7 @@ def test_validated_reads_are_approved(command):
         f"kubectl {KUBE_OK} delete pod p",
         "curl -s https://opensearch.internal.example.com/_cat/indices",
         "curl -XDELETE https://opensearch.internal.example.com/app-logs-2026",
-        f"{PY} {SKILL}/scripts/preflight.py https://opensearch.internal.example.com",
+        f"{PY} {SKILL}/scripts/run.py preflight https://opensearch.internal.example.com",
         "python3 -c \"import urllib.request as u; u.urlopen('http://opensearch.internal.example.com/_search')\"",
     ],
 )
@@ -80,7 +80,7 @@ def test_commands_the_guard_cannot_check_force_a_prompt(command):
         f"aws ecs list-clusters {AWS_OK} > clusters.json",
         f"aws ecs list-clusters {AWS_OK} | tee clusters.json",
         f"aws ecs list-clusters {AWS_OK} | xargs rm -rf",
-        f"/usr/bin/python3 {SKILL}/scripts/preflight.py",
+        f"/usr/bin/python3 {SKILL}/scripts/run.py preflight",
         f"{PY} /tmp/other.py",
         f"{PY} {SKILL}/scripts/../../evil.py",
     ],
@@ -116,7 +116,7 @@ def test_skill_folder_with_a_space_in_its_path_is_recognised():
         opensearch_hosts=CONTEXT.opensearch_hosts,
         skill_dir=skill,
     )
-    assert kind(f'"{skill}/.venv/bin/python" "{skill}/scripts/preflight.py" --json', context) == ALLOW
+    assert kind(f'"{skill}/.venv/bin/python" "{skill}/scripts/run.py" preflight --json', context) == ALLOW
     kubectl = f'kubectl --kubeconfig "{skill}/config/kubeconfig" --context triage-platform-prod -n payments get pods'
     assert kind(kubectl, context) == ALLOW
 
@@ -143,10 +143,10 @@ def test_context_is_built_from_config(config_data, tmp_path):
 
 def test_home_relative_script_paths_are_recognised(monkeypatch):
     monkeypatch.setenv("HOME", "/home/eng")
-    command = '"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/preflight.py"'
+    command = '"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/run.py" preflight'
     assert kind(command) == ALLOW
     # round 4: an unquoted ~ is outside the allow-list, so the guard leaves it to the normal permission flow
-    assert kind("~/.claude/skills/ai-triage/.venv/bin/python ~/.claude/skills/ai-triage/scripts/preflight.py") == PASS
+    assert kind("~/.claude/skills/ai-triage/.venv/bin/python ~/.claude/skills/ai-triage/scripts/run.py preflight") == PASS
 
 
 # ---- fix round 1 -------------------------------------------------------------
@@ -306,10 +306,10 @@ def test_a_filter_that_mentions_aws_but_breaks_the_grammar_asks():
 @pytest.mark.parametrize(
     "command",
     [
-        f"PYTHONPATH=/tmp/evil {PY} {SCRIPT}/preflight.py",
-        f"AWS_CONFIG_FILE=/tmp/cfg {PY} {SCRIPT}/verify_access.py",
-        f"FOO=1 {PY} {SCRIPT}/validate_map.py",
-        f"PYTHONPATH=/tmp/evil {PY} {SCRIPT}/opensearch_query.py --cluster logs-prod health",
+        f"PYTHONPATH=/tmp/evil {PY} {SCRIPT}/run.py preflight",
+        f"AWS_CONFIG_FILE=/tmp/cfg {PY} {SCRIPT}/run.py verify_access",
+        f"FOO=1 {PY} {SCRIPT}/run.py validate_map",
+        f"PYTHONPATH=/tmp/evil {PY} {SCRIPT}/run.py opensearch_query --cluster logs-prod health",
     ],
 )
 def test_environment_and_input_redirects_never_ride_on_an_own_script(command):
@@ -318,7 +318,7 @@ def test_environment_and_input_redirects_never_ride_on_an_own_script(command):
 
 def test_an_input_redirect_on_an_own_script_is_never_allowed():
     # round 4: any unquoted < is unparseable; with no aws or kubectl in the text the guard passes it on
-    assert kind(f"{PY} {SCRIPT}/preflight.py < /home/eng/.ssh/id_example") == PASS
+    assert kind(f"{PY} {SCRIPT}/run.py preflight < /home/eng/.ssh/id_example") == PASS
 
 
 @pytest.mark.parametrize(
@@ -348,19 +348,19 @@ def test_environment_assignment_on_a_filter_is_not_allowed():
         f"{PY} {SCRIPT}/anything_new.py",
         f"{PY} {SCRIPT}/guard_hook.py",
         f"{PY} {SCRIPT}/preflight.sh",
-        f"python3 {SCRIPT}/preflight.py",
-        f"/usr/bin/python3 {SCRIPT}/preflight.py",
-        f"{SKILL}/.venv/bin/python3.11 {SCRIPT}/preflight.py",
-        f"{SKILL}/.venv/bin/pythonw {SCRIPT}/preflight.py",
+        f"python3 {SCRIPT}/run.py preflight",
+        f"/usr/bin/python3 {SCRIPT}/run.py preflight",
+        f"{SKILL}/.venv/bin/python3.11 {SCRIPT}/run.py preflight",
+        f"{SKILL}/.venv/bin/pythonw {SCRIPT}/run.py preflight",
         f"{PY} -c 'print(1)'",
-        f"{PY} {SCRIPT}/../scripts/preflight.py",
-        f"{PY} {SCRIPT}/sub/../preflight.py",
-        f"{SKILL}/.venv/bin/../bin/python {SCRIPT}/preflight.py",
-        f"{PY} ./scripts/preflight.py",
+        f"{PY} {SCRIPT}/../scripts/run.py preflight",
+        f"{PY} {SCRIPT}/sub/../run.py preflight",
+        f"{SKILL}/.venv/bin/../bin/python {SCRIPT}/run.py preflight",
+        f"{PY} ./scripts/run.py preflight",
         f"{PY}",
-        "'$HOME/.claude/skills/ai-triage/.venv/bin/python' '$HOME/.claude/skills/ai-triage/scripts/preflight.py'",
-        "'~/.claude/skills/ai-triage/.venv/bin/python' '~/.claude/skills/ai-triage/scripts/preflight.py'",
-        f"{PY} '$HOME/.claude/skills/ai-triage/scripts/preflight.py'",
+        "'$HOME/.claude/skills/ai-triage/.venv/bin/python' '$HOME/.claude/skills/ai-triage/scripts/run.py' preflight",
+        "'~/.claude/skills/ai-triage/.venv/bin/python' '~/.claude/skills/ai-triage/scripts/run.py' preflight",
+        f"{PY} '$HOME/.claude/skills/ai-triage/scripts/run.py' preflight",
     ],
 )
 def test_only_the_named_own_scripts_run_with_the_skill_python(command, monkeypatch):
@@ -370,38 +370,38 @@ def test_only_the_named_own_scripts_run_with_the_skill_python(command, monkeypat
 
 @pytest.mark.parametrize(
     "name",
-    ["preflight.py", "validate_map.py", "verify_access.py", "opensearch_query.py", "collect.py", "discover.py",
-     "case.py", "findings.py", "timeline.py", "report.py", "judge.py", "publish.py", "map_suggest.py"],
+    ["preflight", "validate_map", "verify_access", "opensearch_query", "collect", "discover",
+     "case", "findings", "timeline", "report", "judge", "publish", "map_suggest"],
 )
-def test_every_listed_own_script_is_allowed(name):
-    assert kind(f"{PY} {SCRIPT}/{name} --json") == ALLOW
+def test_every_listed_own_command_is_allowed(name):
+    assert kind(f"{PY} {SCRIPT}/run.py {name} --json") == ALLOW
 
 
-def test_own_script_names_are_a_fixed_list():
-    from triage.guard import OWN_SCRIPTS
+def test_own_command_names_are_a_fixed_list():
+    from triage.guard import OWN_COMMANDS
 
-    assert OWN_SCRIPTS == frozenset(
-        {"preflight.py", "validate_map.py", "verify_access.py", "opensearch_query.py", "collect.py", "discover.py",
-         "case.py", "findings.py", "timeline.py", "report.py", "judge.py", "publish.py", "map_suggest.py"}
+    assert OWN_COMMANDS == frozenset(
+        {"preflight", "validate_map", "verify_access", "opensearch_query", "collect", "discover",
+         "case", "findings", "timeline", "report", "judge", "publish", "map_suggest"}
     )
 
 
 def test_an_own_script_with_a_redundant_slash_is_still_recognised():
-    assert kind(f"{PY} {SCRIPT}//preflight.py") == ALLOW
-    assert kind(f"{PY} {SCRIPT}/./preflight.py") == ALLOW
+    assert kind(f"{PY} {SCRIPT}//run.py preflight") == ALLOW
+    assert kind(f"{PY} {SCRIPT}/./run.py preflight") == ALLOW
 
 
 def test_home_paths_are_expanded_only_when_unquoted_or_double_quoted(monkeypatch):
     monkeypatch.setenv("HOME", "/home/eng")
-    py, script = "$HOME/.claude/skills/ai-triage/.venv/bin/python", "$HOME/.claude/skills/ai-triage/scripts/preflight.py"
-    assert kind(f"{py} {script}") == ALLOW
-    assert kind(f'"{py}" "{script}"') == ALLOW
-    assert kind(f"'{py}' '{script}'") == PASS
+    py, script = "$HOME/.claude/skills/ai-triage/.venv/bin/python", "$HOME/.claude/skills/ai-triage/scripts/run.py"
+    assert kind(f"{py} {script} preflight") == ALLOW
+    assert kind(f'"{py}" "{script}" preflight') == ALLOW
+    assert kind(f"'{py}' '{script}' preflight") == PASS
 
 
 def test_without_home_the_home_paths_cannot_be_checked(monkeypatch):
     monkeypatch.delenv("HOME", raising=False)
-    command = '"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/preflight.py"'
+    command = '"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/run.py" preflight'
     assert kind(command) == PASS
 
 
@@ -417,11 +417,11 @@ def test_a_module_that_names_awscli_is_asked_about_not_passed():
 
 
 def test_the_skill_interpreter_may_be_named_python_or_python3():
-    assert kind(f"{SKILL}/.venv/bin/python3 {SCRIPT}/preflight.py") == ALLOW
-    assert kind(f"{SKILL}/.venv/bin/python {SCRIPT}/preflight.py") == ALLOW
+    assert kind(f"{SKILL}/.venv/bin/python3 {SCRIPT}/run.py preflight") == ALLOW
+    assert kind(f"{SKILL}/.venv/bin/python {SCRIPT}/run.py preflight") == ALLOW
     assert kind(f"{SKILL}/.venv/bin/python3 {SCRIPT}/anything_new.py") == PASS
-    assert kind(f"FOO=1 {SKILL}/.venv/bin/python3 {SCRIPT}/preflight.py") == ASK
-    assert kind(f"{SKILL}/.venv/../.venv/bin/python3 {SCRIPT}/preflight.py") == PASS
+    assert kind(f"FOO=1 {SKILL}/.venv/bin/python3 {SCRIPT}/run.py preflight") == ASK
+    assert kind(f"{SKILL}/.venv/../.venv/bin/python3 {SCRIPT}/run.py preflight") == PASS
 
 
 # ---- fix round 3 -------------------------------------------------------------
@@ -458,7 +458,7 @@ def test_jq_filters_that_could_never_end_are_not_allowed(word):
 
 def test_the_three_everyday_commands_stay_allowed(monkeypatch):
     monkeypatch.setenv("HOME", "/home/eng")
-    assert kind('"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/preflight.py"') == ALLOW
+    assert kind('"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/run.py" preflight') == ALLOW
     assert kind(
         f"aws ecs describe-services --cluster c --services s {AWS_OK} --query 'services[0].events[:5]' 2>/dev/null | jq -r '.[]'"
     ) == ALLOW
@@ -522,12 +522,12 @@ HEX = "ab" * 32
      "app --case-dir c --service-name s"],
 )
 def test_map_suggest_apply_always_asks(args):
-    verdict = decide(f"{PY} {SCRIPT}/map_suggest.py {args}", CONTEXT)
+    verdict = decide(f"{PY} {SCRIPT}/run.py map_suggest {args}", CONTEXT)
     assert verdict.kind == ASK and "writes an entry to your service map" in verdict.reason
 
 
 def test_map_suggest_propose_is_still_allowed():
-    assert kind(f"{PY} {SCRIPT}/map_suggest.py propose --case-dir /tmp/c --service-name s") == ALLOW
+    assert kind(f"{PY} {SCRIPT}/run.py map_suggest propose --case-dir /tmp/c --service-name s") == ALLOW
 
 
 @pytest.mark.parametrize(
@@ -537,15 +537,15 @@ def test_map_suggest_propose_is_still_allowed():
      f"confluence --case-dir c --accept={HEX}", f"confluence --case-dir c --accept-h {HEX}", "confluence --accept-hits"],
 )
 def test_publish_with_accept_hits_always_asks(args):
-    verdict = decide(f"{PY} {SCRIPT}/publish.py {args}", CONTEXT)
+    verdict = decide(f"{PY} {SCRIPT}/run.py publish {args}", CONTEXT)
     assert verdict.kind == ASK and "publishes although the audit found possible secrets" in verdict.reason
 
 
 def test_publish_without_accept_hits_keeps_its_answer(monkeypatch):
-    assert kind(f"{PY} {SCRIPT}/publish.py audit --case-dir c") == ALLOW
-    assert kind(f"{PY} {SCRIPT}/publish.py slack-message --case-dir c --confluence-url u") == ALLOW
+    assert kind(f"{PY} {SCRIPT}/run.py publish audit --case-dir c") == ALLOW
+    assert kind(f"{PY} {SCRIPT}/run.py publish slack-message --case-dir c --confluence-url u") == ALLOW
     monkeypatch.setenv("HOME", "/home/eng")
-    command = f'"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/publish.py" confluence --case-dir c --accept-hits {HEX}'
+    command = f'"$HOME/.claude/skills/ai-triage/.venv/bin/python" "$HOME/.claude/skills/ai-triage/scripts/run.py" publish confluence --case-dir c --accept-hits {HEX}'
     assert kind(command) == ASK
 
 
@@ -599,7 +599,7 @@ def test_bare_protected_names_count_only_when_cwd_is_inside_a_protected_folder(m
     [
         f"cat {SKILL}/config/service-map.yaml",
         f"ls {CASE_RUN}/evidence",
-        f"{PY} {SCRIPT}/collect.py --case-dir {CASE_RUN} 2>/dev/null",
+        f"{PY} {SCRIPT}/run.py collect --case-dir {CASE_RUN} 2>/dev/null",
         f"kubectl {KUBE_HOME} get pods 2>&1 | head -3",
         f"kubectl {KUBE_HOME} get pods >/dev/null",
     ],
@@ -656,8 +656,8 @@ def test_grep_is_not_on_the_filter_list():
     [
         f"kubectl {KUBE_HOME} get pods -o json | jq '[.items[] | select(.status.containerStatuses[0].restartCount > 3)] | length'",
         f"kubectl {KUBE_HOME} get pods -l app=rm",
-        f'{PY} {SCRIPT}/findings.py add --text "cp fails because the ln target is missing"',
-        f'{PY} {SCRIPT}/findings.py check --case-dir "$HOME/.ai-triage/cases/INC-1/20261004-101500" --note "latency > 2s"',
+        f'{PY} {SCRIPT}/run.py findings add --text "cp fails because the ln target is missing"',
+        f'{PY} {SCRIPT}/run.py findings check --case-dir "$HOME/.ai-triage/cases/INC-1/20261004-101500" --note "latency > 2s"',
         f"kubectl {KUBE_HOME} logs deploy/orders --since 30m --tail 200 | tail -20",
     ],
 )
@@ -689,14 +689,14 @@ def test_what_the_tripwire_leaves_to_the_normal_flow(command, monkeypatch):
      "--skill /tmp/other propose", "--sk=/tmp/other propose", "--json --skill-dir x"],
 )
 def test_an_own_script_with_skill_dir_asks(args):
-    for script in ("map_suggest.py", "publish.py", "preflight.py"):
-        verdict = decide(f"{PY} {SCRIPT}/{script} {args}", CONTEXT)
+    for script in ("map_suggest", "publish", "preflight"):
+        verdict = decide(f"{PY} {SCRIPT}/run.py {script} {args}", CONTEXT)
         assert verdict.kind == ASK and "--skill-dir" in verdict.reason
 
 
 def test_own_scripts_without_skill_dir_keep_their_answer():
-    assert kind(f"{PY} {SCRIPT}/map_suggest.py propose --case-dir c --service-name s") == ALLOW
-    assert kind(f"{PY} {SCRIPT}/preflight.py --json") == ALLOW
+    assert kind(f"{PY} {SCRIPT}/run.py map_suggest propose --case-dir c --service-name s") == ALLOW
+    assert kind(f"{PY} {SCRIPT}/run.py preflight --json") == ALLOW
 
 
 
@@ -738,8 +738,8 @@ def test_redirects_elsewhere_keep_their_answer(monkeypatch):
 @pytest.mark.parametrize("args", ["--config /tmp/other.yaml", "--config=/tmp/x", "--map /tmp/map.yaml", "--map=/x",
                                   "--allow-replay", "slack-message --case-dir c --allow-replay"])
 def test_own_script_config_map_and_allow_replay_ask(args):
-    for script in ("verify_access.py", "validate_map.py", "publish.py"):
-        verdict = decide(f"{PY} {SCRIPT}/{script} {args}", CONTEXT)
+    for script in ("verify_access", "validate_map", "publish"):
+        verdict = decide(f"{PY} {SCRIPT}/run.py {script} {args}", CONTEXT)
         assert verdict.kind == ASK, (script, args)
         assert args.split()[-1 if "allow" in args else 0].split("=")[0] in verdict.reason
 

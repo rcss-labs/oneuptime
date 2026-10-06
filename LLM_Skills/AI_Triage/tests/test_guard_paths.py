@@ -38,7 +38,7 @@ def verdict(layout, path, cwd="/", tool="Write"):
 def test_every_file_tool_is_checked(layout, tool):
     result = verdict(layout, str(layout["skill"] / "config" / "service-map.yaml"), tool=tool)
     assert result.kind == DENY
-    assert "map_suggest.py apply" in result.reason
+    assert "run.py map_suggest apply" in result.reason
 
 
 def test_notebook_edit_reads_notebook_path(layout):
@@ -55,11 +55,11 @@ def test_anything_under_the_skill_folder_is_denied(layout, relative):
 
 @pytest.mark.parametrize(
     "relative, script",
-    [("evidence/ecs.json", "collect.py"), ("evidence/new/deep.json", "collect.py"), ("judgments/q1.json", "judge.py"),
-     ("findings/checked.json", "findings.py"), ("audit.json", "publish.py"), ("case.json", "case.py"),
-     ("case.md", "case.py"), ("report.md", "report.py"), ("work-order.json", "report.py"),
-     ("slack-message.md", "publish.py"), ("summary.json.stale", "judge.py"),
-     ("findings/old.stale", "judge.py")],
+    [("evidence/ecs.json", "run.py collect"), ("evidence/new/deep.json", "run.py collect"), ("judgments/q1.json", "run.py judge"),
+     ("findings/checked.json", "run.py findings"), ("audit.json", "run.py publish"), ("case.json", "run.py case"),
+     ("case.md", "run.py case"), ("report.md", "run.py report"), ("work-order.json", "run.py report"),
+     ("slack-message.md", "run.py publish"), ("summary.json.stale", "run.py judge"),
+     ("findings/old.stale", "run.py judge")],
 )
 def test_protected_run_files_are_denied_and_the_reason_names_the_script(layout, relative, script):
     result = verdict(layout, str(layout["run"] / relative))
@@ -165,7 +165,7 @@ def test_protected_roots_are_resolved(layout):
 # ---- fix round 5, ruling 5 ------------------------------------------------------
 
 
-@pytest.mark.parametrize("relative, script", [("incident.json", "case.py"), ("render.json", "report.py")])
+@pytest.mark.parametrize("relative, script", [("incident.json", "run.py case"), ("render.json", "run.py report")])
 def test_incident_and_render_records_are_protected(layout, relative, script):
     result = verdict(layout, str(layout["run"] / relative))
     assert result.kind == DENY and script in result.reason
@@ -185,12 +185,12 @@ def test_the_docstring_names_the_hard_link_gap():
 
 def test_the_publish_state_under_the_cases_root_is_protected(layout):
     result = verdict(layout, str(layout["cases"] / ".publish-state.json"))
-    assert result.kind == DENY and "publish.py" in result.reason
+    assert result.kind == DENY and "run.py publish" in result.reason
 
 
 def test_timeline_json_is_protected(layout):
     result = verdict(layout, str(layout["run"] / "timeline.json"))
-    assert result.kind == DENY and "timeline.py" in result.reason
+    assert result.kind == DENY and "run.py timeline" in result.reason
 
 
 @pytest.mark.parametrize(
