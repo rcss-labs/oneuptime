@@ -542,6 +542,21 @@ def test_vpn_connections_are_denied():
     assert result.kind == DENY and "pre-shared keys" in result.reason
 
 
+@pytest.mark.parametrize(
+    "command, returns",
+    [
+        ("aws ec2 get-launch-template-data --instance-id i-1", "user data"),
+        ("aws ec2 describe-spot-instance-requests", "user data"),
+        ("aws ec2 describe-spot-fleet-requests", "user data"),
+        ("aws ec2 get-vpn-connection-device-sample-configuration --vpn-connection-id v --vpn-connection-device-type-id x",
+         "pre-shared keys"),
+    ],
+)
+def test_siblings_returning_user_data_or_vpn_keys_are_denied(command, returns):
+    result = verdict(f"{command} {OK}")
+    assert result.kind == DENY and returns in result.reason
+
+
 def test_neighbouring_reads_stay_allowed():
     for command in ("aws ec2 describe-launch-templates", "aws autoscaling describe-auto-scaling-groups",
                     "aws cloudformation describe-stacks", "aws codebuild list-projects", "aws ec2 describe-vpn-gateways"):

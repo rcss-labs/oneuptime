@@ -77,7 +77,13 @@ ASK_READS = {
     ("codebuild", "batch-get-projects"): "the output can hold the build environment, whose variables often hold secrets",
 }
 # Reads that return secrets outright, with what they return.
-DENY_READS = {("ec2", "describe-vpn-connections"): "returns the VPN tunnels' pre-shared keys"}
+DENY_READS = {
+    ("ec2", "describe-vpn-connections"): "returns the VPN tunnels' pre-shared keys",
+    ("ec2", "get-vpn-connection-device-sample-configuration"): "returns a device configuration holding the VPN tunnels' pre-shared keys",
+    ("ec2", "get-launch-template-data"): "returns the instance's launch data, including its user data, which often holds secrets",
+    ("ec2", "describe-spot-instance-requests"): "returns each request's launch specification, including its user data, which often holds secrets",
+    ("ec2", "describe-spot-fleet-requests"): "returns each fleet's launch specifications, including their user data, which often holds secrets",
+}
 # An operation whose name contains one of these returns a secret, whatever its service.
 DENY_NAME_PARTS = ("secret-value", "password", "credentials", "token", "login")
 # Flags that make an otherwise ordinary read return secret values.
