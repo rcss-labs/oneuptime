@@ -2467,6 +2467,9 @@ NEXT_LINE_VALUE = {
     "api_key:\n  q8Zr2mX7wK4pq8Zr2mX7": "q8Zr2mX7wK4pq8Zr2mX7",
     "token =\nab12cd34ef56": "ab12cd34ef56",
     "db:\n  password:\n\n    hunter2abc9\n  host: db.example.com": "hunter2abc9",
+    "2026-10-05T10:00:01Z ERROR failed to load the api_key:\n  q8Zr2mX7wK4p": "q8Zr2mX7wK4p",
+    'cfg = {"api_key":\n    "0123456789abcdef0123456789abcdef"}': "0123456789abcdef0123456789abcdef",
+    "the service could not read its token =\n9f8e7d6c-1234-4abc-9def-0123456789ab": "9f8e7d6c-1234-4abc-9def-0123456789ab",
 }
 
 
@@ -2487,6 +2490,8 @@ def test_a_value_on_the_next_line_after_a_secret_word_is_masked(source):
         "the key is\nq8Zr2mX7wK4p",
         "key:\n  |\n  multi",
         'def build(cls, monitors: Any = ()) -> "MatchKeys":\n    return cls(_normalise(monitors))',
+        'x = {"MatchKeys":\n    return value}',
+        "2026-10-05T10:00:01Z ERROR failed to load the api_key:\n  configuration",
     ],
 )
 def test_next_line_judging_leaves_readable_lines_alone(source):

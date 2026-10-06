@@ -1710,6 +1710,16 @@ def _secret_window_spans(text: str) -> list[Span]:
 _WORD_THEN_SEPARATOR_RE = re.compile(r"""(?P<word>[A-Za-z][\w.-]*)["']?[ \t]*(?P<sep>[:=])[ \t]*$""")
 _NEXT_LINE_TOKEN_RE = re.compile(r"[ \t]*(?P<token>\S+)")
 _CODE_BEFORE_WORD_RE = re.compile(r"[()\[\]{}<>,;=]")
+_NEXT_LINE_CORE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_+/=.~-]*[A-Za-z0-9=]|[A-Za-z0-9]")
+
+
+def _next_line_token_shaped(value: str) -> bool:
+    """32+ hex, a UUID, or 8+ characters mixing letters and digits (not an ARN, URL or placeholder)."""
+    if value.lower().startswith("arn") or PLACEHOLDER_RE.search(value):
+        return False
+    if _HEX32_RE.search(value) or _UUID_SHAPE_RE.search(value):
+        return True
+    return len(value) >= MIN_MASKED_AFTER_WORD and any(c.isalpha() for c in value) and any(c.isdigit() for c in value)
 
 
 def _next_line_value_spans(text: str) -> list[Span]:
@@ -1722,9 +1732,6 @@ def _next_line_value_spans(text: str) -> list[Span]:
         if not match:
             continue
         word = match.group("word")
-        before = line[:match.start()]
-        if _CODE_BEFORE_WORD_RE.search(before) or len(before.split()) > 3:
-            continue  # a code line ("def f(x) -> MatchKeys:") or a long sentence, not a key and its value
         if not (_holds_secret_word(word) or _names_a_secret(word) or looks_secret_key(word)):
             continue
         following = next(((start, body) for start, body in lines[index + 1:] if body.strip()), None)
@@ -1735,6 +1742,14 @@ def _next_line_value_spans(text: str) -> list[Span]:
         token = token_match.group("token")
         if token.endswith(":") or token.startswith(("-", "#", "|", ">", "<")) or PLACEHOLDER_RE.search(token):
             continue  # a YAML key, a list item, a comment, a block scalar or a mask: not a value
+        before = line[:match.start()]
+        if _CODE_BEFORE_WORD_RE.search(before) or len(before.split()) > 3:
+            # A code line ("def f(x) -> MatchKeys:") or a long log sentence: only a token-shaped value is masked.
+            core = _NEXT_LINE_CORE_RE.search(token)
+            if core and _next_line_token_shaped(core.group()):
+                token_start = start + token_match.start("token") + core.start()
+                spans.append((token_start, token_start + len(core.group())))
+            continue
         prefix = f"{word}{match.group('sep')} "
         synthetic = prefix + token
         value_start, value_end = len(prefix), len(synthetic)
