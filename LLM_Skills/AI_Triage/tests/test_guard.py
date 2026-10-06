@@ -742,3 +742,36 @@ def test_own_script_config_map_and_allow_replay_ask(args):
         verdict = decide(f"{PY} {SCRIPT}/{script} {args}", CONTEXT)
         assert verdict.kind == ASK, (script, args)
         assert args.split()[-1 if "allow" in args else 0].split("=")[0] in verdict.reason
+
+
+# ---- session 6 ruling (A-I2 minors): more write spellings reach the tripwire ----
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"echo x >| {CASE_RUN}/case.json",
+        f"cd {CASE_RUN} && cp /tmp/x case.json",
+        f"cd {CASE_RUN}/findings && cp /tmp/x checked.json",
+        f"cd {CASE_RUN} && echo x > report.md",
+        f"cd /home/eng/.ai-triage/cases/INC-1 && cd 20261004-101500 && rm case.json",
+        f"gzip {CASE_RUN}/case.json",
+        f"patch {CASE_RUN}/case.json /tmp/p",
+        f"unzip -o /tmp/x.zip -d {CASE_RUN}",
+        f"tar -xf /tmp/x.tar -C {CASE_RUN}",
+        f"bzip2 {CASE_RUN}/audit.json",
+        f"xz {CASE_RUN}/audit.json",
+        f"shred {CASE_RUN}/audit.json",
+        f"unlink {CASE_RUN}/audit.json",
+    ],
+)
+def test_more_write_spellings_trip_the_tripwire(command, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    verdict = decide(command, CONTEXT, cwd="/tmp")
+    assert verdict.kind == ASK and "protected" in verdict.reason, command
+
+
+def test_a_cd_elsewhere_leaves_bare_names_to_the_normal_flow(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/eng")
+    assert decide("cd /home/eng/project && cp /tmp/x case.json", CONTEXT, cwd="/tmp").kind == PASS
+    assert decide("echo x >| /tmp/out", CONTEXT, cwd="/tmp").kind == PASS

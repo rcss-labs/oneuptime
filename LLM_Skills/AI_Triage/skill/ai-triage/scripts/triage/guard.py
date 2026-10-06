@@ -9,7 +9,7 @@ from pathlib import Path
 from triage.config import TriageConfig
 from triage.guard_aws import check_aws
 from triage.guard_kubectl import check_kubectl
-from triage.guard_paths import protected_write_tripwire, redirect_targets
+from triage.guard_paths import CLOBBER_OPERATOR, protected_write_tripwire, redirect_targets
 from triage.shell_parse import Segment, Unparseable, split_command
 from triage.verdict import ALLOW, ASK, DENY, PASS, Verdict, strictest
 
@@ -269,12 +269,19 @@ def _own_script_verdict(segment: Segment, name: str) -> Verdict:
 def decide(command: str, context: GuardContext | None, context_error: str = "", cwd: str = "") -> Verdict:
     """Return allow, deny, ask, or pass for a whole command line run in cwd."""
     verdict = _decide_command(command, context, context_error)
+    readable = command
     try:
-        segments = split_command(command)
+        segments = split_command(readable)
     except Unparseable:
-        return verdict  # never allowed, so it needs no tripwire
+        if CLOBBER_OPERATOR not in command:
+            return verdict  # never allowed, so it needs no tripwire
+        readable = command.replace(CLOBBER_OPERATOR, ">")  # the scanner refuses >|; read it as > for the tripwire
+        try:
+            segments = split_command(readable)
+        except Unparseable:
+            return verdict
     skill_dir, cases_dir = (context.skill_dir, context.cases_dir) if context else ("", "")
-    tripwire = protected_write_tripwire(segments, skill_dir, cases_dir, cwd, redirect_targets(command))
+    tripwire = protected_write_tripwire(segments, skill_dir, cases_dir, cwd, redirect_targets(readable))
     return strictest([verdict, Verdict(ASK, tripwire)]) if tripwire else verdict
 
 

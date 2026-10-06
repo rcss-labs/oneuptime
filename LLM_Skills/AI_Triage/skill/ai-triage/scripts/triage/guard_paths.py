@@ -55,10 +55,13 @@ RUN_DEPTH = 2  # <case>/<run>
 # Directly under the cases root: what publish.py records for the connector check (guard_mcp).
 PUBLISH_STATE = (".publish-state.json", "publish.py")
 REDIRECT_OPERATORS = frozenset({">", ">>", "&>", "&>>"})
+# The shell scanner refuses ">|" (clobber); the tripwire reads such a command with ">" in its place.
+CLOBBER_OPERATOR = ">|"
 
 # Command words that change files; with a protected path among their arguments the engineer decides.
 WRITE_COMMANDS = frozenset({"rm", "mv", "cp", "tee", "sed", "truncate", "dd", "chmod", "chown", "ln", "link", "touch",
-                            "install", "rsync", "perl"})
+                            "install", "rsync", "perl", "gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "zstd",
+                            "patch", "unzip", "tar", "shred", "unlink", "cpio"})
 TRIPWIRE_REASON = ("the command may write a protected path (the skill folder or run files that only the skill's "
                    "scripts write); the engineer decides")
 
@@ -188,17 +191,41 @@ def _resolves_to_protected(candidate: str, cwd: object, roots: ProtectedRoots) -
         return False
 
 
+def _after_cd(segment: Segment, cwd: object) -> object:
+    """The working directory after `cd DIR` (or pushd DIR), so that later bare names resolve where they run."""
+    if len(segment.argv) < 2:
+        return os.path.expanduser("~") if segment.argv and segment.argv[0] == "cd" else cwd
+    try:
+        return resolve_tool_path(segment.argv[-1], cwd)
+    except UnresolvablePath:
+        return cwd
+
+
 def protected_write_tripwire(segments: Sequence[Segment], skill_dir: str, cases_dir: str, cwd: object = "",
                              targets: Sequence[str] = ()) -> str:
-    """A reason to ask when a file-changing command or a redirect names a protected path, else ""."""
-    writers = [segment for segment in segments if segment.argv and os.path.basename(segment.argv[0]) in WRITE_COMMANDS]
-    if not writers and not targets:
-        return ""
-    roots = protected_roots(skill_dir, cases_dir)
-    if any(_resolves_to_protected(target, cwd, roots) for target in targets):
-        return TRIPWIRE_REASON
-    for segment in writers:
+    """A reason to ask when a file-changing command or a redirect names a protected path, else "".
+
+    A `cd` (or pushd) moves the directory that later segments' names are resolved against. Redirect targets are not
+    tied to a segment, so they are tried against every directory the command passes through."""
+    roots: ProtectedRoots | None = None
+    directories = [cwd]
+    current = cwd
+    for segment in segments:
+        if not segment.argv:
+            continue
+        word = os.path.basename(segment.argv[0])
+        if word in ("cd", "pushd"):
+            current = _after_cd(segment, current)
+            directories.append(current)
+            continue
+        if word not in WRITE_COMMANDS:
+            continue
+        roots = roots or protected_roots(skill_dir, cases_dir)
         for argument in segment.argv[1:]:
-            if any(_resolves_to_protected(candidate, cwd, roots) for candidate in _argument_paths(argument)):
+            if any(_resolves_to_protected(candidate, current, roots) for candidate in _argument_paths(argument)):
                 return TRIPWIRE_REASON
+    if targets:
+        roots = roots or protected_roots(skill_dir, cases_dir)
+        if any(_resolves_to_protected(target, directory, roots) for target in targets for directory in directories):
+            return TRIPWIRE_REASON
     return ""
