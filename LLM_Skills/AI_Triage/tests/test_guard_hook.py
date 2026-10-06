@@ -332,10 +332,11 @@ def test_the_confluence_state_is_read_from_the_configured_cases_root(skill_with_
     skill, run = skill_with_cases
     cases = run.parent.parent
     body = "report body"
-    state = {"confluence": {"body_sha256": hashlib.sha256(body.encode()).hexdigest(),
-                            "written_at": datetime.now(timezone.utc).isoformat()}}
+    state = {"confluence": {"body_sha256": hashlib.sha256(body.encode()).hexdigest(), "title": "INC-1 Triage",
+                            "page_id": None, "written_at": datetime.now(timezone.utc).isoformat()}}
     (cases / ".publish-state.json").write_text(json.dumps(state))
-    out = guard_hook.evaluate(mcp_payload("mcp__atlassian__createConfluencePage", {"body": body}), skill)
+    out = guard_hook.evaluate(mcp_payload("mcp__atlassian__createConfluencePage", {"title": "INC-1 Triage", "body": body}),
+                              skill)
     assert decision(out)["permissionDecision"] == "allow"
 
 

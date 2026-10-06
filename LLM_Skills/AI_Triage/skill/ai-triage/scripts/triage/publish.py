@@ -428,10 +428,13 @@ def record_slack(case_dir: Path, destination: str, now: datetime) -> None:
 
 
 def publish_state_entry(case_dir: Path, section: str, prepared, now: datetime) -> dict:
-    """What the guard learns about a prepared publication: the case, the hashes, and when."""
+    """What the guard learns about a prepared publication: the case, the hashes, and when. For Confluence also the
+    title and the page an update may change (the page recorded for this incident, or None: only a create fits)."""
     entry = {"case_dir": str(case_dir.resolve())}
     if section == "confluence":
-        entry.update({"title": prepared["title"], "body_sha256": prepared["body_sha256"]})
+        existing = prepared.get("existing_page")
+        page_id = existing.get("page_id") if isinstance(existing, dict) else None
+        entry.update({"title": prepared["title"], "page_id": page_id, "body_sha256": prepared["body_sha256"]})
     else:
         entry["text_sha256"] = hashlib.sha256(prepared.encode("utf-8")).hexdigest()
     entry["written_at"] = format_time(now)

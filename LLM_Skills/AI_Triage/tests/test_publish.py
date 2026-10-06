@@ -755,7 +755,7 @@ def test_publish_state_is_replaced_not_written_through_a_link(cases_dir, run_dir
 def test_publish_state_entries_hold_the_hashes_of_what_was_prepared(run_dir, config):
     request = confluence_request(run_dir, config)
     entry = publish_state_entry(run_dir, "confluence", request, NOW)
-    assert entry == {"case_dir": str(run_dir.resolve()), "title": request["title"],
+    assert entry == {"case_dir": str(run_dir.resolve()), "title": request["title"], "page_id": None,
                      "body_sha256": request["body_sha256"], "written_at": "2026-10-04T12:00:00Z"}
     text = slack_message(run_dir, None)
     entry = publish_state_entry(run_dir, "slack", text, NOW)
