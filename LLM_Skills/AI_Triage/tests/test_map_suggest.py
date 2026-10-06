@@ -330,6 +330,7 @@ def test_an_unexpected_error_while_checking_leaves_the_map(config, skill_dir, tm
     assert not [p for p in tmp_path.iterdir() if p.name.startswith(".")]
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a file whatever its permissions")
 def test_a_read_only_map_is_refused_without_a_stray_backup(config, skill_dir, tmp_path):
     path = write_map(tmp_path, COMMENTED_MAP)
     path.chmod(0o444)

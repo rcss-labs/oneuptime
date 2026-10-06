@@ -291,6 +291,7 @@ def test_links_inside_the_config_folder_are_backed_up_as_links(sandbox, tmp_path
     assert (backup / "config" / "certs").readlink() == big
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file whatever its permissions")
 def test_failed_config_backup_stops_before_anything_is_replaced(sandbox):
     assert install(sandbox).returncode == 0
     target = dest(sandbox)

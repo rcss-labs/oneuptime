@@ -192,7 +192,19 @@ The guard is the hook that approves or refuses commands. "Platform" covers the p
 #### G37. Quality items parked or left for last
 - **Decision:** Explicit UTF-8 on every read and write (C-M5) is to be done last as one mechanical pass, when no owner is editing. Duplicated rules, private imports, dead code, the breadth of the hygiene test, suite cost and small items (C-M1, M2, M3, M8, M10, M11) are parked and stated, not fixed now. The note that plans 02 to 05 are superseded is added with this documentation pass.
 - **Why:** None of them changes what a user meets, and each would be a refactor across other owners' files late in the round.
-- **Cost if wrong:** The parked items remain. The UTF-8 pass has not landed yet.
+- **Cost if wrong:** The parked items remain. The UTF-8 pass landed in `fda026146d`.
+
+#### G38. Re-review of the final fix round (2026-10-06)
+- **Decision:** Three scoped re-reviews (safety, function, quality) found one Critical and five Important defects in the final fix round; each was fixed test first and re-reviewed. The rulings:
+  - Redaction stops adding shapes one by one: a token-shaped value (32+ hex, a UUID, or 16+ characters mixing letters and digits) within four tokens after any word whose secret stem stands as its own part (`apiKey`, `X-Api-Key`, `client_secret`, `keys`; not `monkey`) is masked, whatever separates them. A value on the next line after a secret word and `:` or `=` (LF or CRLF) is judged as if it stood on the same line; the publish audit flags it at 8+ mixed characters.
+  - The guard denies the EC2 reads that return user data or VPN pre-shared keys (`get-launch-template-data`, spot instance and spot fleet requests, `get-vpn-connection-device-sample-configuration`).
+  - `publish.py --allow-replay` is removed; `collect.py` and `opensearch_query.py` refuse a case whose replay state differs from the session's.
+  - A configured OneUptime server name adds to the name test and never replaces it; tool names are matched by words; a Confluence write needs the audited body, the recorded title and, for an update, the recorded page id.
+  - Every printed draft field is checked for label words (in a map change, every value with whitespace); hypothesis results are a post-judging field and leave the draft digest.
+  - A failed alarms read is never reported as no alarms; change lookups for global services run in us-east-1 and every absence fact names its regions.
+- **Stated limits:** a next-line value with no separator (`Bearer` or `key` alone on a line, `key=""`) and a value after U+2028 pass both layers; `auth token` followed by a next-line value and a block scalar after `key: |` are caught only by the publish audit; a Confluence page create is not tied to a space or parent page (decide with the connector trial, together with `confluence.space_id`).
+- **Why:** The rule-by-rule redaction had gone five rounds and still missed common shapes; the window rule closes the class at the cost of masking some ids near secret words.
+- **Cost if wrong:** Ids near "key"-type words are masked (a KMS key UUID, `key metrics for build abc123def456ghi7`); a whole-text check over 12,984 lines of docs, skill files and replay recordings showed no other change.
 
 ## Evidence and collectors
 
