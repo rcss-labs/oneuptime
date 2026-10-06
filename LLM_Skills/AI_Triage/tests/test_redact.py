@@ -2455,3 +2455,39 @@ def test_the_mask_keeps_the_opening_parenthesis():
 )
 def test_readable_text_near_secret_words_is_kept(source):
     assert Redactor().text(source) == source
+
+
+# ---------------------------------------------------------------------------
+# Session 6 ruling (next-line gap): a line that ends with a secret word and ":" or "=" has its value judged
+# on the next non-empty line, by the same rules as if it stood after the separator.
+# ---------------------------------------------------------------------------
+NEXT_LINE_VALUE = {
+    "key:\n q8Zr2mX7wK4p": "q8Zr2mX7wK4p",
+    "password:\n  hunter2abc9": "hunter2abc9",
+    "api_key:\n  q8Zr2mX7wK4pq8Zr2mX7": "q8Zr2mX7wK4pq8Zr2mX7",
+    "token =\nab12cd34ef56": "ab12cd34ef56",
+    "db:\n  password:\n\n    hunter2abc9\n  host: db.example.com": "hunter2abc9",
+}
+
+
+@pytest.mark.parametrize("source", sorted(NEXT_LINE_VALUE))
+def test_a_value_on_the_next_line_after_a_secret_word_is_masked(source):
+    out = Redactor().text(source)
+    assert NEXT_LINE_VALUE[source] not in out and "<SECRET-1>" in out, out
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "key:\n  - name: foo",
+        "Description:\n The token expired.",
+        "credentials:\n  username: bob\n  region: eu-west-1",
+        "secret:\n  name: db-password\n  key: password",
+        "token:\n  expired",
+        "the key is\nq8Zr2mX7wK4p",
+        "key:\n  |\n  multi",
+        'def build(cls, monitors: Any = ()) -> "MatchKeys":\n    return cls(_normalise(monitors))',
+    ],
+)
+def test_next_line_judging_leaves_readable_lines_alone(source):
+    assert Redactor().text(source) == source

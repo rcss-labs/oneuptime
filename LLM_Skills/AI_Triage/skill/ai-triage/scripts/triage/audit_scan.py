@@ -529,6 +529,9 @@ _SECRET_WORD_RE = re.compile(
 )
 _AFTER_WORD_RE = re.compile(r"<[A-Z][A-Z0-9_]*(?:-[A-Z0-9_]+)*>|[^\s|,;\"'`()\[\]{}:=<>*]+")
 MIN_VALUE_AFTER_WORD = 16
+MIN_MIXED_NEXT_LINE = 8
+_SEPARATOR_ONLY_RE = re.compile(r"[\"'`]?[ \t]*[:=][ \t]*")
+_MIXED_RE = re.compile(r"(?=.*[A-Za-z])(?=.*\d)")
 
 
 # CloudTrail lookup-attributes: "AttributeKey=EventSource" names what to look up and holds no secret
@@ -542,10 +545,13 @@ def _secret_word_values(text: str, allowed: frozenset[str], words: dict):
     for word in _SECRET_WORD_RE.finditer(text):
         line_end = text.find("\n", word.end(), word.end() + LINE_WINDOW)
         stop = word.end() + LINE_WINDOW if line_end < 0 else line_end
+        short_next_line = False
         if line_end >= 0 and not _AFTER_WORD_RE.search(text, word.end(), line_end):
             # "key:" ends its line: the value may stand on the next line
             next_end = text.find("\n", line_end + 1, line_end + 1 + LINE_WINDOW)
             stop = line_end + 1 + LINE_WINDOW if next_end < 0 else next_end
+            # "key:" / "token =": a mixed value of 8+ characters there counts too (session 6 ruling)
+            short_next_line = bool(_SEPARATOR_ONLY_RE.fullmatch(text, word.end(), line_end))
         floor = max(0, word.start() - LINE_WINDOW)
         chunk_start = max(text.rfind(" ", floor, word.start()), text.rfind("\n", floor, word.start()), floor - 1) + 1
         if text[chunk_start : chunk_start + 4].lower() == "arn:":
@@ -564,7 +570,9 @@ def _secret_word_values(text: str, allowed: frozenset[str], words: dict):
             value = token.group()
             if value.lower() == "arn" and text[token.end() : token.end() + 1] == ":":
                 break  # an ARN follows; its pieces are not secrets
-            if value.startswith("<") or len(value) < MIN_VALUE_AFTER_WORD or value in allowed:
+            short_mixed = (short_next_line and count == 0 and token.start() > line_end
+                           and len(value) >= MIN_MIXED_NEXT_LINE and _MIXED_RE.search(value) is not None)
+            if value.startswith("<") or value in allowed or (len(value) < MIN_VALUE_AFTER_WORD and not short_mixed):
                 continue  # a mask, a short word or a configured alias
             words[(token.start(), token.end())] = re.sub(r"s$", "", word.group().lower())
             yield token.start(), token.end()

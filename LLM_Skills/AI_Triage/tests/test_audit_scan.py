@@ -1122,3 +1122,16 @@ def test_a_value_on_the_next_line_after_a_secret_word_is_flagged(source):
 @pytest.mark.parametrize("source", ["key rotation enabled\nabcd1234efgh5678 is the build", "the key:\n\nabcd1234efgh5678"])
 def test_only_the_line_right_after_a_word_that_ends_its_line_is_read(source):
     assert "secret_word_value" not in [hit.kind for hit in scan(source)]
+
+
+# session 6 ruling (next-line gap): a mixed value of 8+ characters on the line after "word:" / "word ="
+
+@pytest.mark.parametrize("source", ["key:\n q8Zr2mX7wK4p", "token =\nab12cd34ef56", "api_key:\n  q8Zr2mX7wK4pq8Zr2mX7"])
+def test_a_short_mixed_value_on_the_next_line_is_flagged(source):
+    assert "secret_word_value" in [hit.kind for hit in scan(source)]
+
+
+@pytest.mark.parametrize("source", ["key:\n  - name: foo", "Description:\n The token expired.", "key:\n  rotation",
+                                    "key rotation\nq8Zr2mX7wK4p"])
+def test_the_short_next_line_rule_needs_word_then_separator_and_a_mixed_value(source):
+    assert "secret_word_value" not in [hit.kind for hit in scan(source)]

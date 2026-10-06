@@ -1703,6 +1703,52 @@ def _secret_window_spans(text: str) -> list[Span]:
     return [span for span in spans if _usable(text, span)]
 
 
+# --- a value on the next line after "word:" or "word =" (session 6 ruling on the next-line gap) --------
+
+# A line ending in a secret word (any form the rules above accept) and ":" or "=" has its value judged on the
+# next non-empty line: the first token there is redacted as if it stood after the separator on the same line.
+_WORD_THEN_SEPARATOR_RE = re.compile(r"""(?P<word>[A-Za-z][\w.-]*)["']?[ \t]*(?P<sep>[:=])[ \t]*$""")
+_NEXT_LINE_TOKEN_RE = re.compile(r"[ \t]*(?P<token>\S+)")
+_CODE_BEFORE_WORD_RE = re.compile(r"[()\[\]{}<>,;=]")
+
+
+def _next_line_value_spans(text: str) -> list[Span]:
+    if "\n" not in text:
+        return []
+    lines = list(_lines_with_offsets(text))
+    spans = []
+    for index, (_, line) in enumerate(lines[:-1]):
+        match = _WORD_THEN_SEPARATOR_RE.search(line)
+        if not match:
+            continue
+        word = match.group("word")
+        before = line[:match.start()]
+        if _CODE_BEFORE_WORD_RE.search(before) or len(before.split()) > 3:
+            continue  # a code line ("def f(x) -> MatchKeys:") or a long sentence, not a key and its value
+        if not (_holds_secret_word(word) or _names_a_secret(word) or looks_secret_key(word)):
+            continue
+        following = next(((start, body) for start, body in lines[index + 1:] if body.strip()), None)
+        if following is None:
+            continue
+        start, body = following
+        token_match = _NEXT_LINE_TOKEN_RE.match(body)
+        token = token_match.group("token")
+        if token.endswith(":") or token.startswith(("-", "#", "|", ">", "<")) or PLACEHOLDER_RE.search(token):
+            continue  # a YAML key, a list item, a comment, a block scalar or a mask: not a value
+        prefix = f"{word}{match.group('sep')} "
+        synthetic = prefix + token
+        value_start, value_end = len(prefix), len(synthetic)
+        for category, rule in SECRET_RULES:
+            if category == "secret_next_line":
+                continue
+            hits = [(max(a, value_start), min(b, value_end)) for a, b in rule(synthetic) if a < value_end and b > value_start]
+            if hits:
+                shift = start + token_match.start("token") - value_start
+                spans.extend((a + shift, b + shift) for a, b in hits)
+                break
+    return [span for span in spans if _usable(text, span)]
+
+
 def _lines_with_offsets(text: str):
     position = 0
     for line in text.split("\n"):
@@ -1788,6 +1834,7 @@ SECRET_RULES: tuple[tuple[str, SpanRule], ...] = (
     ("secret_name_value", _name_value_spans),
     ("secret_after_word", _secret_word_value_spans),
     ("secret_near_word", _secret_window_spans),
+    ("secret_next_line", _next_line_value_spans),
     ("cli_shorthand", _shorthand_spans),
     ("secret_loose_name_value", lambda text: _merge(_loose_name_value_spans(text) + _yaml_item_spans(text))),
     ("secret_sentence", _sentence_spans),
