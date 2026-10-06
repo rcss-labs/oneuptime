@@ -122,3 +122,62 @@ def test_case_init_preserves_utf8_characters(tmp_path, config_data, map_data):
     assert "Café" in case_data["incident"]["title"]
     assert "–" in case_data["incident"]["title"]  # en dash
     assert "שרות" in case_data["incident"]["title"]  # Hebrew
+
+
+def _has_keyword(node: ast.Call, name: str) -> bool:
+    return any(kw.arg == name for kw in node.keywords)
+
+
+def _text_mode(mode) -> bool:
+    return isinstance(mode, str) and "b" not in mode
+
+
+def _positional_mode(node: ast.Call, index: int):
+    if len(node.args) > index:
+        return node.args[index].value if isinstance(node.args[index], ast.Constant) else None
+    return "r"
+
+
+def other_text_io_without_encoding(source: str) -> list[str]:
+    """Path.open, io.open, os.fdopen and subprocess text output, each without encoding=."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute) or _has_keyword(node, "encoding"):
+            continue
+        attr, owner = node.func.attr, node.func.value
+        owner_name = owner.id if isinstance(owner, ast.Name) else None
+        mode = next((kw.value.value for kw in node.keywords if kw.arg == "mode" and isinstance(kw.value, ast.Constant)), None)
+        if attr == "open" and owner_name == "io":
+            if _text_mode(mode or _positional_mode(node, 1)):
+                found.append(f"line {node.lineno}: io.open() without encoding=")
+        elif attr == "fdopen" and owner_name == "os":
+            if _text_mode(mode or _positional_mode(node, 1)):
+                found.append(f"line {node.lineno}: os.fdopen() without encoding=")
+        elif attr == "open" and owner_name not in {"io", "os", "tarfile", "zipfile", "gzip", "webbrowser"}:
+            if _text_mode(mode or _positional_mode(node, 0)):
+                found.append(f"line {node.lineno}: .open() without encoding=")
+        elif attr in {"run", "Popen", "check_output"} and owner_name == "subprocess":
+            text = any(kw.arg in {"text", "universal_newlines"} and not (isinstance(kw.value, ast.Constant)
+                       and kw.value.value is False) for kw in node.keywords)
+            if text:
+                found.append(f"line {node.lineno}: subprocess.{attr}(text=True) without encoding=")
+    return found
+
+
+def test_the_wider_check_catches_each_kind_of_call():
+    assert other_text_io_without_encoding("from pathlib import Path\nPath('x').open()\n")
+    assert other_text_io_without_encoding("p.open('w')\n")
+    assert other_text_io_without_encoding("import io\nio.open('x')\n")
+    assert other_text_io_without_encoding("import os\nos.fdopen(3, 'w')\n")
+    assert other_text_io_without_encoding("import subprocess\nsubprocess.run(['x'], text=True)\n")
+    assert not other_text_io_without_encoding("p.open('rb')\nimport os\nos.open('x', 0)\nos.fdopen(3, 'wb')\n")
+    assert not other_text_io_without_encoding("p.open(encoding='utf-8')\nsubprocess.run(['x'], text=True, encoding='utf-8')\n")
+    assert not other_text_io_without_encoding("subprocess.run(['x'], capture_output=True)\n")
+
+
+def test_no_other_text_io_without_encoding_in_scripts():
+    violations = []
+    for py_file in sorted(SCRIPTS_DIR.rglob("*.py")):
+        for problem in other_text_io_without_encoding(py_file.read_text(encoding="utf-8")):
+            violations.append(f"{py_file.relative_to(SCRIPTS_DIR)}: {problem}")
+    assert not violations, "\n".join(violations)

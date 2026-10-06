@@ -422,7 +422,7 @@ def plan_collection(case: dict, config: TriageConfig, skill_dir: Path) -> list[P
 
 def _launch(argv: list[str], timeout: int) -> tuple[int, str]:
     """Run one planned command with this interpreter and this environment. Returns (exit code, stderr)."""
-    done = subprocess.run([sys.executable, *argv[1:]], capture_output=True, text=True, timeout=timeout)
+    done = subprocess.run([sys.executable, *argv[1:]], capture_output=True, text=True, encoding="utf-8", timeout=timeout)
     return done.returncode, done.stderr
 
 

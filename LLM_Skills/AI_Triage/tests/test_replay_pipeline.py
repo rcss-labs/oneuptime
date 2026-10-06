@@ -569,10 +569,10 @@ def test_the_guard_allows_every_command_the_pipeline_ran_and_asks_before_a_map_c
     assert [step for step, _ in checked].count("plan: opensearch") == (3 if run["name"] == "ecs-bad-deploy" else 0)
     assert "judge run" in [step for step, _ in checked]
     assert len({command for _, command in checked}) == len(checked)  # no command stands in for another
-    verdicts = {step: decide(command, context).kind for step, command in checked}
+    verdicts = [(step, command, decide(command, context).kind) for step, command in checked]
     # The publish steps run in this process (the command line cannot publish a replay case); the commands the skill
-    # would run carry no bypass, so every command is allowed.
-    assert [step for step, kind in verdicts.items() if kind != ALLOW] == []
+    # would run carry no bypass, so every command is allowed, each of the repeated "plan: opensearch" steps included.
+    assert [(step, command) for step, command, kind in verdicts if kind != ALLOW] == []
     apply_command = skill_style(
         [str(skill_dir / ".venv" / "bin" / "python"), str(skill_dir / "scripts" / "map_suggest.py"), "apply",
          "--case-dir", str(run["case_dir"]), "--service-name", "checkout-api"], home)

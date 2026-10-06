@@ -181,6 +181,7 @@ The guard is the hook that approves or refuses commands. "Platform" covers the p
 #### G35. One command wrapper and one exit-code table
 - **Decision:** Every script's main goes through one wrapper (`triage/cli.py`) with one exit-code table. A config or map that is not UTF-8 is an invalid-file error, `opensearch_query.py` never overwrites evidence, `collect.py` and `opensearch_query.py` accept only run folders, and `case.py collect` exits non-zero when a collector failed. One owner made the change because every script's main was touched.
 - **Why:** The final quality review found tracebacks, silent replacement of evidence files and inconsistent exit codes (C-I1, C-I4, C-M6).
+- **Exceptions:** `validate_map.py` and `preflight.py` report a bad map or config as a failed check (exit 1), because finding it is their job. `guard_hook.py` is not wrapped: it speaks Claude Code's hook protocol: it always exits 0 and prints its decision as JSON, failing closed on any error.
 - **Cost if wrong:** A broad but mechanical diff.
 
 #### G36. Surviving mutations get tests

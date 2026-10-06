@@ -60,9 +60,7 @@ cd LLM_Skills/AI_Triage
 
 The installer checks for the AWS CLI version 2 and Python 3.10, copies the skill to `~/.claude/skills/ai-triage/`, creates a Python environment there, and creates `config/triage-config.yaml` and `config/service-map.yaml` from the examples if they are missing. It does not edit your AWS config or your Claude Code settings. It prints the remaining steps.
 
-Before the first install, remove the two stray folders `skill/ai-triage/ai-triage/` and `skill/ai-triage/skills/` if they exist in your checkout. An earlier test run created them, and the installer copies every folder of `skill/ai-triage/`, so it would install them as a nested second skill. They are untracked, and removing them is the owner's decision.
-
-Known limitation: installing through a path that passes through a symbolic link is being fixed and its test is not yet verified.
+The installer refuses to install when the destination, or its nearest existing parent, is the source folder or lies inside it, also through a symbolic link.
 
 ### Upgrade
 

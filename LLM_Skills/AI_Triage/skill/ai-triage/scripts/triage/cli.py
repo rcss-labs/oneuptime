@@ -3,7 +3,8 @@
 Exit codes (every script; each script's --help ends with this table):
   0  done
   1  a check failed or found a problem (the audit, the report, judging, nothing discovered, a planned
-     collector), or an unexpected error (one line; set AI_TRIAGE_DEBUG=1 to see the traceback)
+     collector, a map or config that validate_map or preflight checks), or an unexpected error (one line;
+     set AI_TRIAGE_DEBUG=1 to see the traceback)
   2  usage, config, service map, case folder, or file error (including an evidence file that exists)
   3  a sign-in has expired: run aws sso login --profile <profile>
   4  unknown collector or bad target key (collect)
