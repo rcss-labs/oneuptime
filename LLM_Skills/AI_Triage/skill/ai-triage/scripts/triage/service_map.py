@@ -123,7 +123,7 @@ def _parse_match(raw: Any, where: str, errors: list[str]) -> MatchKeys:
     return MatchKeys.build(raw.get("monitors"), raw.get("labels"), raw.get("hostnames"))
 
 
-def _check_resources(resources: dict[str, Any], where: str, config: TriageConfig, errors: list[str]) -> None:
+def check_resources(resources: dict[str, Any], where: str, config: TriageConfig, errors: list[str]) -> None:
     for key in resources:
         if key not in RESOURCE_KEYS:
             errors.append(f"{where}.resources.{key}: unknown resource key")
@@ -181,7 +181,7 @@ def _parse_environment(name: str, raw: Any, where: str, config: TriageConfig, er
     if not isinstance(resources, dict):
         errors.append(f"{where}.resources: must be a mapping")
         resources = {}
-    _check_resources(resources, where, config, errors)
+    check_resources(resources, where, config, errors)
     depends_on = raw.get("depends_on") or []
     if not isinstance(depends_on, list):
         errors.append(f"{where}.depends_on: must be a list")

@@ -99,7 +99,6 @@ def _lower(names: Any) -> frozenset[str]:
 FORBIDDEN_LOWER = _lower(FORBIDDEN_ALLOWS)
 READ_EXCEPTIONS_LOWER = _lower(READ_EXCEPTIONS)
 READ_PREFIXES_LOWER = tuple(prefix.lower() for prefix in READ_NAME_PREFIXES)
-REQUIRED_DENIES_LOWER = _lower(REQUIRED_DENIES)
 
 
 def _api_gateway_path(resource: str) -> str | None:

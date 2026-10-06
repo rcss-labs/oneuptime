@@ -31,7 +31,7 @@ CONFIDENCES = ("high", "medium", "low")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
-def _collapse(text: str) -> str:
+def collapse(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text).strip()
 
 
@@ -65,7 +65,7 @@ def _asked_under(value: object) -> list[object]:
 
 
 def _comparable(text: str) -> str:
-    return _collapse(text).lower()
+    return collapse(text).lower()
 
 
 def _asked_form(text: str) -> str:
@@ -195,12 +195,12 @@ def quotable_strings(fact: dict) -> list[str]:
 
     Strings under ASKED_KEY are skipped at any depth.
     """
-    strings = [_collapse(fact[name]) for name in ("summary", "excerpt") if isinstance(fact.get(name), str)]
+    strings = [collapse(fact[name]) for name in ("summary", "excerpt") if isinstance(fact.get(name), str)]
     pending = [fact.get("data")]
     while pending:
         item = pending.pop(0)
         if isinstance(item, str):
-            strings.append(_collapse(item))
+            strings.append(collapse(item))
         elif isinstance(item, dict):
             pending.extend(value for key, value in item.items() if str(key).lower() != ASKED_KEY)
         elif isinstance(item, list):
@@ -208,7 +208,7 @@ def quotable_strings(fact: dict) -> list[str]:
     return strings
 
 
-def _around(text: str, needle: str) -> str:
+def around(text: str, needle: str) -> str:
     """At most MAX_MATCHED_TEXT characters of text, centred on the first place the needle occurs."""
     if len(text) <= MAX_MATCHED_TEXT:
         return text
@@ -261,7 +261,7 @@ def _asked_coverage(text: str, asked_values: list[str]) -> list[bool]:
     return covered
 
 
-def _matched_string(fact: dict, needle: str) -> str | None:
+def matched_string(fact: dict, needle: str) -> str | None:
     """The quotable string holding the excerpt. A short excerpt must equal a whole string."""
     for text in quotable_strings(fact):
         if len(needle) >= MIN_EXCERPT:
@@ -300,18 +300,18 @@ def _citation_problems(
     matching: list[dict] = []
     matched_text = ""
     if isinstance(excerpt, str):
-        needle = _collapse(excerpt)
+        needle = collapse(excerpt)
         shape_problem = _excerpt_shape_problem(needle)
         repeats = False
         for fact in cited.values() if shape_problem is None else ():
-            text = _matched_string(fact, needle)
+            text = matched_string(fact, needle)
             if text is None:
                 continue
             if _repeats_request(fact, (file_asked or {}).get(fact.get("file")), needle):
                 repeats = True
                 continue
             matching.append(fact)
-            matched_text = matched_text or _around(text, needle)
+            matched_text = matched_text or around(text, needle)
         if shape_problem:
             problems.append(shape_problem)
         elif not matching and repeats:

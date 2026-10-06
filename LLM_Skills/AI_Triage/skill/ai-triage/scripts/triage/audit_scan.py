@@ -32,7 +32,6 @@ ENTROPY_LOWERCASE = 3.6
 LINE_WINDOW = 160  # how far around a value its line is read, so one huge line stays cheap
 MIN_TOKEN_LENGTH = 24
 MIN_LOWERCASE_LENGTH = 20
-MIN_HEX_LENGTH = 40
 
 _ZERO_WIDTH = "\u200b\u200c\u200d\u200e\u200f\u2060\u2061\u2062\u2063\u2064\ufeff\u00ad\u180e"
 _SPECIAL_RE = re.compile(

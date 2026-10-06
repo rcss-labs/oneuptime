@@ -163,7 +163,7 @@ def _peak_span(ordered: list[tuple[str, float]], peak: float) -> tuple[str, str 
     return ordered[first][0], ordered[last][0] if last > first else None
 
 
-def _fetch(
+def fetch_with_command(
     ctx: CollectContext, specs: Sequence[MetricSpec], period: int, region: str | None
 ) -> tuple[list[MetricSummary], str, bool]:
     """Summaries, the command of the window call, and whether the window call succeeded."""
@@ -182,7 +182,7 @@ def _fetch(
 def fetch(
     ctx: CollectContext, specs: Sequence[MetricSpec], period: int = 300, region: str | None = None
 ) -> list[MetricSummary]:
-    return _fetch(ctx, specs, period, region)[0]
+    return fetch_with_command(ctx, specs, period, region)[0]
 
 
 def _num(value: float) -> str:
@@ -210,7 +210,7 @@ def _movement(summary: MetricSummary) -> str:
     return "about the same as one week earlier"
 
 
-def _summary_text(summary: MetricSummary) -> str:
+def summary_text(summary: MetricSummary) -> str:
     """Contract 6: statistic, lowest and highest with their times, the incident part against the same hours
     one week earlier, and when the series first left last week's range."""
     head = (
@@ -226,7 +226,7 @@ def _summary_text(summary: MetricSummary) -> str:
 def add_metric_facts(
     ctx: CollectContext, resource: str, specs: Sequence[MetricSpec], period: int = 300, region: str | None = None
 ) -> list[MetricSummary]:
-    summaries, command, read_ok = _fetch(ctx, specs, period, region)
+    summaries, command, read_ok = fetch_with_command(ctx, specs, period, region)
     for summary in summaries:
         if summary.datapoints == 0:
             outcome = "no data was returned for the window" if read_ok else "the metric could not be read (see errors)"
@@ -237,6 +237,6 @@ def add_metric_facts(
             continue
         ctx.evidence.add(
             kind=INCIDENT_TIME, resource=resource, time=summary.fact_time, command=command,
-            summary=_summary_text(summary), data=asdict(summary),
+            summary=summary_text(summary), data=asdict(summary),
         )
     return summaries

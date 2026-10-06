@@ -8,12 +8,12 @@ Their evidence window is only the minute before the run; it is not a query range
 from __future__ import annotations
 
 import json
-import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from triage.collectors.common import DIGITS_RE, HEX_RUN_RE, UUID_RE
 from triage.config import OpenSearchCluster
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME, Evidence
 from triage.opensearch.client import OpenSearchClient, OpenSearchError
@@ -35,10 +35,6 @@ SHARD_COLUMNS = "index,shard,prirep,state,unassigned.reason,node"
 HISTOGRAM_NAME = "by_time"
 TOP_MESSAGES_NAME = "top_messages"
 HEALTH_ORDER = {"green": 0, "yellow": 1, "red": 2}
-
-_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-_HEX_ID_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{8,}(?![0-9A-Za-z])")
-_DIGITS_RE = re.compile(r"\d+")
 
 
 @dataclass
@@ -359,9 +355,9 @@ def histogram(
 
 def normalise_message(message: str) -> str:
     """Replace ids and numbers with # so that messages that differ only in those group together."""
-    message = _UUID_RE.sub("#", message)
-    message = _HEX_ID_RE.sub("#", message)
-    return _DIGITS_RE.sub("#", message)
+    message = UUID_RE.sub("#", message)
+    message = HEX_RUN_RE.sub("#", message)
+    return DIGITS_RE.sub("#", message)
 
 
 def top_messages(

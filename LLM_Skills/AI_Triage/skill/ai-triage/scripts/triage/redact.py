@@ -47,12 +47,7 @@ _SCHEME_AND_PLACEHOLDER_RE = re.compile(r"(?:[A-Za-z]+ )?<[A-Z]+-\d+>")
 
 # A name is secret when one of its parts (split on separators and camel case, trailing digits
 # stripped) holds a secret stem, unless its last part says it names something else (see
-# NAME_ENDINGS). SECRET_WORDS stays exported for collectors that look up single words.
-SECRET_WORDS = frozenset({
-    "password", "passwords", "passwd", "pass", "pwd", "passphrase", "secret", "secrets", "token",
-    "apikey", "apikeys", "credential", "credentials", "auth", "cookie", "cookies",
-    "authorization", "proxyauthorization", "pw", "cred", "creds",
-})
+# NAME_ENDINGS).
 # Long stems match anywhere inside a part (round 5: private, license and licence only count
 # together with key, and cred, auth and code have their own rules in _holds_secret_stem).
 LONG_SECRET_STEMS = (

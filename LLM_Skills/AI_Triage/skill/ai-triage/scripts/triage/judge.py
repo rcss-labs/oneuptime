@@ -17,11 +17,11 @@ from triage import compose
 from triage.case import load_case
 from triage.config import TriageConfig
 from triage.digest import JUDGED_ACTION_FIELDS, JUDGED_CAUSE_FIELDS, action_digest, case_identity, cause_digest, draft_digest
-from triage.findings import _around, _collapse, _matched_string, load_facts
+from triage.findings import around, collapse, matched_string, load_facts
 from triage.judge_client import Judge, JudgeReply, JudgeUnavailable
-from triage.questions import REQUIRED_IDS, _check_question, build_choice
+from triage.questions import REQUIRED_IDS, check_question, build_choice
 from triage.redact import Redactor
-from triage.report import check_draft
+from triage.report import ID_RE, check_draft
 from triage.service_map import ServiceMap
 from triage.window import WindowError, parse_time
 
@@ -34,7 +34,6 @@ _DASHED_ACCOUNT_RE = re.compile(r"(?<![\d-])(\d{4})-(\d{4})-(\d{4})(?![\d-])")
 MAX_ADHOC_QUESTION_CHARS = 2000
 MAX_ASKED_CHARS = 300
 MAX_QUOTED_CHARS = 500
-ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")  # the same pattern the report uses for ids
 _ADHOC_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 MAX_STATE_CHARS = 8000
 MAX_FACTS_PER_FINDING = 10
@@ -166,10 +165,10 @@ def _quoted_owner(finding: dict, cited: list[tuple[str, dict]]) -> str | None:
     matched, excerpt = finding.get("matched_text"), finding.get("excerpt")
     if not isinstance(matched, str) or not matched or not isinstance(excerpt, str):
         return None
-    needle = _collapse(excerpt)
+    needle = collapse(excerpt)
     for fact_id, fact in cited:
-        text = _matched_string(fact, needle)
-        if text is not None and _around(text, needle) == matched:
+        text = matched_string(fact, needle)
+        if text is not None and around(text, needle) == matched:
             return fact_id
     return None
 
@@ -818,7 +817,7 @@ def parse_adhoc(document: Any) -> tuple[str, str, Any, dict]:
             errors.append("id must be 1 to 40 characters: a lower-case letter, then lower-case letters, digits, or underscores")
         if document["id"] in REQUIRED_IDS:
             errors.append(f"id {document['id']} belongs to a fixed question; choose another id")
-        errors += _check_question(document["id"] or "question", question)
+        errors += check_question(document["id"] or "question", question)
         if len(json.dumps(question)) > MAX_ADHOC_QUESTION_CHARS:
             errors.append(f"the question text is over the limit of {MAX_ADHOC_QUESTION_CHARS} characters")
         if "criteria_from" in question:

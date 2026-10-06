@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import Any
 
 from triage.collectors import Collector
-from triage.collectors.common import in_window, parse_iso, split_csv, was_not_found
+from triage.collectors.common import DIGITS_RE, HEX_RUN_RE, UUID_RE, in_window, parse_iso, split_csv, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME, MAX_EXCERPT
 from triage.window import describe_offset, format_time
@@ -25,9 +25,6 @@ LOG_ERROR_LINES = 30
 LOG_LINE_CHARS = 300
 _STRONG_LINE = re.compile(r"\b(error|fatal|critical|oom)\b|panic|exception|traceback|killed|out of memory", re.IGNORECASE)
 _SOFT_LINE = re.compile(r"\b(warn|warning)\b|timeout|refused|denied|failed", re.IGNORECASE)
-_DIGITS = re.compile(r"\d+")
-_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-_HEX_RUN = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{8,}(?![0-9A-Za-z])")
 REPLACEMENT = "\ufffd"
 LOG_BYTES = 200000
 MAX_PODS = 30
@@ -456,7 +453,7 @@ def _is_error_looking(line: str) -> bool:
 
 def _group_key(line: str) -> str:
     """The line with UUIDs, hex runs of 8 or more characters, and digits ignored."""
-    return _DIGITS.sub("#", _HEX_RUN.sub("<hex>", _UUID.sub("<uuid>", line)))
+    return DIGITS_RE.sub("#", HEX_RUN_RE.sub("<hex>", UUID_RE.sub("<uuid>", line)))
 
 
 def _error_lines_to_keep(inside: list[tuple]) -> tuple[dict[int, int], int]:

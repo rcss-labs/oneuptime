@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -127,7 +126,7 @@ def _target(args: argparse.Namespace, config) -> int:
 def _plan(args: argparse.Namespace, config) -> int:
     commands = plan_collection(_load_checked(args.case_dir), config, args.skill_dir)
     print(json.dumps([
-        {"domain": c.domain, "tool": c.tool, "name": c.name, "command": shlex.join(c.argv), "reason": c.reason}
+        {"domain": c.domain, "tool": c.tool, "name": c.name, "command": c.shell(), "reason": c.reason}
         for c in commands
     ], indent=2))
     return 0

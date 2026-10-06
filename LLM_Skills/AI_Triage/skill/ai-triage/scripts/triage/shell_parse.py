@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 SEPARATORS = frozenset({"&&", "|"})
 HARMLESS_TARGETS = frozenset({"/dev/null"})
+REDIRECT_OPERATORS = frozenset({">", ">>", "&>", "&>>"})  # the operators whose target is a file name
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 BLANKS = " \t"
 # The only characters an unquoted word may contain; anything else is refused unless a rule below accepts it.
@@ -160,7 +161,7 @@ class _Scanner:
                 raise Unparseable("unsupported operator >|")
             operator = {">": ">>", "&": ">&"}.get(following, ">")
         after = index + len(operator)
-        if operator in (">", ">>", "&>", "&>>") and text[after : after + 1] == "!":
+        if operator in REDIRECT_OPERATORS and text[after : after + 1] == "!":
             raise Unparseable("zsh clobber override")
         self.tokens.append(operator)
         return after
@@ -217,6 +218,15 @@ class _Scanner:
 def _is_assignment(word: _Word) -> bool:
     match = ASSIGNMENT_RE.match(word.text)
     return bool(match) and (word.first_quote is None or match.end() <= word.first_quote)
+
+
+def redirect_targets(command: str) -> list[str]:
+    """The file names of output redirects in a command split_command accepts (>&1 and >&2 are not files).
+
+    The guard's tripwire reads them from the scanner's tokens: a segment does not keep its redirects."""
+    tokens = _Scanner(command.strip(" \t\n")).scan()
+    return [tokens[index + 1].text for index, token in enumerate(tokens[:-1])
+            if isinstance(token, str) and token in REDIRECT_OPERATORS and isinstance(tokens[index + 1], _Word)]
 
 
 def split_command(command: str) -> list[Segment]:

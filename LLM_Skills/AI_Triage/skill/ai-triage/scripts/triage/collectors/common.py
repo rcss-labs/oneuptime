@@ -10,6 +10,11 @@ from triage.context import CollectContext
 from triage.redact import key_components, looks_personal_key, looks_secret_key
 from triage.window import Window, WindowError, parse_time
 
+# --- ids and numbers in log lines, which grouping lines and messages ignores ---------------------
+UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+HEX_RUN_RE = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{8,}(?![0-9A-Za-z])")  # 8 or more hex characters standing alone
+DIGITS_RE = re.compile(r"\d+")
+
 # --- value shapes ---------------------------------------------------------------------------
 _LABEL_RE = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
 _PORT_RE = re.compile(r"[0-9]{1,5}")

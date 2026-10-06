@@ -10,8 +10,8 @@ from triage.commands import COMMANDS
 from triage.config import TriageConfig
 from triage.guard_aws import check_aws
 from triage.guard_kubectl import check_kubectl
-from triage.guard_paths import CLOBBER_OPERATOR, protected_write_tripwire, redirect_targets
-from triage.shell_parse import Segment, Unparseable, split_command
+from triage.guard_paths import CLOBBER_OPERATOR, protected_write_tripwire
+from triage.shell_parse import Segment, Unparseable, redirect_targets, split_command
 from triage.verdict import ALLOW, ASK, DENY, PASS, Verdict, strictest
 
 SENSITIVE_WORD_RE = re.compile(

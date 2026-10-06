@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from triage.config import TriageConfig
 from triage.fixtures import FIXTURE_ENV
 from triage.redact import Redactor
-from triage.service_map import MatchKeys, ServiceMap, _check_resources, match_incident
+from triage.service_map import MatchKeys, ServiceMap, check_resources, match_incident
 from triage.window import WindowError, format_time, parse_time, window_around
 
 TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "templates" / "case.md"
@@ -456,7 +456,7 @@ def _discovery_errors(config: TriageConfig, discovery: Any) -> list[str]:
         return errors + ["discovery.resources: must be a mapping"]
     errors += _discovery_shape_errors(resources)
     # The same checks the service map applies to its own resources (cluster, namespace, index pattern).
-    _check_resources(resources, "discovery", config, errors)
+    check_resources(resources, "discovery", config, errors)
     return errors
 
 

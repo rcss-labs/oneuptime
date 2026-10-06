@@ -58,13 +58,13 @@ def load_questions(path: Path) -> dict[str, dict]:
         if missing not in questions:
             errors.append(f"the required question '{missing}' is missing")
     for question_id, question in questions.items():
-        errors.extend(_check_question(question_id, question))
+        errors.extend(check_question(question_id, question))
     if errors:
         raise QuestionError(errors)
     return questions
 
 
-def _check_question(question_id: str, question: Any) -> list[str]:
+def check_question(question_id: str, question: Any) -> list[str]:
     if not isinstance(question, dict):
         return [f"question '{question_id}' must be an object"]
     errors = [f"question '{question_id}' has unknown key '{key}'" for key in sorted(set(question) - QUESTION_KEYS)]

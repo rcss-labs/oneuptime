@@ -15,6 +15,7 @@ from typing import Any
 from triage.case import CaseError
 from triage.collectors import all_collectors
 from triage.config import TriageConfig
+from triage.evidence import SUFFIX_CLEANER
 
 DOMAINS = ("changes", "compute", "data", "edge", "logs")
 COLLECTOR_DOMAIN = {
@@ -57,7 +58,6 @@ STDERR_LINE_LIMIT = 300
 OPENSEARCH_QUERIES = ("histogram", "top-messages", "search")
 SKIPPED = "skipped"
 # The evidence writer drops every other character from a file name suffix.
-_SUFFIX_CLEANER = re.compile(r"[^A-Za-z0-9-]")
 FILTER_KEY_RE = re.compile(r"[A-Za-z_@][A-Za-z0-9_.@-]*")
 
 
@@ -72,7 +72,7 @@ def _suffix_for(name: str, budget: int) -> str:
     A name that cleaning would change, that has an upper-case letter (volumes that ignore case would merge it
     with its lower-case twin), or that is too long gets a short hash of the raw name, so that two names that
     clean to the same text still write different evidence files."""
-    cleaned = _SUFFIX_CLEANER.sub("", name)
+    cleaned = SUFFIX_CLEANER.sub("", name)
     if cleaned == name and name == name.lower() and len(name) <= budget:
         return name
     digest = hashlib.sha256(name.encode()).hexdigest()[:HASH_LENGTH]
@@ -83,8 +83,8 @@ def _suffix_for(name: str, budget: int) -> str:
 
 def _evidence_path(collector: str, account: str, region: str, suffix: str) -> str:
     """Where Evidence.write puts the file for this collector, account, region (or cluster), and suffix."""
-    name = "-".join(_SUFFIX_CLEANER.sub("", part) for part in (collector, account, region))
-    cleaned = _SUFFIX_CLEANER.sub("", suffix)
+    name = "-".join(SUFFIX_CLEANER.sub("", part) for part in (collector, account, region))
+    cleaned = SUFFIX_CLEANER.sub("", suffix)
     if cleaned:
         name += f"-{cleaned}"
     return f"evidence/{name}.json"
@@ -117,11 +117,11 @@ class _Planner:
 
     def suffix_budget(self, collector: str, account: str | None = None, region: str | None = None) -> int:
         """How many characters of suffix keep the evidence file name within MAX_FILE_NAME_BYTES."""
-        stem = "-".join(_SUFFIX_CLEANER.sub("", part) for part in (collector, account or self.account, region or self.region))
+        stem = "-".join(SUFFIX_CLEANER.sub("", part) for part in (collector, account or self.account, region or self.region))
         return MAX_FILE_NAME_BYTES - len(EVIDENCE_EXTENSION) - len(stem) - 1
 
     def _claim_file(self, name: str, scope: str, suffix: str) -> None:
-        identity = (name.lower(), scope.lower(), _SUFFIX_CLEANER.sub("", suffix).lower())
+        identity = (name.lower(), scope.lower(), SUFFIX_CLEANER.sub("", suffix).lower())
         if identity in self.evidence_files:
             raise CaseError([f"{name} with suffix '{suffix}' would write the same evidence file as another planned command"])
         self.evidence_files.add(identity)

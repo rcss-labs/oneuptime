@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,7 +27,7 @@ MAX_NESTED_ENTRIES = 200
 NOT_A_NUMBER = "not a number"
 OMITTED_SUFFIX = "_omitted"
 SUMMARY_CUT_MARKER = "… [summary cut]"
-_SUFFIX_CLEANER = re.compile(r"[^A-Za-z0-9-]")
+SUFFIX_CLEANER = re.compile(r"[^A-Za-z0-9-]")
 
 
 @dataclass
@@ -239,8 +239,8 @@ class Evidence:
 
     def path_for(self, case_dir: Path, suffix: str = "") -> Path:
         """The file write() would write, without writing it."""
-        name = "-".join(_SUFFIX_CLEANER.sub("", part) for part in (self.collector, self.account, self.region))
-        cleaned = _SUFFIX_CLEANER.sub("", suffix)
+        name = "-".join(SUFFIX_CLEANER.sub("", part) for part in (self.collector, self.account, self.region))
+        cleaned = SUFFIX_CLEANER.sub("", suffix)
         if cleaned:
             name += f"-{cleaned}"
         return case_dir / "evidence" / f"{name}.json"

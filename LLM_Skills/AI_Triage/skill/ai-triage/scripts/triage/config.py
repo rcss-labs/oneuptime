@@ -107,12 +107,6 @@ class TriageConfig:
     def kube_contexts(self) -> frozenset[str]:
         return frozenset(c.context for c in self.eks_clusters.values())
 
-    def account_for_profile(self, profile: str) -> Account | None:
-        for account in self.accounts.values():
-            if account.profile == profile:
-                return account
-        return None
-
 
 def _section(data: dict[str, Any], key: str, errors: list[str], required: bool) -> dict[str, Any]:
     value = data.get(key)

@@ -35,7 +35,6 @@ SLACK_WRITE_WORDS = WRITE_WORDS
 # OneUptime reads may name what they read (get_open_incidents, list_incident_comments), so fewer words count there.
 ONEUPTIME_WRITE_WORDS = WRITE_WORDS - {"open", "close", "mark", "join", "leave", "share", "label", "attachment",
                                        "comment", "schedule", "pin", "unpin", "react", "reply", "kick", "transition"}
-ATLASSIAN_WRITE_WORDS = WRITE_WORDS
 # Words that, with "page", put a body on a Confluence page; an update also needs the recorded page id.
 PAGE_WRITE_WORDS = frozenset({"create", "update", "edit", "write", "save", "put", "publish", "replace", "upsert"})
 PAGE_UPDATE_WORDS = PAGE_WRITE_WORDS - {"create"}

@@ -26,8 +26,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Sequence
 
-# _Scanner is the scanner split_command uses; reading its tokens is the only way to see redirect targets.
-from triage.shell_parse import Segment, _Scanner, _Word
+from triage.shell_parse import Segment
 from triage.verdict import ASK, DENY, PASS, Verdict
 
 FILE_TOOLS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
@@ -54,7 +53,6 @@ STALE_WRITER = "judge"
 RUN_DEPTH = 2  # <case>/<run>
 # Directly under the cases root: what run.py publish records for the connector check (guard_mcp).
 PUBLISH_STATE = (".publish-state.json", "publish")
-REDIRECT_OPERATORS = frozenset({">", ">>", "&>", "&>>"})
 # The shell scanner refuses ">|" (clobber); the tripwire reads such a command with ">" in its place.
 CLOBBER_OPERATOR = ">|"
 
@@ -175,13 +173,6 @@ def protected_target(resolved: str, roots: ProtectedRoots) -> bool:
 def _argument_paths(argument: str) -> list[str]:
     # The word itself, and the value after = (dd of=PATH, --target-directory=PATH).
     return [argument] + ([argument.split("=", 1)[1]] if "=" in argument else [])
-
-
-def redirect_targets(command: str) -> list[str]:
-    """The file names of output redirects in a command split_command accepts (>&1 and >&2 are not files)."""
-    tokens = _Scanner(command.strip(" \t\n")).scan()
-    return [tokens[index + 1].text for index, token in enumerate(tokens[:-1])
-            if isinstance(token, str) and token in REDIRECT_OPERATORS and isinstance(tokens[index + 1], _Word)]
 
 
 def _resolves_to_protected(candidate: str, cwd: object, roots: ProtectedRoots) -> bool:

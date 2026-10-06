@@ -18,8 +18,6 @@ def test_example_config_is_valid(config_data):
     assert cfg.permission_set == "ai-triage-read-only"
     assert cfg.limits["max_window_hours"] == 6
     assert cfg.cases_dir == Path("~/.ai-triage/cases").expanduser()
-    assert cfg.account_for_profile("triage-staging").account_id == "222222222222"
-    assert cfg.account_for_profile("admin") is None
 
 
 def test_optional_sections_default(config_data):

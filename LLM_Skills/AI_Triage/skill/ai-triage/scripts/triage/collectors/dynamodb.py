@@ -7,7 +7,7 @@ from triage.collectors import Collector
 from triage.collectors.common import newest_in_window, was_not_found
 from triage.context import CollectContext
 from triage.evidence import CURRENT, DERIVED, INCIDENT_TIME
-from triage.metrics import MetricSpec, _fetch, _summary_text, add_metric_facts
+from triage.metrics import MetricSpec, fetch_with_command, summary_text, add_metric_facts
 
 MAX_ACTIVITIES = 20
 MAX_ARNS = 20
@@ -67,7 +67,7 @@ def _add_operation_metrics(ctx: CollectContext, name: str, resource: str, table_
         for metric, stat in OPERATION_METRICS for operation in OPERATIONS
     ]
     errors_before = len(ctx.evidence.errors)
-    summaries, window_command, window_read = _fetch(ctx, specs, 300, None)
+    summaries, window_command, window_read = fetch_with_command(ctx, specs, 300, None)
     if not window_read:
         ctx.evidence.add(
             kind=DERIVED, resource=resource, command=window_command,
@@ -78,7 +78,7 @@ def _add_operation_metrics(ctx: CollectContext, name: str, resource: str, table_
         if summary.datapoints:
             ctx.evidence.add(
                 kind=INCIDENT_TIME, resource=resource, time=summary.fact_time, command=window_command,
-                summary=_summary_text(summary), data=asdict(summary),
+                summary=summary_text(summary), data=asdict(summary),
             )
     if len(ctx.evidence.errors) > errors_before:
         ctx.evidence.add(
