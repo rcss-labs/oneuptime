@@ -36,9 +36,9 @@ incident is not written and the lookup covers the whole window.
 | "at the same time as the incident started" | within seconds of the start | the strongest candidate; confirm with the service's facts |
 | a user such as an assumed role of a pipeline | automation made the change | `deployments.md` for the run |
 | "by unknown user" | the event has no user name (a service acting on its own) | the event source and the service's facts |
-| "CloudTrail returned no write event naming 'X' between T1 and T2 (looked up by resource name and by event source S)" | CloudTrail returned no write event naming X by the lookups listed in the fact; it says nothing about changes those lookups cannot see | the service's own facts; state the absence as exactly this |
-| the same "(looked up by resource name only; some services record ARNs or ids instead)" | only the exact-name lookup ran, and some services record ARNs or ids instead of the name | rerun with `event_sources` (Collect table) before treating it as an absence |
-| "Search by event source S stopped after N events (5 pages) ...; absence of changes naming X is not established" | the source is too busy to read in full | a narrower period or name; no absence may be stated |
+| "CloudTrail returned no write event naming 'X' between T1 and T2 (looked up in R by resource name and by event source S; in us-east-1 by event source G)" | CloudTrail returned no write event naming X by the lookups listed in the fact, each in the region it names; it says nothing about changes those lookups cannot see | the service's own facts; state the absence as exactly this |
+| the same "(looked up by resource name only, in R; some services record ARNs or ids instead)" | only the exact-name lookup ran, and some services record ARNs or ids instead of the name | rerun with `event_sources` (Collect table) before treating it as an absence |
+| "Search by event source S in R stopped after N events (10 pages) ...; absence of changes naming X is not established" | the source is too busy to read in full | a narrower period or name; no absence may be stated |
 | "No change was found among the N newest events for X ...; older events were not read" | 50 events came back and none was a write, but more exist | a narrower `resource_names` |
 | "More events exist than the N read; they may include changes" | the list is cut; older writes may exist | name the resource to narrow it |
 | "N older changes for X ... were not shown" | more than 40 writes for one name | the newest 40 are shown, newest first |
@@ -59,8 +59,12 @@ is a cause only when the service's facts changed at that time.
   IAM, CloudFront, Route 53, WAF, and Organizations events in `us-east-1`; those
   facts say "recorded in us-east-1". Other global-service events (STS, Route 53
   Domains) are not looked up.
+- An `event_sources` search for a global service (IAM, CloudFront, Route 53, Route 53
+  Domains, Organizations, WAF Classic) runs in `us-east-1`, where those events are
+  recorded; `wafv2` is searched in both the collection region and `us-east-1`. The
+  absence fact names the region of each lookup.
 - A lookup by resource name finds only events that list that name in their resources.
-  The event-source lookup reads up to five pages of one service's write events and keeps
+  The event-source lookup reads up to ten pages of one service's write events and keeps
   those whose record names the resource anywhere, so a change recorded under an ARN or an
   id is found. The account-wide form (no `resource_names`) fills the 50 events with
   unrelated changes.

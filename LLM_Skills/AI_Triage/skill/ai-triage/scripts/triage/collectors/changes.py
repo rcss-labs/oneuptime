@@ -30,6 +30,14 @@ GLOBAL_EVENT_SOURCES = (
     "iam.amazonaws.com", "cloudfront.amazonaws.com", "route53.amazonaws.com",
     "wafv2.amazonaws.com", "organizations.amazonaws.com",
 )
+# Event sources of global services, whose CloudTrail events are recorded in us-east-1 only; a lookup by one of
+# these sources in any other region finds nothing.
+US_EAST_1_SOURCES = frozenset({
+    "iam.amazonaws.com", "cloudfront.amazonaws.com", "route53.amazonaws.com", "route53domains.amazonaws.com",
+    "organizations.amazonaws.com", "waf.amazonaws.com",
+})
+# WAF (v2) records changes to global (CloudFront) web ACLs in us-east-1 and regional web ACLs in their region.
+BOTH_REGION_SOURCES = frozenset({"wafv2.amazonaws.com"})
 STACK_ITEMS = "50"
 PIPELINE_ITEMS = "10"
 CONFIG_LIMIT = "10"
@@ -143,20 +151,36 @@ def _names_in_record(event: dict, names: list[str]) -> list[str]:
     return [n for n in names if re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", text)]
 
 
+def _source_regions(ctx: CollectContext, source: str) -> list[str]:
+    """The regions where CloudTrail records the events of a source."""
+    if source in US_EAST_1_SOURCES:
+        return [GLOBAL_REGION]
+    if source in BOTH_REGION_SOURCES and ctx.region != GLOBAL_REGION:
+        return [ctx.region, GLOBAL_REGION]
+    return [ctx.region]
+
+
 def _search_source(
     ctx: CollectContext, source: str, names: list[str], incident_start: str | None, seen: set[str],
+    region: str | None = None,
 ) -> tuple[bool, set[str]]:
-    """Read up to MAX_SOURCE_PAGES pages of write events of one source; keep those naming one of names.
+    """Read up to MAX_SOURCE_PAGES pages of write events of one source in one region (the collection region
+    by default); keep those naming one of names.
 
     Returns whether the whole period was read, and the names found.
     """
+    region = region or ctx.region
+    recorded = f", recorded in {region}" if region != ctx.region else ""
     start, end = ctx.window.start, _lookup_end(ctx, incident_start)
     base = ["--lookup-attributes", f"AttributeKey=EventSource,AttributeValue={source}",
             "--start-time", format_time(start), "--end-time", format_time(end), "--max-items", LOOKUP_ITEMS]
     matched: list[tuple[dict, list[str]]] = []
     events_read, token, complete = 0, None, True
     for _ in range(MAX_SOURCE_PAGES):
-        reply = ctx.aws("cloudtrail", "lookup-events", base + (["--starting-token", token] if token else []))
+        reply = ctx.aws(
+            "cloudtrail", "lookup-events", base + (["--starting-token", token] if token else []),
+            region=None if region == ctx.region else region,
+        )
         if reply is None:
             return False, set()
         events_read += len(reply.get("Events", []))
@@ -176,7 +200,7 @@ def _search_source(
         if item.get("EventId") in seen:
             continue
         seen.add(item.get("EventId"))
-        _add_event_fact(ctx, item, ", ".join(pairs[id(item)]), "", incident_start)
+        _add_event_fact(ctx, item, ", ".join(pairs[id(item)]), recorded, incident_start)
     for item in in_period[MAX_EVENTS_PER_NAME:]:
         found.update(pairs[id(item)])
     if len(in_period) > MAX_EVENTS_PER_NAME:
@@ -188,7 +212,7 @@ def _search_source(
         ctx.evidence.add(
             kind=DERIVED, resource=source, command=command,
             summary=(
-                f"Search by event source {source} stopped after {events_read} events ({MAX_SOURCE_PAGES} pages) {period}; "
+                f"Search by event source {source} in {region} stopped after {events_read} events ({MAX_SOURCE_PAGES} pages) {period}; "
                 f"absence of changes naming {', '.join(names)} is not established"
             ),
         )
@@ -196,10 +220,9 @@ def _search_source(
 
 
 def _add_named_changes(
-    ctx: CollectContext, names: list[str], sources: list[str], incident_start: str | None,
+    ctx: CollectContext, names: list[str], sources: list[str], incident_start: str | None, seen: set[str],
 ) -> None:
     """Look up each name exactly, then by event source, and word absence as exactly what was asked."""
-    seen: set[str] = set()
     found: dict[str, int] = {}
     complete = True
     for name in names:
@@ -208,17 +231,25 @@ def _add_named_changes(
         )
         found[name] = result.found
         complete = complete and result.ok and not result.cut
+    by_region: dict[str, list[str]] = {ctx.region: []}
     for source in sources:
-        source_complete, names_found = _search_source(ctx, source, names, incident_start, seen)
-        complete = complete and source_complete
-        for name in names_found:
-            found[name] += 1
+        for region in _source_regions(ctx, source):
+            by_region.setdefault(region, []).append(source)
+            source_complete, names_found = _search_source(ctx, source, names, incident_start, seen, region)
+            complete = complete and source_complete
+            for name in names_found:
+                found[name] += 1
     if not complete:
         return
-    how = (
-        f"looked up by resource name and by event source {', '.join(sources)}" if sources
-        else "looked up by resource name only; some services record ARNs or ids instead"
-    )
+    if sources:
+        parts = []
+        for region, searched in by_region.items():
+            ways = (["by resource name"] if region == ctx.region else []) + (
+                [f"by event source {', '.join(searched)}"] if searched else [])
+            parts.append(f"in {region} " + " and ".join(ways))
+        how = "looked up " + "; ".join(parts)
+    else:
+        how = f"looked up by resource name only, in {ctx.region}; some services record ARNs or ids instead"
     period = f"between {format_time(ctx.window.start)} and {format_time(_lookup_end(ctx, incident_start))}"
     for name in names:
         if not found[name]:
@@ -228,14 +259,14 @@ def _add_named_changes(
             )
 
 
-def _add_global_services(ctx: CollectContext, incident_start: str | None) -> None:
+def _add_global_services(ctx: CollectContext, incident_start: str | None, seen: set[str]) -> None:
     """Global services record their events in us-east-1, so look there when the collection is elsewhere."""
     if ctx.region == GLOBAL_REGION:
         return
     for source in GLOBAL_EVENT_SOURCES:
         _add_cloudtrail(
             ctx, f"AttributeKey=EventSource,AttributeValue={source}", source, incident_start,
-            label=f"global service {source}", global_source=source,
+            label=f"global service {source}", global_source=source, seen=seen,
         )
 
 
@@ -343,12 +374,13 @@ def collect(ctx: CollectContext, targets: dict[str, str]) -> None:
         )
         incident_start = None
     names = split_csv(targets.get("resource_names"))[:MAX_RESOURCE_NAMES]
+    seen: set[str] = set()  # ids of the CloudTrail events already written, so that no event is written twice
     if names:
-        _add_named_changes(ctx, names, split_csv(targets.get("event_sources")), incident_start)
+        _add_named_changes(ctx, names, split_csv(targets.get("event_sources")), incident_start, seen)
     else:
         _add_cloudtrail(ctx, "AttributeKey=ReadOnly,AttributeValue=false", "account", incident_start,
-                        label="any resource")
-    _add_global_services(ctx, incident_start)
+                        label="any resource", seen=seen)
+    _add_global_services(ctx, incident_start, seen)
     if targets.get("stack"):
         _add_stack_events(ctx, targets["stack"], incident_start)
     if targets.get("pipeline"):

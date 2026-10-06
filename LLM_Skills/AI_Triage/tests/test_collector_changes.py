@@ -284,7 +284,7 @@ def test_nothing_changed_says_so_with_the_range_scanned(config_data, tmp_path):
     ctx, aws, kube = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}}, {"resource_names": "x"})
     assert ctx.evidence.errors == []
     assert fact_summaries(ctx) == [
-        "CloudTrail returned no write event naming 'x' between 2026-10-04T10:00:00Z and 2026-10-04T12:00:00Z (looked up by resource name only; some services record ARNs or ids instead)"
+        "CloudTrail returned no write event naming 'x' between 2026-10-04T10:00:00Z and 2026-10-04T12:00:00Z (looked up by resource name only, in eu-west-1; some services record ARNs or ids instead)"
     ]
     assert ctx.evidence.facts[0].kind == "derived"
     assert_read_only(ctx, aws, kube)
@@ -310,7 +310,7 @@ def test_lookup_ends_five_minutes_after_the_incident_start(config_data, tmp_path
     assert call[call.index("--end-time") + 1] == "2026-10-04T10:55:00Z"
     assert fact_summaries(ctx) == [
         "CloudTrail returned no write event naming 'x' between 2026-10-04T10:00:00Z and 2026-10-04T10:55:00Z "
-        "(looked up by resource name only; some services record ARNs or ids instead)"
+        "(looked up by resource name only, in eu-west-1; some services record ARNs or ids instead)"
     ]
 
 
@@ -499,7 +499,7 @@ def test_absence_wording_names_what_was_asked(config_data, tmp_path):
     ctx, _, _ = source_run(config_data, tmp_path, {ECS: [{"Events": []}]}, sources=f"{ECS},{ELB}")
     assert fact_summaries(ctx) == [
         "CloudTrail returned no write event naming 'checkout-api' between 2026-10-04T10:00:00Z and "
-        f"2026-10-04T12:00:00Z (looked up by resource name and by event source {ECS}, {ELB})"
+        f"2026-10-04T12:00:00Z (looked up in eu-west-1 by resource name and by event source {ECS}, {ELB})"
     ]
 
 
@@ -516,3 +516,39 @@ def test_failed_source_lookup_is_an_error_and_no_absence_is_claimed(config_data,
     ctx, _, _ = run(config_data, tmp_path, failing, {"resource_names": "checkout-api", "event_sources": ECS})
     assert [e["code"] for e in ctx.evidence.errors].count("AccessDeniedException") == 2
     assert not any("returned no write event" in s for s in fact_summaries(ctx))
+
+
+CF = "cloudfront.amazonaws.com"
+
+
+def test_global_event_source_is_searched_in_us_east_1_and_its_change_counts(config_data, tmp_path):
+    change = event("UpdateDistribution", source=CF, resource="E2ABCDEF")
+    ctx, aws, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}},
+                      {"resource_names": "E2ABCDEF", "event_sources": CF, "incident_start": INCIDENT},
+                      global_events={CF: {"Events": [change]}})
+    assert not [c for c in regional_lookups(aws) if f"AttributeValue={CF}" in " ".join(c)]
+    assert not any("returned no write event" in s for s in fact_summaries(ctx))
+    facts = [f for f in ctx.evidence.facts if "UpdateDistribution" in f.summary]
+    assert len(facts) == 1 and "recorded in us-east-1" in facts[0].summary
+
+
+def test_absence_after_a_global_source_search_names_each_region(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}},
+                    {"resource_names": "E2ABCDEF", "event_sources": f"{ECS},{CF}"})
+    [absence] = [s for s in fact_summaries(ctx) if "returned no write event" in s]
+    assert absence.endswith(
+        f"(looked up in eu-west-1 by resource name and by event source {ECS}; in us-east-1 by event source {CF})")
+
+
+@pytest.mark.parametrize("source", ["iam.amazonaws.com", "route53.amazonaws.com", "waf.amazonaws.com"])
+def test_other_global_sources_are_searched_in_us_east_1(config_data, tmp_path, source):
+    _, aws, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}},
+                    {"resource_names": "x", "event_sources": source})
+    assert not [c for c in regional_lookups(aws) if f"AttributeValue={source}" in " ".join(c)]
+
+
+def test_in_us_east_1_everything_is_one_region(config_data, tmp_path):
+    ctx, _, _ = run(config_data, tmp_path, {"cloudtrail lookup-events": {"Events": []}},
+                    {"resource_names": "E2ABCDEF", "event_sources": CF}, region="us-east-1")
+    [absence] = [s for s in fact_summaries(ctx) if "returned no write event" in s]
+    assert absence.endswith(f"(looked up in us-east-1 by resource name and by event source {CF})")
