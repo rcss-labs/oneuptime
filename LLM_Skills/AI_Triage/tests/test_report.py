@@ -2176,3 +2176,24 @@ def test_work_order_cause_and_finding_text_must_not_be_blank(case, key, field):
     order["findings"] = [{"id": "compute-1", "claim": "c", "quote": "q", "provenance": "p"}]
     order[key][0][field] = "  "
     assert_problem(validate_work_order(order), f"{key}[0]", field)
+
+
+@pytest.mark.parametrize("change", [
+    {"service": "candidate-api", "environment": "prod", "resource": "confirmed_queue",
+     "arn": "arn:aws:sqs:eu-west-1:111111111111:candidate-queue", "note": "add the queue"},
+    {"candidate": "probable", "reason": "the queue is missing from the map"},
+    "Add candidate-api and the queue probable.orders to the resources of checkout-api",
+])
+def test_names_keys_arns_and_values_in_a_map_change_are_not_label_words(findings, config, change):
+    report = mutated(VALID_REPORT, lambda r: r["map_changes"].append(change))
+    assert not any("labels are printed" in problem for problem in check_draft(report, findings, config))
+
+
+@pytest.mark.parametrize("change,path", [
+    ({"service": "candidate-api", "reason": "it is the root cause"}, "map_changes[0].reason"),
+    ({"service": "orders", "note": "Confirmed missing"}, "map_changes[0].note"),
+    ("Add the queue: the probable cause", "map_changes[0]"),
+])
+def test_a_label_word_in_the_reason_of_a_map_change_is_refused(findings, config, change, path):
+    report = mutated(VALID_REPORT, lambda r: r["map_changes"].append(change))
+    assert any(problem.startswith(path + ": labels are printed") for problem in check_draft(report, findings, config))

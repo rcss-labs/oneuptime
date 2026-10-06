@@ -681,15 +681,20 @@ def _too_deep(value: Any) -> bool:
 
 # Keys whose values are ids or allowed values, not prose; a resource may be named "candidate-api".
 IDENTIFIER_KEYS = frozenset({"id", "cause", "supporting", "contradicting", "finding_ids", "target", "type"})
+# A map change holds resource names, map keys, and ARNs; only these fields of an object item are prose.
+MAP_CHANGE_TEXT_KEYS = frozenset({"note", "reason", "why", "description", "comment", "rationale"})
+# In a map change a label word joined to a name (candidate-api, probable.orders, arn:...:confirmed) is a name.
+NAME_SAFE_LABEL_WORD_RE = re.compile(
+    r"(?<![\w./:-])(?:confirmed|probable|candidate|recommended|root\s+cause|typesafe)(?![\w./-])(?!:\S)", re.IGNORECASE)
 
 
 def _free_text(value: Any, path: str):
-    """Yield (path, text) for every string under value, skipping identifier keys outside map_changes."""
+    """Yield (path, text) for every string under value, skipping identifier keys."""
     if isinstance(value, str):
         yield path, value
     elif isinstance(value, dict):
         for key, item in value.items():
-            if key in IDENTIFIER_KEYS and not path.startswith("map_changes"):
+            if key in IDENTIFIER_KEYS:
                 continue
             yield from _free_text(item, f"{path}.{key}" if path else str(key))
     elif isinstance(value, list):
@@ -697,15 +702,29 @@ def _free_text(value: Any, path: str):
             yield from _free_text(item, f"{path}[{index}]")
 
 
+def _map_change_text(changes: Any):
+    """Yield (path, text) for the prose of each map change: a text item, or the note fields of an object item."""
+    for index, item in enumerate(changes if isinstance(changes, list) else []):
+        if isinstance(item, str):
+            yield f"map_changes[{index}]", item
+        elif isinstance(item, dict):
+            for key, value in item.items():
+                if key in MAP_CHANGE_TEXT_KEYS:
+                    yield from _free_text(value, f"map_changes[{index}].{key}")
+
+
 def _check_label_words(report: dict, problems: list[str]) -> None:
     """Free text that the draft digest covers may not state a label; labels are printed from the judgments.
 
     The walk is over draft_text, the same fields the draft digest covers, so every printed field the draft writes
-    is checked."""
+    is checked. In map_changes only the prose is checked, and a label word joined to a name counts as the name."""
     message = "labels are printed from the judgments; describe what happened without them"
-    for path, text in _free_text(draft_text(report), ""):
-        if LABEL_WORD_RE.search(text):
-            problems.append(f"{path}: {message}")
+    text = draft_text(report)
+    changes = text.pop("map_changes")
+    found = [(path, words) for path, words in _free_text(text, "") if LABEL_WORD_RE.search(words)]
+    found += [(path, words) for path, words in _map_change_text(changes) if NAME_SAFE_LABEL_WORD_RE.search(words)]
+    for path, _ in found:
+        problems.append(f"{path}: {message}")
 
 
 def _draft_problems(report: Any, findings: dict[str, dict], config: TriageConfig) -> tuple[list[str], dict | None]:
