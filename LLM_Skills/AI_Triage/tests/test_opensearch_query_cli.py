@@ -360,6 +360,28 @@ def test_replay_evidence_is_marked(skill_dir, tmp_path, monkeypatch):
     fixtures.mkdir()
     monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(fixtures))
     case_dir = case_folder(tmp_path)
+    (case_dir / "case.json").write_text(json.dumps({"replay": True}))
     assert run(skill_dir, "count", *WINDOWED, "--case-dir", str(case_dir))[0] == 0
     document = json.loads(next((case_dir / "evidence").iterdir()).read_text())
     assert document["replay"] is True
+
+
+# A-I3: the case's replay state must match the session's
+
+def test_recorded_answers_are_never_written_into_a_live_case(skill_dir, tmp_path, monkeypatch, capsys):
+    fixtures = tmp_path / "fixtures"
+    fixtures.mkdir()
+    monkeypatch.setenv("AI_TRIAGE_FIXTURES", str(fixtures))
+    case_dir = case_folder(tmp_path)
+    code, transport = run(skill_dir, "count", *WINDOWED, "--case-dir", str(case_dir))
+    assert code == 2 and "made from live systems" in capsys.readouterr().err
+    assert not transport.requests and not (case_dir / "evidence").exists()
+
+
+def test_live_answers_are_never_written_into_a_replay_case(skill_dir, tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AI_TRIAGE_FIXTURES", raising=False)
+    case_dir = case_folder(tmp_path)
+    (case_dir / "case.json").write_text(json.dumps({"replay": True}))
+    code, transport = run(skill_dir, "count", *WINDOWED, "--case-dir", str(case_dir))
+    assert code == 2 and "made in replay mode" in capsys.readouterr().err
+    assert not transport.requests and not (case_dir / "evidence").exists()

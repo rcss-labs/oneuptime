@@ -7,6 +7,7 @@ A collector that raises is recorded as a CollectorError evidence error and the e
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +17,7 @@ from triage.collectors import Collector, all_collectors
 from triage.collectors.common import split_csv
 from triage.config import ConfigError, default_config_path, load_config
 from triage.context import CollectContext, SignInExpired
-from triage.case import CaseError, resolve_case_dir
+from triage.case import CaseError, check_replay, resolve_case_dir
 from triage.evidence import Evidence, EvidenceExists
 from triage.fixtures import FixtureError, fixture_dir, kube_runner_from_env, replay_banner, runner_from_env
 from triage.window import WindowError, make_window
@@ -24,6 +25,12 @@ from triage.cli import add_exit_codes, run
 
 GLOBAL_REGION = "us-east-1"  # hosts the global services
 SKILL_DIR = Path(__file__).resolve().parent.parent
+
+
+def _read_case(case_dir: Path) -> dict:
+    """case.json as a dict, so its replay state can be compared with the session's before anything is collected."""
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    return case if isinstance(case, dict) else {}
 
 
 def _list_line(collector: Collector) -> str:
@@ -144,9 +151,12 @@ def main(argv: list[str] | None = None, runner: Runner | None = None, kube_runne
     if args.case_dir:
         try:
             args.case_dir = resolve_case_dir(args.case_dir, config)
+            check_replay(_read_case(args.case_dir))
             evidence.ensure_new(args.case_dir, args.suffix)
         except CaseError as error:
             return _fail("; ".join(error.errors), 2)
+        except (OSError, ValueError) as error:
+            return _fail(f"cannot read case.json in {args.case_dir}: {error}", 2)
         except EvidenceExists as error:
             return _fail(str(error), 2)
     ctx = CollectContext(

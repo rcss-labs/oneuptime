@@ -384,6 +384,7 @@ def test_asked_lists_items_only_for_targets_the_collector_declares_as_lists(skil
 
 def test_replay_evidence_file_is_marked_and_the_banner_is_printed(skill_dir, replay_dir, tmp_path, fake_collector, no_real_calls, capsys):
     case = case_folder(tmp_path)
+    (case / "case.json").write_text(json.dumps({"replay": True}))
     assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case))) == 0
     assert "REPLAY" in capsys.readouterr().err
     document = json.loads(next((case / "evidence").iterdir()).read_text())
@@ -433,3 +434,21 @@ def test_the_evidence_file_is_written_only_when_it_is_new(skill_dir, fake_collec
     assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case)), runner=FakeAws({})) == 2
     assert "already exists; pass another --suffix to keep both" in capsys.readouterr().err
     assert target.read_text() == "written by another run"
+
+
+# A-I3: the case's replay state must match the session's (as case, findings, timeline and judge check)
+
+def test_recorded_evidence_is_never_written_into_a_live_case(skill_dir, replay_dir, tmp_path, fake_collector, no_real_calls, capsys):
+    case = case_folder(tmp_path)
+    assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case))) == 2
+    assert "made from live systems" in capsys.readouterr().err
+    assert fake_collector == [] and not (case / "evidence").exists()
+
+
+def test_live_evidence_is_never_written_into_a_replay_case(skill_dir, fake_collector, tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AI_TRIAGE_FIXTURES", raising=False)
+    case = case_folder(tmp_path)
+    (case / "case.json").write_text(json.dumps({"replay": True}))
+    assert collect.main(args(skill_dir, "--target", "thing=x", "--case-dir", str(case)), runner=FakeAws({})) == 2
+    assert "made in replay mode" in capsys.readouterr().err
+    assert fake_collector == [] and not (case / "evidence").exists()

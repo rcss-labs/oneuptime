@@ -53,8 +53,6 @@ def _build_parser() -> argparse.ArgumentParser:
         child = sub.add_parser(name, help=help_text, description=help_text, aliases=list(aliases), allow_abbrev=False)
         child.add_argument("--skill-dir", type=Path, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
         child.add_argument("--case-dir", type=Path, required=True)
-        child.add_argument("--allow-replay", action="store_true",
-                           help="engineer only: publish a case that was made from recordings (for tests)")
         return child
 
     audit = add("audit", "check the published files for secrets and write audit.json")
@@ -178,15 +176,17 @@ def _record_slack(args: argparse.Namespace, config) -> int:
     return 0
 
 
-def _refuse_replay(args: argparse.Namespace) -> bool:
-    if load_case_file(args.case_dir).get("replay") and not args.allow_replay:
+def _refuse_replay(args: argparse.Namespace, allow_replay: bool) -> bool:
+    if load_case_file(args.case_dir).get("replay") and not allow_replay:
         print("this case is a replay: its evidence comes from recordings, not from live systems; nothing is published",
               file=sys.stderr)
         return True
     return False
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, allow_replay: bool = False) -> int:
+    """allow_replay has no command-line option: a replay case is never published from the command line, and the
+    tests that publish one call this function."""
     args = _build_parser().parse_args(argv)
     handler = {"audit": _audit, "confluence": _confluence, "confluence-request": _confluence, "slack-message": _slack_message,
                "verify-confluence": _verify_confluence, "record-confluence": _record_confluence,
@@ -194,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(default_config_path(args.skill_dir))
         args.case_dir = resolve_case_dir(args.case_dir, config)
-        if _refuse_replay(args):
+        if _refuse_replay(args, allow_replay):
             return 1
         return handler(args, config)
     except PublishError as error:

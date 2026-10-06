@@ -419,8 +419,7 @@ def test_publishing_after_a_change_to_report_json_needs_a_new_render(scenario, t
     report = read_json(case.case_dir / "report.json")
     report["run"]["duration_minutes"] += 1  # a field the judgments do not cover, so a new render is still valid
     (case.case_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-    refused = case.script("publish audit", "publish.py", "audit", "--case-dir", str(case.case_dir), "--allow-replay",
-                          required=False)
+    refused = case.publish_replay("publish audit", "audit", "--case-dir", str(case.case_dir), required=False)
     assert refused["returncode"] == 1 and "rendered again" in refused["stderr"]
     assert not (case.case_dir / "audit.json").exists()
     case.render(required=True)
@@ -441,7 +440,7 @@ def test_a_replay_case_carries_the_replay_mark_everywhere(run):
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
-def test_publishing_a_replay_case_needs_allow_replay(scenario, tmp_path):
+def test_a_replay_case_is_never_published_from_the_command_line(scenario, tmp_path):
     folder = REPLAY_DIR / scenario
     case = start_case(folder, tmp_path)
     case.judge(favourable_judge(folder), apply_labels=True)
@@ -452,7 +451,11 @@ def test_publishing_a_replay_case_needs_allow_replay(scenario, tmp_path):
         assert refused["returncode"] == 1 and "replay" in refused["stderr"], name
         assert refused["stdout"] == ""
     assert not (case.case_dir / "audit.json").exists() and not (case.case_dir / "slack-message.md").exists()
-    allowed = case.script("publish audit with the option", "publish.py", "audit", "--case-dir", str(case.case_dir), "--allow-replay")
+    bypass = case.script("publish audit with the old option", "publish.py", "audit", "--case-dir", str(case.case_dir),
+                         "--allow-replay", required=False)
+    assert bypass["returncode"] == 2 and "--allow-replay" in bypass["stderr"]
+    assert not (case.case_dir / "audit.json").exists()
+    allowed = case.publish_replay("publish audit through the module function", "audit", "--case-dir", str(case.case_dir))
     assert allowed["returncode"] == 0
 
 
@@ -476,9 +479,9 @@ def test_a_copy_of_a_finished_run_is_refused_by_validate_render_judge_and_publis
         refused = [
             case.script("validate a copy", "report.py", "validate", "--case-dir", str(copy), required=False),
             case.script("render a copy", "report.py", "render", "--case-dir", str(copy), required=False),
-            case.script("audit a copy", "publish.py", "audit", "--case-dir", str(copy), "--allow-replay", required=False),
-            case.script("confluence a copy", "publish.py", "confluence", "--case-dir", str(copy), "--allow-replay", required=False),
-            case.script("slack a copy", "publish.py", "slack-message", "--case-dir", str(copy), "--allow-replay", required=False),
+            case.publish_replay("audit a copy", "audit", "--case-dir", str(copy), required=False),
+            case.publish_replay("confluence a copy", "confluence", "--case-dir", str(copy), required=False),
+            case.publish_replay("slack a copy", "slack-message", "--case-dir", str(copy), required=False),
         ]
         for record in refused:
             assert record["returncode"] == 2 and "not a case folder under" in record["stderr"], (record["step"], record["stderr"])
@@ -535,7 +538,7 @@ def test_a_report_that_cites_a_change_lookup_by_event_source_audits_clean(tmp_pa
     draft["causes"][2]["contradicting"].append("changes-1")
     case.judge(favourable_judge(folder), apply_labels=True, draft=draft)
     case.render(required=True)
-    audit = case.script("publish audit", "publish.py", "audit", "--case-dir", str(case.case_dir), "--allow-replay", required=False)
+    audit = case.publish_replay("publish audit", "audit", "--case-dir", str(case.case_dir), required=False)
     assert audit["returncode"] == 0, audit["stderr"]
 
 
@@ -567,10 +570,9 @@ def test_the_guard_allows_every_command_the_pipeline_ran_and_asks_before_a_map_c
     assert "judge run" in [step for step, _ in checked]
     assert len({command for _, command in checked}) == len(checked)  # no command stands in for another
     verdicts = {step: decide(command, context).kind for step, command in checked}
-    # --allow-replay exists for tests and the guard always asks about it; every other command is allowed.
-    asked = {step for step, kind in verdicts.items() if kind == ASK}
-    assert asked == {"publish audit", "publish confluence", "publish slack-message"}
-    assert [step for step, kind in verdicts.items() if kind not in (ALLOW, ASK)] == []
+    # The publish steps run in this process (the command line cannot publish a replay case); the commands the skill
+    # would run carry no bypass, so every command is allowed.
+    assert [step for step, kind in verdicts.items() if kind != ALLOW] == []
     apply_command = skill_style(
         [str(skill_dir / ".venv" / "bin" / "python"), str(skill_dir / "scripts" / "map_suggest.py"), "apply",
          "--case-dir", str(run["case_dir"]), "--service-name", "checkout-api"], home)

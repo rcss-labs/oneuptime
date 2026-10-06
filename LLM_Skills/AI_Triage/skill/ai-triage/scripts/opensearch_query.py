@@ -7,6 +7,7 @@ Exit codes: 0 done, 2 usage or config error, 5 refused by the read policy, 6 clu
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import sys
 from datetime import datetime, timedelta, timezone
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from triage.config import ConfigError, default_config_path, load_config
-from triage.case import CaseError, resolve_case_dir
+from triage.case import CaseError, check_replay, resolve_case_dir
 from triage.evidence import Evidence, EvidenceExists
 from triage.fixtures import FixtureError, fixture_dir, replay_banner, transport_from_env
 from triage.opensearch import queries
@@ -25,6 +26,12 @@ from triage.window import Window, WindowError, make_window
 from triage.cli import add_exit_codes, run
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
+
+
+def _read_case(case_dir: Path) -> dict:
+    """case.json as a dict, so its replay state can be compared with the session's before anything is collected."""
+    case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
+    return case if isinstance(case, dict) else {}
 INTERVALS = ("1m", "5m", "15m", "1h")
 STATE_WINDOW = timedelta(minutes=1)
 STATE_NOTE = "Reads the current state; takes no time range."
@@ -174,9 +181,12 @@ def main(argv: list[str] | None = None, transport: Transport | None = None) -> i
     if args.case_dir:
         try:
             args.case_dir = resolve_case_dir(args.case_dir, config)
+            check_replay(_read_case(args.case_dir))
             evidence.ensure_new(args.case_dir, args.suffix)
         except CaseError as error:
             return _fail("; ".join(error.errors), 2)
+        except (OSError, ValueError) as error:
+            return _fail(f"cannot read case.json in {args.case_dir}: {error}", 2)
         except EvidenceExists as error:
             return _fail(str(error), 2)
     client = OpenSearchClient(cluster, config.limits, transport=transport or urllib_transport)

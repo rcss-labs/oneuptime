@@ -373,10 +373,28 @@ def test_a_replay_case_is_refused_unless_allowed(skill_dir, case_dir, command):
     assert not (case_dir.parent.parent / ".publish-state.json").exists()
 
 
-def test_a_replay_case_publishes_with_allow_replay(skill_dir, case_dir):
+@pytest.mark.parametrize("command", ["audit", "confluence", "slack-message"])
+def test_the_command_line_has_no_replay_bypass(skill_dir, case_dir, command):
     _make_replay(case_dir)
-    result = run(skill_dir, "confluence", "--case-dir", str(case_dir), "--allow-replay")
-    assert result.returncode == 0, result.stderr
+    result = run(skill_dir, command, "--case-dir", str(case_dir), "--allow-replay")
+    assert result.returncode == 2 and "--allow-replay" in result.stderr and result.stdout == ""
+    assert not (case_dir.parent.parent / ".publish-state.json").exists()
+
+
+def _publish_main():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("publish_script", COMMAND)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.main
+
+
+def test_a_replay_case_publishes_only_through_the_module_function(skill_dir, case_dir, capsys):
+    _make_replay(case_dir)
+    main = _publish_main()
+    assert main(["confluence", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir)]) == 1
+    assert main(["confluence", "--case-dir", str(case_dir), "--skill-dir", str(skill_dir)], allow_replay=True) == 0
+    assert json.loads(capsys.readouterr().out)["title"]
 
 
 def test_confluence_writes_the_publish_state_after_a_clean_audit(skill_dir, case_dir):
@@ -384,7 +402,7 @@ def test_confluence_writes_the_publish_state_after_a_clean_audit(skill_dir, case
     assert result.returncode == 0, result.stderr
     request = json.loads(result.stdout)
     state = json.loads((case_dir.parent.parent / ".publish-state.json").read_text())
-    assert state["confluence"] == {"case_dir": str(case_dir.resolve()), "title": request["title"],
+    assert state["confluence"] == {"case_dir": str(case_dir.resolve()), "title": request["title"], "page_id": None,
                                    "body_sha256": request["body_sha256"], "written_at": "2026-10-04T12:00:00Z"}
     assert "slack" not in state
 
@@ -446,3 +464,14 @@ def test_verify_confluence_refuses_a_path_outside_the_intake_folder(skill_dir, c
     outside.write_text("# Report\n")
     result = run(skill_dir, "verify-confluence", "--case-dir", str(case_dir), "--body-file", str(outside))
     assert result.returncode == 1 and "intake" in result.stderr
+
+
+def test_the_publish_state_records_the_page_an_update_may_change(skill_dir, case_dir):
+    case = load_case(case_dir)
+    case["publish"] = {"confluence": {"page_id": "98765", "url": "https://wiki.example.com/p/98765", "at": "x"}}
+    save_case(case_dir, case)
+    resign(case_dir)
+    result = run(skill_dir, "confluence", "--case-dir", str(case_dir), "--now", "2026-10-04T12:00:00Z")
+    assert result.returncode == 0, result.stderr
+    state = json.loads((case_dir.parent.parent / ".publish-state.json").read_text())
+    assert state["confluence"]["page_id"] == "98765"
